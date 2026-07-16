@@ -31,6 +31,9 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Install Playwright Chromium
+        run: pnpm --filter @create-something/webflow-app-review-runtime-runner exec playwright install --with-deps chromium
+
       - name: Check formatting
         run: pnpm format:check
 
