@@ -1,0 +1,27 @@
+{
+  "name": "webflow-app-preflight",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Webflow App bundle preflight and server-owned production runtime validation",
+  "license": "MIT",
+  "scripts": {
+    "build": "pnpm build:packages && pnpm --filter @create-something/webflow-app-review-runtime-runner build && pnpm --filter @create-something/webflow-app-review-preflight-extension build && pnpm --filter @create-something/webflow-app-review-preflight-worker build && pnpm --filter @create-something/webflow-app-review-runtime-template build",
+    "build:packages": "pnpm --filter @create-something/bundle-scanner-core build && pnpm --filter @create-something/webflow-app-review-preflight build",
+    "build:e2b": "pnpm --filter @create-something/webflow-app-review-runtime-template build:e2b",
+    "bundle:extension": "pnpm --filter @create-something/webflow-app-review-preflight-extension bundle",
+    "check": "pnpm build:packages && pnpm --filter @create-something/bundle-scanner-core typecheck && pnpm --filter @create-something/webflow-app-review-preflight check && pnpm --filter @create-something/webflow-app-review-runtime-runner check && pnpm --filter @create-something/webflow-app-review-preflight-extension check && pnpm --filter @create-something/webflow-app-review-preflight-worker check && pnpm --filter @create-something/webflow-app-review-runtime-template check",
+    "dev:extension": "pnpm --filter @create-something/webflow-app-review-preflight-extension serve",
+    "dev:worker": "pnpm --filter @create-something/webflow-app-review-preflight-worker dev",
+    "format": "prettier --write package.json pnpm-workspace.yaml README.md .github/workflows/ci.yml packages/webflow-app-review-preflight/OPERATOR_RUNBOOK.md",
+    "format:check": "prettier --check package.json pnpm-workspace.yaml README.md .github/workflows/ci.yml packages/webflow-app-review-preflight/OPERATOR_RUNBOOK.md",
+    "test": "pnpm build:packages && pnpm --filter @create-something/bundle-scanner-core test && pnpm --filter @create-something/webflow-app-review-preflight test && pnpm --filter @create-something/webflow-app-review-runtime-runner test && pnpm --filter @create-something/webflow-app-review-preflight-extension test && pnpm --filter @create-something/webflow-app-review-preflight-worker test && pnpm --filter @create-something/webflow-app-review-runtime-template test"
+  },
+  "devDependencies": {
+    "prettier": "^3.7.4"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "packageManager": "pnpm@9.15.0"
+}
