@@ -29,6 +29,11 @@ One runtime test package represents one executable scenario:
 9. Package tests, type checks, production builds, formatting checks, and the Designer Extension bundle all pass.
 10. A real rendered UI flow proves the add, remove, prefill, and submit behavior. If authenticated Designer upload is not available without a consequential external change, the exact bundle and a short manual verification handoff are produced instead.
 11. The completed change is committed on `codex/CRE-1381-multi-runtime-sets`, pushed, opened for review, and recorded in Linear with verification and rollback evidence.
+12. Runtime-package preparation failures stay inside the runtime card, preserve the editable package, identify the affected runtime file when possible, and move focus to the actionable error.
+13. A valid lowercase SHA-256 deterministically supplies its matching `sha256-...` SRI value in the form; duplicate URLs and malformed pins are rejected before confirmation while the Worker retains the same authoritative checks.
+14. A completed Webflow observation exposes and renders each declared runtime file's loaded, executed-hash, and DOM-SRI outcomes rather than only aggregate booleans.
+15. The operator sees runtime-file count separately from evidence-artifact count, URL-derived file labels, and the runtime-file count in the confirmation checkpoint.
+16. The hardened flow is verified at a Designer-sized viewport, bundled, copied to Downloads with a new digest, committed, CI-green, and merged through PR 1 before CRE-1381 closes.
 
 ## Non-goals
 
@@ -40,7 +45,7 @@ One runtime test package represents one executable scenario:
 
 ## Primary verifier
 
-The primary verifier is a rendered operator flow using the built extension UI: begin with one runtime file, add a second, fill both pins, remove/re-add when relevant, submit, and inspect the resulting API payload. Automated component, runner, and Worker tests support this proof but do not replace the rendered flow.
+The primary verifier is a rendered operator flow using the built extension UI and local Worker/D1 at a Designer-sized viewport: begin with one runtime file, add a second, enter valid hashes, observe derived SRI values and URL-derived labels, reject a duplicate or invalid pin without losing the form, confirm the package count, submit, and inspect per-file observation results. Reload and prefill the saved package. Automated component, runner, and Worker tests support this proof but do not replace the rendered flow.
 
 ## Completion proof
 
@@ -48,14 +53,18 @@ The primary verifier is a rendered operator flow using the built extension UI: b
 - focused and full test/check/build outputs are clean;
 - the production extension bundle is verified and its SHA-256 recorded;
 - rendered-flow screenshots or trace evidence show the multi-runtime interaction;
+- the rendered error path keeps focus and editable state in the runtime card, while the completed state names every runtime and shows its three verification outcomes;
 - Git commit, push, pull request, and Linear evidence identify the exact revision;
-- rollback is the revert of the CRE-1381 commit and restoration of the previous single-file form.
+- the final branch head is CI-green and PR 1 is merged without deploying the Worker, E2B template, or Designer bundle;
+- rollback is the revert of the CRE-1381 merge and restoration of the previously approved Designer bundle.
 
 ## Blocker criteria
 
 Stop and report a blocker only when the same external condition prevents progress on three consecutive goal turns and no safe local or reviewable route remains. Authenticated deployment or Designer upload is an approval boundary, not evidence that the implementation itself is blocked.
 
-## Completion receipt
+## Prior milestone receipt
+
+This receipt proves the initial multi-runtime slice. User steering reopened the repo-local goal for the operator-readiness outcomes above, so this bundle is not the final upload artifact.
 
 - Implementation commit: `eb17b21` on `codex/CRE-1381-multi-runtime-sets`.
 - Draft review: <https://github.com/createsomethingtoday/webflow-app-preflight/pull/1>.
@@ -64,3 +73,12 @@ Stop and report a blocker only when the same external condition prevents progres
 - Upload artifact: `/Users/micahjohnson/Downloads/webflow-app-preflight-CRE-1381-multi-runtime.zip`, 180,010 bytes, SHA-256 `a3dc612ec3d509aee49ac35ee5ad53a45ec47f3355cef6e693d6031dfe3a4208`.
 - Linear evidence: CRE-1381 comment `e2b1c4b9-6a6a-4039-a211-7f907ebb4112`.
 - Approval boundary retained: the operator owns Designer upload; CRE-1264 owns the independent production pilot.
+
+## Operator-readiness verification receipt
+
+- Focused red/green coverage proves in-card error recovery, file-numbered Worker validation, SHA-derived SRI, duplicate rejection, per-file observation results, and singular/plural count copy.
+- Complete local verification: 122 tests, type checks, builds, formatting, and `git diff --check` passed.
+- Rendered Worker/D1 proof passed at 900×780 and 390×844 for duplicate recovery, two-file confirmation, Webflow-observed per-file results, reload, and two-file prefill.
+- Local screenshots: `output/playwright/runtime-duplicate-error-900.png`, `output/playwright/runtime-confirmation-900.png`, `output/playwright/runtime-results-900.png`, and `output/playwright/runtime-results-390.png` (ignored verification artifacts).
+- Final upload artifact: `/Users/micahjohnson/Downloads/webflow-app-preflight-CRE-1381-multi-runtime.zip`, 181,263 bytes, SHA-256 `90f7f79381dab093741dec96ee9e3986951efca7c3f07498ed4c4a896ac5f743`; `unzip -t` passed.
+- Promotion remains pending PR 1 review/CI/merge. No Worker, E2B template, or Designer Extension deployment occurred.

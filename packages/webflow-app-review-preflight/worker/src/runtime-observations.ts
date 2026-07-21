@@ -285,26 +285,38 @@ function parseArtifacts(value: unknown, env: Env): RuntimeArtifactPin[] {
     throw new RuntimeTestPackageError('Provide between 1 and 8 pinned runtime artifacts.');
   }
 
-  const unique = new Set<string>();
-  return value.map((item) => {
+  const positions = new Map<string, number>();
+  return value.map((item, index) => {
+    const file = `Runtime file ${index + 1}`;
     if (!item || typeof item !== 'object' || Array.isArray(item)) {
-      throw new RuntimeTestPackageError('Each runtime artifact must be an object.');
+      throw new RuntimeTestPackageError(`${file} must be an object.`);
     }
     const artifact = item as Record<string, unknown>;
-    const url = normalizeUrl(artifact.url, env, 'runtime');
-    if (unique.has(url.toString())) {
-      throw new RuntimeTestPackageError('Runtime artifact URLs must be unique.');
+    let url: URL;
+    try {
+      url = normalizeUrl(artifact.url, env, 'runtime');
+    } catch (error) {
+      if (error instanceof RuntimeTestPackageError) {
+        throw new RuntimeTestPackageError(`${file}: ${error.message}`);
+      }
+      throw error;
     }
-    unique.add(url.toString());
+    const previousIndex = positions.get(url.toString());
+    if (previousIndex !== undefined) {
+      throw new RuntimeTestPackageError(
+        `${file} duplicates runtime file ${previousIndex + 1}. Runtime artifact URLs must be unique.`
+      );
+    }
+    positions.set(url.toString(), index);
     if (typeof artifact.sha256 !== 'string' || !HEX_SHA256.test(artifact.sha256)) {
-      throw new RuntimeTestPackageError('Every runtime artifact requires a lowercase SHA-256.');
+      throw new RuntimeTestPackageError(`${file}: provide a lowercase SHA-256.`);
     }
     if (
       typeof artifact.integrity !== 'string' ||
       !artifact.integrity.startsWith('sha256-') ||
       artifact.integrity.length > 160
     ) {
-      throw new RuntimeTestPackageError('Every runtime artifact requires a SHA-256 SRI value.');
+      throw new RuntimeTestPackageError(`${file}: provide a SHA-256 SRI value.`);
     }
     const digestBytes = artifact.sha256
       .match(/.{2}/g)!
@@ -312,7 +324,7 @@ function parseArtifacts(value: unknown, env: Env): RuntimeArtifactPin[] {
       .join('');
     if (artifact.integrity !== `sha256-${btoa(digestBytes)}`) {
       throw new RuntimeTestPackageError(
-        'The runtime SHA-256 and SRI must describe the same SHA-256 bytes.'
+        `${file}: the SHA-256 and SRI must describe the same SHA-256 bytes.`
       );
     }
     return {
@@ -597,6 +609,7 @@ export async function listRuntimeTestPackages(
         ? (JSON.parse(row.evidence_manifest_json) as {
           cleanup?: { status?: unknown; residue?: unknown };
           negativeProxyCanary?: { outcome?: unknown };
+          runtimeArtifacts?: unknown;
           securityEvaluation?: {
             status?: unknown;
             predicates?: unknown;
@@ -610,6 +623,21 @@ export async function listRuntimeTestPackages(
       const securityStatus = manifest?.securityEvaluation?.status;
       const securityPredicates = manifest?.securityEvaluation?.predicates;
       const securityBlockers = manifest?.securityEvaluation?.blockers;
+      const runtimeObservations = Array.isArray(manifest?.runtimeArtifacts)
+        ? manifest.runtimeArtifacts.filter(
+            (item): item is Record<string, unknown> =>
+              item !== null && typeof item === 'object' && !Array.isArray(item)
+          )
+        : [];
+      const runtimeFiles = testPackage.runtimeArtifacts.map((pin) => {
+        const observed = runtimeObservations.find((item) => item.url === pin.url);
+        return {
+          url: pin.url,
+          loadedByPage: observed?.loadedByPage === true,
+          hashMatched: observed?.observedSha256 === pin.sha256,
+          integrityMatched: observed?.domIntegrity === pin.integrity
+        };
+      });
       const artifactRows =
         row.evidence_trust === 'webflow_observed'
         ? await env.DB.prepare(
@@ -650,6 +678,7 @@ export async function listRuntimeTestPackages(
                 blockers: securityBlockers.filter(
                   (item): item is string => typeof item === 'string'
                 ),
+                runtimeFiles,
                 cleanupStatus,
                 cleanupResidue: cleanupResidue.filter(
                   (item): item is string => typeof item === 'string'

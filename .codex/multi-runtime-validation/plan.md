@@ -2,7 +2,7 @@
 
 ## Current state
 
-- Goal phase: durable artifacts active. Formal registry activation was attempted and rejected because this task retains the unfinished, paused CRE-1264 production-pilot goal. That prior goal is preserved rather than falsely completed or replaced.
+- Goal phase: operator-readiness hardening resumed after the initial multi-runtime milestone. Formal registry activation remains unavailable because this task retains the unfinished, paused CRE-1264 production-pilot goal. That prior goal is preserved rather than falsely completed or replaced.
 - Canonical repository: `/Users/micahjohnson/Code/webflow-app-preflight`.
 - Branch: `codex/CRE-1381-multi-runtime-sets` from clean `origin/main`.
 - Linear: CRE-1381, In Progress, assigned to Micah Johnson.
@@ -61,7 +61,57 @@
 - [x] Open draft pull request <https://github.com/createsomethingtoday/webflow-app-preflight/pull/1> against `main` with invariant, tests, approval boundaries, and rollback.
 - [x] Record exact commit, PR, local checks, successful CI run `29862809657`, UI proof, bundle digest, and rollback in CRE-1381.
 - [ ] Mark CRE-1381 done only when no required implementation or review artifact remains.
-- [x] Mark the repo-local Ultragoal complete: every acceptance outcome has a receipt and the implementation is open for review. The thread-level goal registry remains reserved by the earlier paused CRE-1264 goal and was not overwritten.
+- [x] Mark the initial repo-local milestone complete. User steering subsequently reopened the same goal for operator-readiness hardening; the thread-level registry remains reserved by the earlier paused CRE-1264 goal and was not overwritten.
+
+## Phase 7: Make multi-runtime failures actionable
+
+Status: complete
+
+Implementation
+- [x] Add one failing public-interface test for runtime-package preparation errors remaining inside the runtime card with preserved editable state.
+- [x] Add one failing test for file-numbered Worker validation errors, then identify duplicate, malformed, and mismatched pins by runtime file.
+- [x] Add one failing form test for SHA-derived SRI, inline duplicate detection, URL-derived labels, and confirmation file count.
+- [x] Implement each slice minimally and refactor only while its focused tests stay green.
+
+Verification
+- [x] Focused extension and Worker tests pass without weakening existing server validation.
+- [x] Error focus, field values, and file-numbered messages are observable through the public UI/API interfaces.
+
+Exit criteria
+- [x] A junior operator can find and repair the failing runtime without searching the page or manually converting the same digest twice.
+
+## Phase 8: Make multi-runtime evidence reviewable
+
+Status: complete
+
+Implementation
+- [x] Add per-runtime observed outcomes to the sanitized observation summary.
+- [x] Render loaded, executed-hash, and DOM-SRI status for each declared runtime.
+- [x] Separate runtime-file count from evidence-artifact count in the completion checkpoint.
+
+Verification
+- [x] Worker tests prove the summary is sanitized, complete, and aligned with aggregate predicates.
+- [x] Extension tests prove a mixed two-file result names the failing runtime and each outcome.
+
+Exit criteria
+- [x] The aggregate verdict and every per-file row describe the same observation without exposing raw script contents or credentials.
+
+## Phase 9: Verify, bundle, and merge
+
+Status: in progress
+
+Implementation
+- [x] Rebuild the production extension bundle and replace the Downloads handoff with the verified archive.
+- [ ] Update PR 1 and CRE-1381 with the final evidence and rollback receipt.
+- [ ] Mark PR 1 ready, merge after required checks pass, and leave deployment/upload boundaries unchanged.
+
+Verification
+- [x] Run focused red/green tests, complete `pnpm test` (122 tests), `pnpm check`, `pnpm build`, `pnpm format:check`, and `git diff --check`.
+- [x] Exercise duplicate/error recovery, confirmation, Webflow-observed per-file results, reload/prefill, and narrow viewport on the rendered local Worker/D1 surface.
+- [ ] Record screenshots, final bundle size/SHA-256, clean working tree, successful CI, and merged-main readback. Local screenshots and the 181,263-byte bundle SHA-256 `90f7f79381dab093741dec96ee9e3986951efca7c3f07498ed4c4a896ac5f743` are recorded; CI and merged-main readback remain.
+
+Exit criteria
+- [ ] PR 1 is merged, CRE-1381 is complete with exact evidence, the final bundle is in Downloads, and no Worker/E2B/Designer deployment occurred.
 
 ## Approval boundaries
 

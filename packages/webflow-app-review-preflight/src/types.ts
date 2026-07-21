@@ -187,6 +187,12 @@ export interface RuntimeObservationSummary {
       negativeProxyBlocked: boolean;
     };
     blockers: string[];
+    runtimeFiles: Array<{
+      url: string;
+      loadedByPage: boolean;
+      hashMatched: boolean;
+      integrityMatched: boolean;
+    }>;
     cleanupStatus: 'clean' | 'residue_detected' | 'not_tested';
     cleanupResidue: string[];
     negativeProxyOutcome: 'blocked' | 'exposed' | 'error';

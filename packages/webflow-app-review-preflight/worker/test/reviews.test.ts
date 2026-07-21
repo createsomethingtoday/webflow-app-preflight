@@ -1146,7 +1146,7 @@ describe('review API', () => {
     expect(response.status).toBe(400);
     expect(await response.json()).toMatchObject({
       error: 'invalid_runtime_test_package',
-      message: expect.stringMatching(/same SHA-256 bytes/i)
+      message: expect.stringMatching(/Runtime file 1.*same SHA-256 bytes/i)
     });
   });
 
@@ -1198,7 +1198,7 @@ describe('review API', () => {
     expect(response.status).toBe(400);
     await expect(response.json()).resolves.toMatchObject({
       error: 'invalid_runtime_test_package',
-      message: expect.stringMatching(/URLs must be unique/i)
+      message: expect.stringMatching(/Runtime file 2.*duplicates runtime file 1/i)
     });
   });
 
@@ -1825,6 +1825,50 @@ describe('review API', () => {
     const storedArtifact = await env.ARTIFACTS.get(acceptedBody.artifacts[0]!.objectKey);
     expect(storedArtifact).not.toBeNull();
     expect(new Uint8Array(await storedArtifact!.arrayBuffer())).toEqual(screenshot);
+
+    const packagesAfterEvidence = await exports.default.fetch(
+      new Request(
+        `https://preflight.test/v1/reviews/${created.review.id}/runtime-test-packages`,
+        {
+          headers: {
+            authorization: 'Bearer test-token',
+            origin: 'http://localhost:1337'
+          }
+        }
+      )
+    );
+    const packagesAfterBody = await packagesAfterEvidence.json<{
+      testPackages: Array<{
+        id: string;
+        observation: {
+          evidence: {
+            runtimeFiles: Array<{
+              url: string;
+              loadedByPage: boolean;
+              hashMatched: boolean;
+              integrityMatched: boolean;
+            }>;
+          } | null;
+        } | null;
+      }>;
+    }>();
+    expect(
+      packagesAfterBody.testPackages.find((item) => item.id === packageBody.testPackage.id)
+        ?.observation?.evidence?.runtimeFiles
+    ).toEqual([
+      {
+        url: 'http://127.0.0.1:4173/runtime-v1.js',
+        loadedByPage: true,
+        hashMatched: true,
+        integrityMatched: true
+      },
+      {
+        url: 'http://127.0.0.1:4173/runtime-v2.js',
+        loadedByPage: true,
+        hashMatched: true,
+        integrityMatched: true
+      }
+    ]);
 
     const reviewAfterEvidence = await exports.default.fetch(
       new Request(`https://preflight.test/v1/reviews/${created.review.id}`, {

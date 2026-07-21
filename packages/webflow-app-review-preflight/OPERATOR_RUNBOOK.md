@@ -29,7 +29,7 @@ Have these items ready:
 - the Webflow site or installation ID
 - the exact URL for each production runtime file that runs in the test
 - the SHA-256 for each runtime file
-- the matching SRI value for each file
+- the matching SRI value for each file; the app calculates it from a valid SHA-256
 - a CSS selector that appears only when the runtime is ready
 - the approved proxy-check URL template
 
@@ -104,15 +104,15 @@ Use a separate Runtime Test Package when the files do not run together. For exam
 For each added file:
 
 1. use an immutable URL
-2. calculate SHA-256 and SRI from the same downloaded bytes
+2. calculate SHA-256 from the downloaded bytes; the app supplies the matching SRI
 3. confirm the file runs on the dedicated test site
 4. keep it in the package only if it belongs to this exact scenario
 
 A runtime may create a script element for a declared file. That file still has to load and match its own SHA-256 and SRI. A child script that is not declared in the runtime set remains a security blocker. Declaring a file is test input; it does not close a bundle finding or create review approval.
 
-### Get SHA-256 and SRI from the same runtime file
+### Get SHA-256 and verify the matching SRI
 
-If a runtime URL is public, download it once and calculate both values from that file:
+If a runtime URL is public, download it once and calculate its SHA-256:
 
 ```bash
 export RUNTIME_URL="https://cdn.example.com/runtime/version/runtime.js"
@@ -122,6 +122,8 @@ openssl dgst -sha256 -binary /tmp/app-review-runtime.js | openssl base64 -A
 ```
 
 Use the 64-character value from `shasum` as **SHA-256**. Add `sha256-` before the Base64 value from `openssl` and use the result as **Script integrity (SRI)**.
+
+In the Designer Extension, entering a valid lowercase SHA-256 fills the SRI field automatically. The OpenSSL result is an optional independent check or the value to use when calling the API directly. If the two values disagree, stop and download the immutable runtime again.
 
 Both values must describe the exact bytes served by that runtime URL. Repeat the calculation for every file in the runtime set. If a later download produces different values, the URL is not immutable enough for this package.
 
@@ -205,6 +207,8 @@ The app checks each fact separately:
 - the proxy canary was blocked
 
 A blocked result is useful evidence. It means the browser ran, but the app did not meet one or more runtime rules.
+
+Open **Runtime file results** to find the exact file that failed. Each row reports **Loaded**, **Hash matched**, and **SRI matched** separately. The runtime-file count tells you how many declared files were checked; the evidence-artifact count includes screenshots and sanitized logs, so it is usually larger.
 
 ### Proxy canary
 
