@@ -777,7 +777,13 @@ async function capture(
       .map((script) => script.src)
       .slice(0, 100);
     const pageWorldRuntimeCreatedScripts = installedState.scripts
-      .filter((script) => script.runtimeCreated && script.src && script.src !== '[invalid-url]')
+      .filter(
+        (script) =>
+          script.runtimeCreated &&
+          script.src &&
+          script.src !== '[invalid-url]' &&
+          !pinnedUrls.has(script.src)
+      )
       .map((script) => script.src)
       .slice(0, 100);
     const unreviewedRuntimeScripts = [

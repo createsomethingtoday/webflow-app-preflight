@@ -24674,9 +24674,7 @@
     const [confirm, setConfirm] = (0, import_react.useState)(false);
     const [targetUrl, setTargetUrl] = (0, import_react.useState)("");
     const [sandboxInstallationId, setSandboxInstallationId] = (0, import_react.useState)("");
-    const [artifactUrl, setArtifactUrl] = (0, import_react.useState)(discoveredArtifactUrl);
-    const [artifactSha256, setArtifactSha256] = (0, import_react.useState)("");
-    const [integrity, setIntegrity] = (0, import_react.useState)("");
+    const [runtimeArtifacts, setRuntimeArtifacts] = (0, import_react.useState)([{ url: discoveredArtifactUrl, sha256: "", integrity: "" }]);
     const [readySelector, setReadySelector] = (0, import_react.useState)("[data-runtime-ready]");
     const [proxyTemplate, setProxyTemplate] = (0, import_react.useState)("");
     const [showNewPackage, setShowNewPackage] = (0, import_react.useState)(false);
@@ -24687,12 +24685,11 @@
       setShowNewPackage(false);
     }, [latest?.id]);
     const fillFromPackage = (source) => {
-      const artifact = source?.runtimeArtifacts[0];
       setTargetUrl(source?.target.url ?? "");
       setSandboxInstallationId(source?.sandboxInstallationId ?? "");
-      setArtifactUrl(artifact?.url ?? discoveredArtifactUrl);
-      setArtifactSha256(artifact?.sha256 ?? "");
-      setIntegrity(artifact?.integrity ?? "");
+      setRuntimeArtifacts(
+        source?.runtimeArtifacts.length ? source.runtimeArtifacts.map((artifact) => ({ ...artifact })) : [{ url: discoveredArtifactUrl, sha256: "", integrity: "" }]
+      );
       setReadySelector(source?.lifecycle.readySelector ?? "[data-runtime-ready]");
       setProxyTemplate(source?.negativeProxyProbe.urlTemplate ?? "");
     };
@@ -24714,9 +24711,7 @@
           mode: "installation_allowlist",
           expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1e3).toISOString()
         },
-        runtimeArtifacts: [
-          { url: artifactUrl, sha256: artifactSha256, integrity }
-        ],
+        runtimeArtifacts,
         negativeProxyProbe: {
           method: "GET",
           urlTemplate: proxyTemplate
@@ -24843,7 +24838,7 @@
               children: [
                 previous ? /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "prefill-note", role: "status", children: [
                   /* @__PURE__ */ (0, import_jsx_runtime.jsx)("strong", { children: "Previous setup loaded" }),
-                  /* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", { children: "We reused the last test site, runtime pin, selector, and proxy check. Review the values before continuing; Webflow will verify the runtime bytes and SRI again for this bundle." })
+                  /* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", { children: "We reused the last test site, runtime pins, selector, and proxy check. Review the values before continuing. Webflow will verify every runtime file and its SRI again for this bundle." })
                 ] }) : null,
                 /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("fieldset", { children: [
                   /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("legend", { children: [
@@ -24862,19 +24857,72 @@
                 /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("fieldset", { children: [
                   /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("legend", { children: [
                     /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: "2" }),
-                    " Pin the reviewed runtime"
+                    " Pin the reviewed runtime set"
                   ] }),
-                  /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("label", { children: [
-                    "Immutable runtime URL",
-                    /* @__PURE__ */ (0, import_jsx_runtime.jsx)("input", { required: true, type: "url", value: artifactUrl, onChange: (event) => setArtifactUrl(event.target.value) })
-                  ] }),
-                  /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("label", { children: [
-                    "SHA-256",
-                    /* @__PURE__ */ (0, import_jsx_runtime.jsx)("input", { required: true, pattern: "[a-f0-9]{64}", value: artifactSha256, onChange: (event) => setArtifactSha256(event.target.value), placeholder: "64 lowercase hex characters" })
-                  ] }),
-                  /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("label", { children: [
-                    "Script integrity (SRI)",
-                    /* @__PURE__ */ (0, import_jsx_runtime.jsx)("input", { required: true, value: integrity, onChange: (event) => setIntegrity(event.target.value), placeholder: "sha256-\u2026" })
+                  /* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", { className: "runtime-set-intro", children: "List every JavaScript file that runs in this test. Each file must match its own SHA-256 and SRI pin." }),
+                  runtimeArtifacts.map((artifact, index) => {
+                    const number = index + 1;
+                    const suffix = index === 0 ? "" : ` \u2014 file ${number}`;
+                    const update = (field, value) => {
+                      setRuntimeArtifacts(
+                        (current) => current.map(
+                          (item, itemIndex) => itemIndex === index ? { ...item, [field]: value } : item
+                        )
+                      );
+                    };
+                    return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("section", { className: "runtime-file", children: [
+                      /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "runtime-file-heading", children: [
+                        /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("h3", { children: [
+                          "Runtime file ",
+                          number
+                        ] }),
+                        index > 0 ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
+                          "button",
+                          {
+                            className: "button button-tertiary",
+                            type: "button",
+                            "aria-label": `Remove runtime file ${number}`,
+                            onClick: () => {
+                              setRuntimeArtifacts(
+                                (current) => current.filter((_, itemIndex) => itemIndex !== index)
+                              );
+                            },
+                            children: "Remove"
+                          }
+                        ) : null
+                      ] }),
+                      /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("label", { children: [
+                        `Immutable runtime URL${suffix}`,
+                        /* @__PURE__ */ (0, import_jsx_runtime.jsx)("input", { required: true, type: "url", value: artifact.url, onChange: (event) => update("url", event.target.value) })
+                      ] }),
+                      /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("label", { children: [
+                        `SHA-256${suffix}`,
+                        /* @__PURE__ */ (0, import_jsx_runtime.jsx)("input", { required: true, pattern: "[a-f0-9]{64}", value: artifact.sha256, onChange: (event) => update("sha256", event.target.value), placeholder: "64 lowercase hex characters" })
+                      ] }),
+                      /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("label", { children: [
+                        `Script integrity (SRI)${suffix}`,
+                        /* @__PURE__ */ (0, import_jsx_runtime.jsx)("input", { required: true, value: artifact.integrity, onChange: (event) => update("integrity", event.target.value), placeholder: "sha256-\u2026" })
+                      ] })
+                    ] }, index);
+                  }),
+                  /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("details", { className: "runtime-set-settings", open: runtimeArtifacts.length > 1 || void 0, children: [
+                    /* @__PURE__ */ (0, import_jsx_runtime.jsx)("summary", { children: "More runtime files" }),
+                    /* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", { children: "Add a file only when it must execute in this same test. Use another test package for region, plan, or build variants that do not run together." }),
+                    /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
+                      "button",
+                      {
+                        className: "button button-secondary",
+                        type: "button",
+                        disabled: runtimeArtifacts.length >= 8,
+                        onClick: () => {
+                          setRuntimeArtifacts(
+                            (current) => current.length >= 8 ? current : [...current, { url: "", sha256: "", integrity: "" }]
+                          );
+                        },
+                        children: "Add another runtime file"
+                      }
+                    ),
+                    runtimeArtifacts.length >= 8 ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)("small", { children: "Eight runtime files is the limit for one test package." }) : null
                   ] })
                 ] }),
                 /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("details", { className: "advanced-settings", children: [
@@ -25216,7 +25264,7 @@
   }
 
   // src/config.ts
-  var PREFLIGHT_API_BASE = true ? "" : "";
+  var PREFLIGHT_API_BASE = true ? "https://webflow-app-review-preflight.createsomething.workers.dev" : "";
 
   // src/api.ts
   function apiBase() {

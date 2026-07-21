@@ -225,9 +225,9 @@ function RuntimeObservationCard({
   const [confirm, setConfirm] = useState(false);
   const [targetUrl, setTargetUrl] = useState('');
   const [sandboxInstallationId, setSandboxInstallationId] = useState('');
-  const [artifactUrl, setArtifactUrl] = useState(discoveredArtifactUrl);
-  const [artifactSha256, setArtifactSha256] = useState('');
-  const [integrity, setIntegrity] = useState('');
+  const [runtimeArtifacts, setRuntimeArtifacts] = useState<
+    RuntimeTestPackageInput['runtimeArtifacts']
+  >([{ url: discoveredArtifactUrl, sha256: '', integrity: '' }]);
   const [readySelector, setReadySelector] = useState('[data-runtime-ready]');
   const [proxyTemplate, setProxyTemplate] = useState('');
   const [showNewPackage, setShowNewPackage] = useState(false);
@@ -249,12 +249,13 @@ function RuntimeObservationCard({
   }, [latest?.id]);
 
   const fillFromPackage = (source: RuntimeTestPackageView | null) => {
-    const artifact = source?.runtimeArtifacts[0];
     setTargetUrl(source?.target.url ?? '');
     setSandboxInstallationId(source?.sandboxInstallationId ?? '');
-    setArtifactUrl(artifact?.url ?? discoveredArtifactUrl);
-    setArtifactSha256(artifact?.sha256 ?? '');
-    setIntegrity(artifact?.integrity ?? '');
+    setRuntimeArtifacts(
+      source?.runtimeArtifacts.length
+        ? source.runtimeArtifacts.map((artifact) => ({ ...artifact }))
+        : [{ url: discoveredArtifactUrl, sha256: '', integrity: '' }]
+    );
     setReadySelector(source?.lifecycle.readySelector ?? '[data-runtime-ready]');
     setProxyTemplate(source?.negativeProxyProbe.urlTemplate ?? '');
   };
@@ -279,9 +280,7 @@ function RuntimeObservationCard({
         mode: 'installation_allowlist',
         expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString()
       },
-      runtimeArtifacts: [
-        { url: artifactUrl, sha256: artifactSha256, integrity }
-      ],
+      runtimeArtifacts,
       negativeProxyProbe: {
         method: 'GET',
         urlTemplate: proxyTemplate
@@ -429,9 +428,9 @@ function RuntimeObservationCard({
             <div className="prefill-note" role="status">
               <strong>Previous setup loaded</strong>
               <p>
-                We reused the last test site, runtime pin, selector, and proxy check. Review the
-                values before continuing; Webflow will verify the runtime bytes and SRI again for
-                this bundle.
+                We reused the last test site, runtime pins, selector, and proxy check. Review the
+                values before continuing. Webflow will verify every runtime file and its SRI again
+                for this bundle.
               </p>
             </div>
           ) : null}
@@ -447,19 +446,82 @@ function RuntimeObservationCard({
             </label>
           </fieldset>
           <fieldset>
-            <legend><span>2</span> Pin the reviewed runtime</legend>
-            <label>
-              Immutable runtime URL
-              <input required type="url" value={artifactUrl} onChange={(event) => setArtifactUrl(event.target.value)} />
-            </label>
-            <label>
-              SHA-256
-              <input required pattern="[a-f0-9]{64}" value={artifactSha256} onChange={(event) => setArtifactSha256(event.target.value)} placeholder="64 lowercase hex characters" />
-            </label>
-            <label>
-              Script integrity (SRI)
-              <input required value={integrity} onChange={(event) => setIntegrity(event.target.value)} placeholder="sha256-…" />
-            </label>
+            <legend><span>2</span> Pin the reviewed runtime set</legend>
+            <p className="runtime-set-intro">
+              List every JavaScript file that runs in this test. Each file must match its own
+              SHA-256 and SRI pin.
+            </p>
+            {runtimeArtifacts.map((artifact, index) => {
+              const number = index + 1;
+              const suffix = index === 0 ? '' : ` — file ${number}`;
+              const update = (
+                field: keyof RuntimeTestPackageInput['runtimeArtifacts'][number],
+                value: string
+              ) => {
+                setRuntimeArtifacts((current) =>
+                  current.map((item, itemIndex) =>
+                    itemIndex === index ? { ...item, [field]: value } : item
+                  )
+                );
+              };
+              return (
+                <section className="runtime-file" key={index}>
+                  <div className="runtime-file-heading">
+                    <h3>Runtime file {number}</h3>
+                    {index > 0 ? (
+                      <button
+                        className="button button-tertiary"
+                        type="button"
+                        aria-label={`Remove runtime file ${number}`}
+                        onClick={() => {
+                          setRuntimeArtifacts((current) =>
+                            current.filter((_, itemIndex) => itemIndex !== index)
+                          );
+                        }}
+                      >
+                        Remove
+                      </button>
+                    ) : null}
+                  </div>
+                  <label>
+                    {`Immutable runtime URL${suffix}`}
+                    <input required type="url" value={artifact.url} onChange={(event) => update('url', event.target.value)} />
+                  </label>
+                  <label>
+                    {`SHA-256${suffix}`}
+                    <input required pattern="[a-f0-9]{64}" value={artifact.sha256} onChange={(event) => update('sha256', event.target.value)} placeholder="64 lowercase hex characters" />
+                  </label>
+                  <label>
+                    {`Script integrity (SRI)${suffix}`}
+                    <input required value={artifact.integrity} onChange={(event) => update('integrity', event.target.value)} placeholder="sha256-…" />
+                  </label>
+                </section>
+              );
+            })}
+            <details className="runtime-set-settings" open={runtimeArtifacts.length > 1 || undefined}>
+              <summary>More runtime files</summary>
+              <p>
+                Add a file only when it must execute in this same test. Use another test package
+                for region, plan, or build variants that do not run together.
+              </p>
+              <button
+                className="button button-secondary"
+                type="button"
+                disabled={runtimeArtifacts.length >= 8}
+                onClick={() => {
+                  setRuntimeArtifacts((current) =>
+                    current.length >= 8
+                      ? current
+                      : [...current, { url: '', sha256: '', integrity: '' }]
+                  );
+                }}
+              >
+                Add another runtime file
+              </button>
+              {runtimeArtifacts.length >= 8 ? (
+                <small>Eight runtime files is the limit for one test package.</small>
+              ) : null}
+            </details>
           </fieldset>
           <details className="advanced-settings">
             <summary>Runtime-ready selector and proxy check</summary>

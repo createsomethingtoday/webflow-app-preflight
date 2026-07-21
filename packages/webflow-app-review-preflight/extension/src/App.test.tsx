@@ -474,6 +474,135 @@ describe('App Review Preflight extension', () => {
     expect(screen.queryByText('Share')).not.toBeInTheDocument();
   });
 
+  test('prepares one execution scenario with every reviewed runtime file', async () => {
+    const review = consentProReview();
+    const createRuntimeTestPackage = vi.fn<PreflightApi['createRuntimeTestPackage']>(
+      async (_reviewId, input) => ({
+        schemaVersion: 'runtime_test_package.v1',
+        id: 'runtime-set-package',
+        reviewId: review.id,
+        reviewVersionId: review.latestVersion.id,
+        bundleSha256: review.latestVersion.result.artifact.sha256,
+        status: 'ready',
+        trust: 'partner_supplied',
+        target: { url: input.targetUrl, host: 'app-review-sandbox.webflow.io' },
+        sandboxInstallationId: input.sandboxInstallationId,
+        license: input.license,
+        runtimeArtifacts: input.runtimeArtifacts,
+        negativeProxyProbe: input.negativeProxyProbe,
+        lifecycle: input.lifecycle,
+        evidence: null,
+        createdAt: '2026-07-15T00:00:00.000Z',
+        observation: null
+      })
+    );
+    const runtimeApi: PreflightApi = {
+      ...api,
+      listReviews: async () => [{
+        id: review.id,
+        name: review.name,
+        updatedAt: review.updatedAt,
+        latestSequence: 1,
+        readiness: 'changes_required',
+        appName: 'Consent Pro by Finsweet',
+        coverage: review.latestVersion.result.coverage
+      }],
+      getReview: async () => review,
+      listRuntimeTestPackages: async () => [],
+      createRuntimeTestPackage
+    };
+
+    render(<App api={runtimeApi} />);
+    fireEvent.click(await screen.findByRole('button', { name: /Consent Pro preflight/i }));
+
+    expect(await screen.findByRole('heading', { name: 'Runtime file 1' })).toBeVisible();
+    expect(screen.queryByRole('heading', { name: 'Runtime file 2' })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByText('More runtime files'));
+    expect(screen.getByText(/must execute in this same test/i)).toBeVisible();
+    fireEvent.click(screen.getByRole('button', { name: 'Add another runtime file' }));
+    expect(screen.getByRole('heading', { name: 'Runtime file 2' })).toBeVisible();
+
+    fireEvent.change(screen.getByLabelText('Published Webflow test URL'), {
+      target: { value: 'https://app-review-sandbox.webflow.io' }
+    });
+    fireEvent.change(screen.getByLabelText('Webflow installation or site ID'), {
+      target: { value: 'webflow-sandbox-site-123' }
+    });
+    fireEvent.change(screen.getByLabelText('Immutable runtime URL'), {
+      target: { value: 'https://api.consentpro.com/v2/cdn/runtime-v1.js' }
+    });
+    fireEvent.change(screen.getByLabelText('SHA-256'), {
+      target: { value: 'a'.repeat(64) }
+    });
+    fireEvent.change(screen.getByLabelText('Script integrity (SRI)'), {
+      target: { value: 'sha256-runtime-v1' }
+    });
+    fireEvent.change(screen.getByLabelText('Immutable runtime URL — file 2'), {
+      target: { value: 'https://api.consentpro.com/v2/cdn/preferences-v1.js' }
+    });
+    fireEvent.change(screen.getByLabelText('SHA-256 — file 2'), {
+      target: { value: 'b'.repeat(64) }
+    });
+    fireEvent.change(screen.getByLabelText('Script integrity (SRI) — file 2'), {
+      target: { value: 'sha256-preferences-v1' }
+    });
+    fireEvent.click(screen.getByText('Runtime-ready selector and proxy check'));
+    fireEvent.change(screen.getByLabelText('Proxy probe URL template'), {
+      target: { value: 'https://api.consentpro.com/v2/proxy?url={canaryUrl}' }
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Prepare Webflow run' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm test package' }));
+
+    await waitFor(() => expect(createRuntimeTestPackage).toHaveBeenCalledTimes(1));
+    expect(createRuntimeTestPackage).toHaveBeenCalledWith(
+      review.id,
+      expect.objectContaining({
+        runtimeArtifacts: [
+          {
+            url: 'https://api.consentpro.com/v2/cdn/runtime-v1.js',
+            sha256: 'a'.repeat(64),
+            integrity: 'sha256-runtime-v1'
+          },
+          {
+            url: 'https://api.consentpro.com/v2/cdn/preferences-v1.js',
+            sha256: 'b'.repeat(64),
+            integrity: 'sha256-preferences-v1'
+          }
+        ]
+      })
+    );
+  });
+
+  test('caps a runtime set at eight files and lets the operator remove extras', async () => {
+    const review = consentProReview();
+    const runtimeApi: PreflightApi = {
+      ...api,
+      listReviews: async () => [{
+        id: review.id,
+        name: review.name,
+        updatedAt: review.updatedAt,
+        latestSequence: 1,
+        readiness: 'changes_required',
+        appName: 'Consent Pro by Finsweet',
+        coverage: review.latestVersion.result.coverage
+      }],
+      getReview: async () => review
+    };
+
+    render(<App api={runtimeApi} />);
+    fireEvent.click(await screen.findByRole('button', { name: /Consent Pro preflight/i }));
+    fireEvent.click(await screen.findByText('More runtime files'));
+    const add = screen.getByRole('button', { name: 'Add another runtime file' });
+    for (let count = 1; count < 8; count += 1) fireEvent.click(add);
+
+    expect(screen.getByRole('heading', { name: 'Runtime file 8' })).toBeVisible();
+    expect(add).toBeDisabled();
+    expect(screen.getByText(/Eight runtime files is the limit/i)).toBeVisible();
+    fireEvent.click(screen.getByRole('button', { name: 'Remove runtime file 8' }));
+    expect(screen.queryByRole('heading', { name: 'Runtime file 8' })).not.toBeInTheDocument();
+    expect(add).toBeEnabled();
+  });
+
   test('reopens the selected saved run after the extension reloads', async () => {
     const review = consentProReview(2);
     localStorage.setItem('app-review-preflight.selected-review', review.id);
@@ -524,6 +653,10 @@ describe('App Review Preflight extension', () => {
         url: 'https://api.consentpro.com/v2/cdn/runtime/immutable.js',
         sha256: 'd'.repeat(64),
         integrity: 'sha256-3d3d3d3d'
+      }, {
+        url: 'https://api.consentpro.com/v2/cdn/preferences/immutable.js',
+        sha256: 'e'.repeat(64),
+        integrity: 'sha256-4e4e4e4e'
       }],
       negativeProxyProbe: {
         method: 'GET' as const,
@@ -590,6 +723,14 @@ describe('App Review Preflight extension', () => {
     );
     expect(screen.getByLabelText('SHA-256')).toHaveValue('d'.repeat(64));
     expect(screen.getByLabelText('Script integrity (SRI)')).toHaveValue('sha256-3d3d3d3d');
+    expect(screen.getByRole('heading', { name: 'Runtime file 2' })).toBeVisible();
+    expect(screen.getByLabelText('Immutable runtime URL — file 2')).toHaveValue(
+      'https://api.consentpro.com/v2/cdn/preferences/immutable.js'
+    );
+    expect(screen.getByLabelText('SHA-256 — file 2')).toHaveValue('e'.repeat(64));
+    expect(screen.getByLabelText('Script integrity (SRI) — file 2')).toHaveValue(
+      'sha256-4e4e4e4e'
+    );
     expect(screen.getByLabelText('Ready selector')).toHaveValue('[data-consent-pro-ready]');
     expect(screen.getByLabelText('Proxy probe URL template')).toHaveValue(
       'https://api.consentpro.com/v2/proxy?url={canaryUrl}'

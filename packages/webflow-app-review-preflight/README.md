@@ -20,9 +20,9 @@ The Hybrid App has two intentional user surfaces over one evidence system:
 
 The reviewer web app is the reason this is a Hybrid App. A separate browser extension is not part of the required architecture. Historical companion records and endpoints may remain readable during migration, but they do not appear in the active validation flow or contribute to the security result.
 
-Reviewer reruns must preserve the original review-version ID, bundle SHA-256, published target, installation ID, pinned runtime SHA-256/SRI, ready selector, and negative proxy probe. A replay creates a new immutable observation linked to that package; it never overwrites an earlier result. If any required binding is stale or missing, the rerun stays blocked until a new package is prepared.
+Reviewer reruns must preserve the original review-version ID, bundle SHA-256, published target, installation ID, complete pinned runtime set, ready selector, and negative proxy probe. A replay creates a new immutable observation linked to that package; it never overwrites an earlier result. If any required binding is stale or missing, the rerun stays blocked until a new package is prepared.
 
-When a developer uploads a revision, the Designer Extension pre-fills the new Runtime Test Package from the most recent package for that review: the dedicated test site, installation ID, runtime pin, selector, and proxy probe. The form marks those values as prior test input and asks the developer to review them. A prior package or Webflow observation never transfers to the new bundle; the new version starts unprepared and receives its own immutable evidence only after another Webflow-controlled run.
+When a developer uploads a revision, the Designer Extension pre-fills the new Runtime Test Package from the most recent package for that review: the dedicated test site, installation ID, every runtime pin, selector, and proxy probe. The form marks those values as prior test input and asks the developer to review them. A prior package or Webflow observation never transfers to the new bundle; the new version starts unprepared and receives its own immutable evidence only after another Webflow-controlled run.
 
 ## Package boundaries
 
@@ -48,7 +48,7 @@ The reviewer surface must keep bundle/source visibility, source-map gaps, iframe
 1. The extension gets a short-lived Webflow ID token and uploads the zip to the Worker.
 2. The Worker hashes and stores the original bytes, runs deterministic rules, persists the policy snapshot, and returns Designer Extension and production-runtime coverage separately.
 3. Revisions create immutable versions and return resolved, remaining, and new rule IDs.
-4. A developer prepares a version-bound Runtime Test Package in the Designer Extension. A reviewer may inspect or replay the same package from the reviewer web app. The package records the dedicated published target, installation allowlist, pinned runtime bytes, SRI, ready selector, and negative proxy probe as test input—not evidence.
+4. A developer prepares a version-bound Runtime Test Package in the Designer Extension. A reviewer may inspect or replay the same package from the reviewer web app. The package records the dedicated published target, installation allowlist, one to eight runtime files with individual SHA-256/SRI pins, ready selector, and negative proxy probe as test input—not evidence. Every file in one package must execute in the same scenario; mutually exclusive variants use separate packages.
 5. The developer can request a fresh run for their own ready package from the Designer Extension. The Worker verifies ownership and package validity, creates the exact immutable E2B template build through E2B's control plane, and sends the one-time runner capability only to that sandbox's restricted `/run` route. Neither the Designer Extension nor the developer browser receives the capability or E2B credential.
 6. Developers read the result in the Designer Extension; reviewers read the same immutable predicates, blockers, and artifact receipts in the web app. Their role changes access and authorization, not the security result.
 
@@ -56,7 +56,7 @@ The reviewer surface must keep bundle/source visibility, source-map gaps, iframe
 
 Licensed and account-gated behavior uses a different trust model from the public runtime fetch:
 
-1. The partner prepares a Runtime Test Package tied to the current review version and bundle SHA. It names a dedicated published Webflow test site, a one-hour installation allowlist, immutable runtime URLs whose SHA-256 and SRI resolve to the same bytes, one runtime-ready selector, and one bounded proxy-canary template.
+1. The partner prepares a Runtime Test Package tied to the current review version and bundle SHA. It names a dedicated published Webflow test site, a one-hour installation allowlist, one to eight immutable runtime URLs whose individual SHA-256 and SRI values resolve to the same bytes, one runtime-ready selector, and one bounded proxy-canary template.
 2. The package is labeled `Partner supplied`. It is test input, not evidence. The partner may request one fresh run for their own ready package, but cannot read its capability, upload review evidence, or change review state.
 3. The Worker creates a 15-minute observation job and an E2B sandbox from the configured immutable `<template-name>:<build-id>` reference. Public sandbox traffic is disabled. The Worker uses E2B's per-sandbox traffic token to call the template's one-shot `/run` route, which places the capability in the baked runner process only; the Worker stores only its SHA-256 hash and the Designer Extension receives a safe status summary.
 4. E2B opens a fresh Chromium context, proves it reached the published origin, instruments runtime-created script elements before page code executes, enforces the exact host and request budgets, masks form controls, and captures scripts, executed hashes, DOM SRI, source maps, sanitized network and console metadata, structural DOM/storage state, screenshots, and the Webflow-owned negative proxy canary.
@@ -150,7 +150,7 @@ webflow-app-review-runtime --api-base "$apiBaseUrl" --job "$observationJobId"
 - Evidence intake is limited to 128 KB of manifest data, 10 MB total artifacts, a fixed file/type allowlist, per-file limits, strict SHA-256 validation, and secret-shaped metadata rejection before R2 writes.
 - The runner records no headers, cookies, response/request bodies, form values, or storage values. Query values and console personal/secret-shaped text are redacted, and form controls are masked in screenshots.
 - Production sandbox and canary URLs must be HTTPS and on Webflow-controlled origins. Development HTTP/private targets are accepted only when the Worker itself runs outside production.
-- Mutable runtime delivery, hash/SRI mismatch, runtime-created script elements, unreviewed child scripts, source-map gaps, and proxy exposure remain evidence-backed blockers or manual-review inputs. Cleanup is recorded only for legacy compatibility and is not scored. Observation does not downgrade security findings.
+- Mutable runtime delivery, hash/SRI mismatch, undeclared runtime-created scripts, unreviewed child scripts, source-map gaps, and proxy exposure remain evidence-backed blockers or manual-review inputs. A dynamically inserted file is treated as declared only when its URL is in the package and its own load, hash, and SRI checks pass. Cleanup is recorded only for legacy compatibility and is not scored. Observation does not downgrade security findings.
 
 ## Verification
 
