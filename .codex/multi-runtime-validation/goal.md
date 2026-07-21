@@ -81,4 +81,4 @@ This receipt proves the initial multi-runtime slice. User steering reopened the 
 - Rendered Worker/D1 proof passed at 900×780 and 390×844 for duplicate recovery, two-file confirmation, Webflow-observed per-file results, reload, and two-file prefill.
 - Local screenshots: `output/playwright/runtime-duplicate-error-900.png`, `output/playwright/runtime-confirmation-900.png`, `output/playwright/runtime-results-900.png`, and `output/playwright/runtime-results-390.png` (ignored verification artifacts).
 - Final upload artifact: `/Users/micahjohnson/Downloads/webflow-app-preflight-CRE-1381-multi-runtime.zip`, 181,263 bytes, SHA-256 `90f7f79381dab093741dec96ee9e3986951efca7c3f07498ed4c4a896ac5f743`; `unzip -t` passed.
-- Promotion remains pending PR 1 review/CI/merge. No Worker, E2B template, or Designer Extension deployment occurred.
+- Review head `8e7bcf8` passed GitHub Actions run `29867169000`, and PR 1 is ready for review. Merge and merged-main readback remain. No Worker, E2B template, or Designer Extension deployment occurred.

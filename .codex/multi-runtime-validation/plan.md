@@ -102,13 +102,13 @@ Status: in progress
 
 Implementation
 - [x] Rebuild the production extension bundle and replace the Downloads handoff with the verified archive.
-- [ ] Update PR 1 and CRE-1381 with the final evidence and rollback receipt.
+- [x] Update PR 1 and CRE-1381 with the final evidence and rollback receipt.
 - [ ] Mark PR 1 ready, merge after required checks pass, and leave deployment/upload boundaries unchanged.
 
 Verification
 - [x] Run focused red/green tests, complete `pnpm test` (122 tests), `pnpm check`, `pnpm build`, `pnpm format:check`, and `git diff --check`.
 - [x] Exercise duplicate/error recovery, confirmation, Webflow-observed per-file results, reload/prefill, and narrow viewport on the rendered local Worker/D1 surface.
-- [ ] Record screenshots, final bundle size/SHA-256, clean working tree, successful CI, and merged-main readback. Local screenshots and the 181,263-byte bundle SHA-256 `90f7f79381dab093741dec96ee9e3986951efca7c3f07498ed4c4a896ac5f743` are recorded; CI and merged-main readback remain.
+- [ ] Record screenshots, final bundle size/SHA-256, clean working tree, successful CI, and merged-main readback. Local screenshots, the 181,263-byte bundle SHA-256 `90f7f79381dab093741dec96ee9e3986951efca7c3f07498ed4c4a896ac5f743`, and successful run `29867169000` for head `8e7bcf8` are recorded; the closeout commit CI and merged-main readback remain.
 
 Exit criteria
 - [ ] PR 1 is merged, CRE-1381 is complete with exact evidence, the final bundle is in Downloads, and no Worker/E2B/Designer deployment occurred.
