@@ -56,12 +56,12 @@
 ## Phase 6 — Delivery and evidence
 
 - [x] Review the exact diff; remove default-Prettier churn and Webflow CLI-only manifest normalization. Keep the rebuilt production `public/bundle.js` as the expected generated artifact.
-- [ ] Commit the verified CRE-1381 scope.
-- [ ] Push `codex/CRE-1381-multi-runtime-sets`.
-- [ ] Open a pull request against `main` with invariant, tests, approval boundaries, and rollback.
-- [ ] Record exact commit, PR, checks, UI proof, bundle digest, and rollback in CRE-1381.
+- [x] Commit the verified CRE-1381 scope as `eb17b21`.
+- [x] Push `codex/CRE-1381-multi-runtime-sets`.
+- [x] Open draft pull request <https://github.com/createsomethingtoday/webflow-app-preflight/pull/1> against `main` with invariant, tests, approval boundaries, and rollback.
+- [x] Record exact commit, PR, local checks, successful CI run `29862809657`, UI proof, bundle digest, and rollback in CRE-1381.
 - [ ] Mark CRE-1381 done only when no required implementation or review artifact remains.
-- [ ] Mark the Ultragoal complete only after the objective and completion proof are satisfied.
+- [x] Mark the repo-local Ultragoal complete: every acceptance outcome has a receipt and the implementation is open for review. The thread-level goal registry remains reserved by the earlier paused CRE-1264 goal and was not overwritten.
 
 ## Approval boundaries
 

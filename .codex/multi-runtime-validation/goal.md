@@ -54,3 +54,13 @@ The primary verifier is a rendered operator flow using the built extension UI: b
 ## Blocker criteria
 
 Stop and report a blocker only when the same external condition prevents progress on three consecutive goal turns and no safe local or reviewable route remains. Authenticated deployment or Designer upload is an approval boundary, not evidence that the implementation itself is blocked.
+
+## Completion receipt
+
+- Implementation commit: `eb17b21` on `codex/CRE-1381-multi-runtime-sets`.
+- Draft review: <https://github.com/createsomethingtoday/webflow-app-preflight/pull/1>.
+- Independent CI: run `29862809657` passed formatting, typecheck, tests, and build.
+- Local validation: 120 tests, typecheck, build, formatting, and the rendered two-runtime Worker/D1 flow passed.
+- Upload artifact: `/Users/micahjohnson/Downloads/webflow-app-preflight-CRE-1381-multi-runtime.zip`, 180,010 bytes, SHA-256 `a3dc612ec3d509aee49ac35ee5ad53a45ec47f3355cef6e693d6031dfe3a4208`.
+- Linear evidence: CRE-1381 comment `e2b1c4b9-6a6a-4039-a211-7f907ebb4112`.
+- Approval boundary retained: the operator owns Designer upload; CRE-1264 owns the independent production pilot.
