@@ -121,6 +121,66 @@ describe('review API', () => {
     expect(result.blockers).toHaveLength(7);
   });
 
+  test('requires every file in a runtime set to load and match its own pins', () => {
+    const runtimeArtifacts = [
+      {
+        url: 'https://api.consentpro.com/v2/cdn/runtime.js',
+        sha256: 'a'.repeat(64),
+        integrity: 'sha256-runtime'
+      },
+      {
+        url: 'https://api.consentpro.com/v2/cdn/preferences.js',
+        sha256: 'b'.repeat(64),
+        integrity: 'sha256-preferences'
+      }
+    ];
+    const contract = {
+      target: { url: 'https://consent-pro-test.webflow.io/', host: 'consent-pro-test.webflow.io' },
+      runtimeArtifacts
+    } as any;
+    const manifest = {
+      runtimeReadyObserved: true,
+      runtimeArtifacts: [
+        {
+          url: runtimeArtifacts[0].url,
+          observedSha256: runtimeArtifacts[0].sha256,
+          loadedByPage: true,
+          domIntegrity: runtimeArtifacts[0].integrity
+        },
+        {
+          url: runtimeArtifacts[1].url,
+          observedSha256: 'c'.repeat(64),
+          loadedByPage: true,
+          domIntegrity: runtimeArtifacts[1].integrity
+        }
+      ],
+      runtimeCreatedScripts: [],
+      unreviewedRuntimeScripts: [],
+      negativeProxyCanary: { outcome: 'blocked' }
+    };
+
+    const blocked = evaluateRuntimeSecurity(manifest, contract);
+    expect(blocked.status).toBe('blocked');
+    expect(blocked.predicates.runtimeLoadedByPage).toBe(true);
+    expect(blocked.predicates.runtimeHashMatched).toBe(false);
+    expect(blocked.blockers).toContain(
+      'The executed runtime bytes did not match the pinned SHA-256.'
+    );
+
+    const passed = evaluateRuntimeSecurity(
+      {
+        ...manifest,
+        runtimeArtifacts: manifest.runtimeArtifacts.map((artifact, index) => ({
+          ...artifact,
+          observedSha256: runtimeArtifacts[index].sha256
+        }))
+      },
+      contract
+    );
+    expect(passed.status).toBe('passed');
+    expect(passed.blockers).toEqual([]);
+  });
+
   test('returns the resolved Webflow identity and server-owned companion role', async () => {
     const developer = await exports.default.fetch(
       new Request('https://preflight.test/v1/me', {
@@ -1086,7 +1146,59 @@ describe('review API', () => {
     expect(response.status).toBe(400);
     expect(await response.json()).toMatchObject({
       error: 'invalid_runtime_test_package',
-      message: expect.stringMatching(/same SHA-256 bytes/i)
+      message: expect.stringMatching(/Runtime file 1.*same SHA-256 bytes/i)
+    });
+  });
+
+  test('rejects duplicate runtime URLs inside one execution scenario', async () => {
+    const form = new FormData();
+    form.set(
+      'bundle',
+      new File([await createBundle()], 'consent-pro.zip', { type: 'application/zip' })
+    );
+    const createdResponse = await exports.default.fetch(
+      new Request('https://preflight.test/v1/reviews', {
+        method: 'POST',
+        headers: { authorization: 'Bearer test-token', origin: 'http://localhost:1337' },
+        body: form
+      })
+    );
+    const created = await createdResponse.json<{ review: { id: string } }>();
+    const duplicate = {
+      url: 'http://127.0.0.1:4173/runtime-v1.js',
+      sha256: 'a'.repeat(64),
+      integrity: TEST_RUNTIME_INTEGRITY
+    };
+    const response = await exports.default.fetch(
+      new Request(`https://preflight.test/v1/reviews/${created.review.id}/runtime-test-packages`, {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer test-token',
+          origin: 'http://localhost:1337',
+          'content-type': 'application/json'
+        },
+        body: JSON.stringify({
+          targetUrl: 'http://127.0.0.1:4173/runtime-fixture',
+          sandboxInstallationId: 'local-webflow-site',
+          sandboxOwnershipConfirmed: true,
+          license: {
+            mode: 'installation_allowlist',
+            expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString()
+          },
+          runtimeArtifacts: [duplicate, duplicate],
+          negativeProxyProbe: {
+            method: 'GET',
+            urlTemplate: 'http://127.0.0.1:4173/proxy?url={canaryUrl}'
+          },
+          lifecycle: { readySelector: '[data-runtime-ready]' }
+        })
+      })
+    );
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({
+      error: 'invalid_runtime_test_package',
+      message: expect.stringMatching(/Runtime file 2.*duplicates runtime file 1/i)
     });
   });
 
@@ -1138,6 +1250,11 @@ describe('review API', () => {
                 url: 'http://127.0.0.1:4173/runtime-v1.js',
                 sha256: 'a'.repeat(64),
                 integrity: TEST_RUNTIME_INTEGRITY
+              },
+              {
+                url: 'http://127.0.0.1:4173/runtime-v2.js',
+                sha256: 'a'.repeat(64),
+                integrity: TEST_RUNTIME_INTEGRITY
               }
             ],
             negativeProxyProbe: {
@@ -1161,6 +1278,7 @@ describe('review API', () => {
         bundleSha256: string;
         target: { url: string; host: string };
         sandboxInstallationId: string;
+        runtimeArtifacts: Array<{ url: string }>;
         evidence: null;
       };
     }>();
@@ -1174,6 +1292,10 @@ describe('review API', () => {
         host: '127.0.0.1'
       },
       sandboxInstallationId: 'local-webflow-site',
+      runtimeArtifacts: [
+        { url: 'http://127.0.0.1:4173/runtime-v1.js' },
+        { url: 'http://127.0.0.1:4173/runtime-v2.js' }
+      ],
       evidence: null
     });
     expect(created.review.latestVersion.result.officialDecision).toBeNull();
@@ -1351,6 +1473,16 @@ describe('review API', () => {
       runtimeArtifacts: [
         {
           url: 'http://127.0.0.1:4173/runtime-v1.js',
+          expectedSha256: 'a'.repeat(64),
+          observedSha256: 'a'.repeat(64),
+          integrity: TEST_RUNTIME_INTEGRITY,
+          domIntegrity: TEST_RUNTIME_INTEGRITY,
+          domCrossOrigin: 'anonymous',
+          loadedByPage: true,
+          sourceMap: { available: false }
+        },
+        {
+          url: 'http://127.0.0.1:4173/runtime-v2.js',
           expectedSha256: 'a'.repeat(64),
           observedSha256: 'a'.repeat(64),
           integrity: TEST_RUNTIME_INTEGRITY,
@@ -1693,6 +1825,50 @@ describe('review API', () => {
     const storedArtifact = await env.ARTIFACTS.get(acceptedBody.artifacts[0]!.objectKey);
     expect(storedArtifact).not.toBeNull();
     expect(new Uint8Array(await storedArtifact!.arrayBuffer())).toEqual(screenshot);
+
+    const packagesAfterEvidence = await exports.default.fetch(
+      new Request(
+        `https://preflight.test/v1/reviews/${created.review.id}/runtime-test-packages`,
+        {
+          headers: {
+            authorization: 'Bearer test-token',
+            origin: 'http://localhost:1337'
+          }
+        }
+      )
+    );
+    const packagesAfterBody = await packagesAfterEvidence.json<{
+      testPackages: Array<{
+        id: string;
+        observation: {
+          evidence: {
+            runtimeFiles: Array<{
+              url: string;
+              loadedByPage: boolean;
+              hashMatched: boolean;
+              integrityMatched: boolean;
+            }>;
+          } | null;
+        } | null;
+      }>;
+    }>();
+    expect(
+      packagesAfterBody.testPackages.find((item) => item.id === packageBody.testPackage.id)
+        ?.observation?.evidence?.runtimeFiles
+    ).toEqual([
+      {
+        url: 'http://127.0.0.1:4173/runtime-v1.js',
+        loadedByPage: true,
+        hashMatched: true,
+        integrityMatched: true
+      },
+      {
+        url: 'http://127.0.0.1:4173/runtime-v2.js',
+        loadedByPage: true,
+        hashMatched: true,
+        integrityMatched: true
+      }
+    ]);
 
     const reviewAfterEvidence = await exports.default.fetch(
       new Request(`https://preflight.test/v1/reviews/${created.review.id}`, {

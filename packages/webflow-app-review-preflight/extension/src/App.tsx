@@ -45,6 +45,46 @@ function formatDate(value: string): string {
   }).format(new Date(value));
 }
 
+function sriFromSha256(value: string): string {
+  if (!/^[a-f0-9]{64}$/.test(value)) return '';
+  const bytes = value
+    .match(/.{2}/g)!
+    .map((pair) => String.fromCharCode(Number.parseInt(pair, 16)))
+    .join('');
+  return `sha256-${btoa(bytes)}`;
+}
+
+function normalizedRuntimeUrl(value: string): string | null {
+  try {
+    return new URL(value).toString();
+  } catch {
+    return null;
+  }
+}
+
+function runtimeFileName(value: string): string | null {
+  try {
+    const url = new URL(value);
+    const name = url.pathname.split('/').filter(Boolean).at(-1);
+    return name ? decodeURIComponent(name) : url.hostname;
+  } catch {
+    return null;
+  }
+}
+
+function duplicateRuntimePosition(
+  artifacts: RuntimeTestPackageInput['runtimeArtifacts'],
+  index: number
+): number | null {
+  const candidate = normalizedRuntimeUrl(artifacts[index]?.url ?? '');
+  if (!candidate) return null;
+  const previous = artifacts.findIndex(
+    (artifact, artifactIndex) =>
+      artifactIndex < index && normalizedRuntimeUrl(artifact.url) === candidate
+  );
+  return previous >= 0 ? previous : null;
+}
+
 function UploadCard({
   busy,
   onFile
@@ -225,13 +265,15 @@ function RuntimeObservationCard({
   const [confirm, setConfirm] = useState(false);
   const [targetUrl, setTargetUrl] = useState('');
   const [sandboxInstallationId, setSandboxInstallationId] = useState('');
-  const [artifactUrl, setArtifactUrl] = useState(discoveredArtifactUrl);
-  const [artifactSha256, setArtifactSha256] = useState('');
-  const [integrity, setIntegrity] = useState('');
+  const [runtimeArtifacts, setRuntimeArtifacts] = useState<
+    RuntimeTestPackageInput['runtimeArtifacts']
+  >([{ url: discoveredArtifactUrl, sha256: '', integrity: '' }]);
   const [readySelector, setReadySelector] = useState('[data-runtime-ready]');
   const [proxyTemplate, setProxyTemplate] = useState('');
   const [showNewPackage, setShowNewPackage] = useState(false);
+  const [inputError, setInputError] = useState<string | null>(null);
   const cardRef = useRef<HTMLElement>(null);
+  const actionableError = inputError;
   const trustLabel = latest?.observation?.trust === 'webflow_observed'
     ? 'Webflow observed'
     : latest
@@ -249,12 +291,14 @@ function RuntimeObservationCard({
   }, [latest?.id]);
 
   const fillFromPackage = (source: RuntimeTestPackageView | null) => {
-    const artifact = source?.runtimeArtifacts[0];
+    setInputError(null);
     setTargetUrl(source?.target.url ?? '');
     setSandboxInstallationId(source?.sandboxInstallationId ?? '');
-    setArtifactUrl(artifact?.url ?? discoveredArtifactUrl);
-    setArtifactSha256(artifact?.sha256 ?? '');
-    setIntegrity(artifact?.integrity ?? '');
+    setRuntimeArtifacts(
+      source?.runtimeArtifacts.length
+        ? source.runtimeArtifacts.map((artifact) => ({ ...artifact }))
+        : [{ url: discoveredArtifactUrl, sha256: '', integrity: '' }]
+    );
     setReadySelector(source?.lifecycle.readySelector ?? '[data-runtime-ready]');
     setProxyTemplate(source?.negativeProxyProbe.urlTemplate ?? '');
   };
@@ -265,10 +309,14 @@ function RuntimeObservationCard({
   }, [review.latestVersion.id, previous?.id]);
 
   useEffect(() => {
-    if (!runtimeError || !cardRef.current) return;
+    setInputError(runtimeError);
+  }, [runtimeError]);
+
+  useEffect(() => {
+    if (!actionableError || !cardRef.current) return;
     cardRef.current.focus();
     cardRef.current.scrollIntoView?.({ behavior: 'smooth', block: 'center' });
-  }, [runtimeError]);
+  }, [actionableError]);
 
   const submit = () => {
     onPrepare({
@@ -279,9 +327,7 @@ function RuntimeObservationCard({
         mode: 'installation_allowlist',
         expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString()
       },
-      runtimeArtifacts: [
-        { url: artifactUrl, sha256: artifactSha256, integrity }
-      ],
+      runtimeArtifacts,
       negativeProxyProbe: {
         method: 'GET',
         urlTemplate: proxyTemplate
@@ -316,7 +362,7 @@ function RuntimeObservationCard({
         in E2B and captures the evidence automatically; output from your computer is not
         used as review evidence.
       </p>
-      {runtimeError ? <div className="error-banner" role="alert">{runtimeError}</div> : null}
+      {actionableError ? <div className="error-banner" role="alert">{actionableError}</div> : null}
 
       {latest && !showNewPackage ? (
         <div className="observation-status" role="status">
@@ -334,7 +380,12 @@ function RuntimeObservationCard({
                 <span className="checkpoint-number">2</span>
                 <div>
                   <strong>Evidence captured by Webflow</strong>
-                  <p>{latest.observation.evidence.artifactCount} immutable artifacts</p>
+                  <p>
+                    {latest.observation.evidence.runtimeFiles.length} runtime{' '}
+                    {latest.observation.evidence.runtimeFiles.length === 1 ? 'file' : 'files'} verified
+                    {' · '}{latest.observation.evidence.artifactCount} evidence{' '}
+                    {latest.observation.evidence.artifactCount === 1 ? 'artifact' : 'artifacts'}
+                  </p>
                 </div>
               </div>
               <div className="observation-results">
@@ -361,6 +412,39 @@ function RuntimeObservationCard({
                   <span>This is observed evidence, not an approval decision.</span>
                 </div>
               </div>
+              <details
+                className="runtime-file-results"
+                open={latest.observation.evidence.securityStatus === 'blocked' || undefined}
+              >
+                <summary>Runtime file results</summary>
+                <ul>
+                  {latest.observation.evidence.runtimeFiles.map((runtimeFile, index) => {
+                    const name = runtimeFileName(runtimeFile.url) ?? `Runtime file ${index + 1}`;
+                    return (
+                      <li
+                        key={runtimeFile.url}
+                        aria-label={`Runtime file result: ${name}`}
+                      >
+                        <div className="runtime-result-heading">
+                          <strong>{name}</strong>
+                          <code>{runtimeFile.url}</code>
+                        </div>
+                        <div className="runtime-result-checks">
+                          <span className={runtimeFile.loadedByPage ? 'pass' : 'fail'}>
+                            {runtimeFile.loadedByPage ? 'Loaded' : 'Not loaded'}
+                          </span>
+                          <span className={runtimeFile.hashMatched ? 'pass' : 'fail'}>
+                            {runtimeFile.hashMatched ? 'Hash matched' : 'Hash mismatch'}
+                          </span>
+                          <span className={runtimeFile.integrityMatched ? 'pass' : 'fail'}>
+                            {runtimeFile.integrityMatched ? 'SRI matched' : 'SRI mismatch'}
+                          </span>
+                        </div>
+                      </li>
+                    );
+                  })}
+                </ul>
+              </details>
               <details className="artifact-details">
                 <summary>Evidence artifact details</summary>
                 <ul>
@@ -422,6 +506,17 @@ function RuntimeObservationCard({
           className="observation-form"
           onSubmit={(event) => {
             event.preventDefault();
+            const duplicateIndex = runtimeArtifacts.findIndex(
+              (_, index) => duplicateRuntimePosition(runtimeArtifacts, index) !== null
+            );
+            if (duplicateIndex >= 0) {
+              const previousIndex = duplicateRuntimePosition(runtimeArtifacts, duplicateIndex)!;
+              setInputError(
+                `Runtime file ${duplicateIndex + 1} duplicates runtime file ${previousIndex + 1}. Use each immutable URL once.`
+              );
+              return;
+            }
+            setInputError(null);
             setConfirm(true);
           }}
         >
@@ -429,9 +524,9 @@ function RuntimeObservationCard({
             <div className="prefill-note" role="status">
               <strong>Previous setup loaded</strong>
               <p>
-                We reused the last test site, runtime pin, selector, and proxy check. Review the
-                values before continuing; Webflow will verify the runtime bytes and SRI again for
-                this bundle.
+                We reused the last test site, runtime pins, selector, and proxy check. Review the
+                values before continuing. Webflow will verify every runtime file and its SRI again
+                for this bundle.
               </p>
             </div>
           ) : null}
@@ -447,19 +542,108 @@ function RuntimeObservationCard({
             </label>
           </fieldset>
           <fieldset>
-            <legend><span>2</span> Pin the reviewed runtime</legend>
-            <label>
-              Immutable runtime URL
-              <input required type="url" value={artifactUrl} onChange={(event) => setArtifactUrl(event.target.value)} />
-            </label>
-            <label>
-              SHA-256
-              <input required pattern="[a-f0-9]{64}" value={artifactSha256} onChange={(event) => setArtifactSha256(event.target.value)} placeholder="64 lowercase hex characters" />
-            </label>
-            <label>
-              Script integrity (SRI)
-              <input required value={integrity} onChange={(event) => setIntegrity(event.target.value)} placeholder="sha256-…" />
-            </label>
+            <legend><span>2</span> Pin the reviewed runtime set</legend>
+            <p className="runtime-set-intro">
+              List every JavaScript file that runs in this test. Each file must match its own
+              SHA-256 and SRI pin.
+            </p>
+            {runtimeArtifacts.map((artifact, index) => {
+              const number = index + 1;
+              const suffix = index === 0 ? '' : ` — file ${number}`;
+              const fileName = runtimeFileName(artifact.url);
+              const duplicateIndex = duplicateRuntimePosition(runtimeArtifacts, index);
+              const update = (
+                field: keyof RuntimeTestPackageInput['runtimeArtifacts'][number],
+                value: string
+              ) => {
+                setInputError(null);
+                setRuntimeArtifacts((current) =>
+                  current.map((item, itemIndex) =>
+                    itemIndex === index
+                      ? field === 'sha256'
+                        ? { ...item, sha256: value, integrity: sriFromSha256(value) }
+                        : { ...item, [field]: value }
+                      : item
+                  )
+                );
+              };
+              return (
+                <section className="runtime-file" key={index}>
+                  <div className="runtime-file-heading">
+                    <h3>Runtime file {number}</h3>
+                    {fileName ? <code className="runtime-file-name">{fileName}</code> : null}
+                    {index > 0 ? (
+                      <button
+                        className="button button-tertiary"
+                        type="button"
+                        aria-label={`Remove runtime file ${number}`}
+                        onClick={() => {
+                          setRuntimeArtifacts((current) =>
+                            current.filter((_, itemIndex) => itemIndex !== index)
+                          );
+                        }}
+                      >
+                        Remove
+                      </button>
+                    ) : null}
+                  </div>
+                  <label>
+                    {`Immutable runtime URL${suffix}`}
+                    <input
+                      required
+                      type="url"
+                      value={artifact.url}
+                      aria-invalid={duplicateIndex !== null || undefined}
+                      onChange={(event) => update('url', event.target.value)}
+                    />
+                    {duplicateIndex !== null ? (
+                      <small className="field-error">
+                        Duplicates runtime file {duplicateIndex + 1}.
+                      </small>
+                    ) : null}
+                  </label>
+                  <label>
+                    {`SHA-256${suffix}`}
+                    <input required pattern="[a-f0-9]{64}" value={artifact.sha256} onChange={(event) => update('sha256', event.target.value)} placeholder="64 lowercase hex characters" />
+                  </label>
+                  <label>
+                    {`Script integrity (SRI)${suffix}`}
+                    <input
+                      required
+                      readOnly
+                      aria-label={`Script integrity (SRI)${suffix}`}
+                      value={artifact.integrity}
+                      placeholder="Calculated from SHA-256"
+                    />
+                    <small>Calculated from the SHA-256 above.</small>
+                  </label>
+                </section>
+              );
+            })}
+            <details className="runtime-set-settings" open={runtimeArtifacts.length > 1 || undefined}>
+              <summary>More runtime files</summary>
+              <p>
+                Add a file only when it must execute in this same test. Use another test package
+                for region, plan, or build variants that do not run together.
+              </p>
+              <button
+                className="button button-secondary"
+                type="button"
+                disabled={runtimeArtifacts.length >= 8}
+                onClick={() => {
+                  setRuntimeArtifacts((current) =>
+                    current.length >= 8
+                      ? current
+                      : [...current, { url: '', sha256: '', integrity: '' }]
+                  );
+                }}
+              >
+                Add another runtime file
+              </button>
+              {runtimeArtifacts.length >= 8 ? (
+                <small>Eight runtime files is the limit for one test package.</small>
+              ) : null}
+            </details>
           </fieldset>
           <details className="advanced-settings">
             <summary>Runtime-ready selector and proxy check</summary>
@@ -496,6 +680,10 @@ function RuntimeObservationCard({
             <p>
               Confirm this is a Webflow-controlled test installation with no customer data,
               and that its license is allowlisted for the next 24 hours. Webflow—not this browser—will run the test.
+            </p>
+            <p>
+              {runtimeArtifacts.length} runtime {runtimeArtifacts.length === 1 ? 'file' : 'files'} will
+              be tested together.
             </p>
             <ul>
               <li>Runtime bytes are pinned to this bundle version</li>
@@ -751,10 +939,13 @@ export function App({ api }: { api: PreflightApi }) {
             await refreshRuntimePackages(review.id);
             await refreshHistory();
           })}
-          onPrepareRuntimePackage={(input) => run(async () => {
-            const prepared = await api.createRuntimeTestPackage(review.id, input);
-            setRuntimeTestPackages([prepared]);
-          })}
+          onPrepareRuntimePackage={(input) => {
+            setRuntimeError(null);
+            void run(async () => {
+              const prepared = await api.createRuntimeTestPackage(review.id, input);
+              setRuntimeTestPackages([prepared]);
+            }, setRuntimeError);
+          }}
           onRunRuntimeObservation={(testPackageId) => {
             setRuntimeError(null);
             void run(async () => {

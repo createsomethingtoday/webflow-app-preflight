@@ -61,20 +61,31 @@ function contract(): RuntimeObservationJobContract {
 interface AdversarialFixtureOptions {
   markup(integrity: string): string;
   proxyStatus: number;
-  runtimeSource?: string;
+  runtimeSource?: string | ((secondaryIntegrity: string) => string);
+  secondaryRuntimeSource?: string;
 }
 
 async function runAdversarialFixture({
   markup,
   proxyStatus,
-  runtimeSource = 'document.body.setAttribute("data-runtime-ready", "");'
+  runtimeSource = 'document.body.setAttribute("data-runtime-ready", "");',
+  secondaryRuntimeSource
 }: AdversarialFixtureOptions): Promise<{
   result: Awaited<ReturnType<typeof runRuntimeObservation>>;
   manifest: Record<string, unknown>;
   networkLog: unknown;
   consoleLog: unknown;
 }> {
-  const digest = createHash('sha256').update(runtimeSource).digest();
+  const secondaryDigest = secondaryRuntimeSource
+    ? createHash('sha256').update(secondaryRuntimeSource).digest()
+    : null;
+  const secondaryIntegrity = secondaryDigest
+    ? `sha256-${secondaryDigest.toString('base64')}`
+    : '';
+  const resolvedRuntimeSource = typeof runtimeSource === 'function'
+    ? runtimeSource(secondaryIntegrity)
+    : runtimeSource;
+  const digest = createHash('sha256').update(resolvedRuntimeSource).digest();
   const integrity = `sha256-${digest.toString('base64')}`;
   const outputDir = await mkdtemp(join(tmpdir(), 'runtime-runner-adversarial-'));
   let jobContract!: RuntimeObservationJobContract;
@@ -105,7 +116,15 @@ async function runAdversarialFixture({
         'content-type': 'application/javascript; charset=utf-8',
         'access-control-allow-origin': '*'
       });
-      response.end(runtimeSource);
+      response.end(resolvedRuntimeSource);
+      return;
+    }
+    if (url.pathname === '/runtime-v2.js' && secondaryRuntimeSource) {
+      response.writeHead(200, {
+        'content-type': 'application/javascript; charset=utf-8',
+        'access-control-allow-origin': '*'
+      });
+      response.end(secondaryRuntimeSource);
       return;
     }
     if (url.pathname === '/extra-module.js' || url.pathname === '/worker.js') {
@@ -136,7 +155,14 @@ async function runAdversarialFixture({
         url: `${origin}/runtime-v1.js`,
         sha256: digest.toString('hex'),
         integrity
-      }
+      },
+      ...(secondaryDigest
+        ? [{
+            url: `${origin}/runtime-v2.js`,
+            sha256: secondaryDigest.toString('hex'),
+            integrity: secondaryIntegrity
+          }]
+        : [])
     ],
     negativeProxyProbe: { method: 'GET', url: `${origin}/proxy` },
     controls: {
@@ -280,6 +306,31 @@ describe('runtime observation runner boundaries', () => {
         expect.stringContaining('/worker.js')
       ])
     );
+  }, 30_000);
+
+  test('accepts a dynamically inserted script when that exact file is declared and pinned', async () => {
+    const { manifest } = await runAdversarialFixture({
+      proxyStatus: 403,
+      secondaryRuntimeSource: 'globalThis.__reviewedDependencyExecuted = true;',
+      runtimeSource: (secondaryIntegrity) => `
+        const dependency = document.createElement('script');
+        dependency.src = '/runtime-v2.js';
+        dependency.integrity = '${secondaryIntegrity}';
+        dependency.crossOrigin = 'anonymous';
+        dependency.addEventListener('load', () => {
+          document.body.setAttribute('data-runtime-ready', '');
+        });
+        document.head.append(dependency);`,
+      markup: (integrity) =>
+        `<script src="/runtime-v1.js" integrity="${integrity}" crossorigin="anonymous"></script>`
+    });
+
+    expect(manifest.runtimeArtifacts).toEqual([
+      expect.objectContaining({ loadedByPage: true }),
+      expect.objectContaining({ loadedByPage: true })
+    ]);
+    expect(manifest.runtimeCreatedScripts).toEqual([]);
+    expect(manifest.unreviewedRuntimeScripts).toEqual([]);
   }, 30_000);
 
   test('reports a cross-host module request initiated by the pinned runtime', async () => {

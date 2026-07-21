@@ -12,7 +12,7 @@ You will:
 
 1. Upload the exact app bundle you plan to submit.
 2. Connect that bundle to a dedicated published Webflow test site.
-3. Pin the production runtime by URL, SHA-256, and SRI.
+3. Pin every production runtime file by URL, SHA-256, and SRI.
 4. Ask Webflow's server to run the site in a fresh browser.
 5. Repeat the developer test on the same package.
 6. Ask a reviewer to replay that exact package.
@@ -27,9 +27,9 @@ Have these items ready:
 - a dedicated Webflow test site with the app installed
 - the published `webflow.io` URL for that site
 - the Webflow site or installation ID
-- the exact production runtime URL
-- the SHA-256 for the runtime file
-- the matching SRI value for the same file
+- the exact URL for each production runtime file that runs in the test
+- the SHA-256 for each runtime file
+- the matching SRI value for each file; the app calculates it from a valid SHA-256
 - a CSS selector that appears only when the runtime is ready
 - the approved proxy-check URL template
 
@@ -41,10 +41,12 @@ Do not use a customer site. Do not use a runtime URL that can change while the r
 | -------------------- | ------------------------------------------------------------------------------------ |
 | Bundle               | The zip file you plan to submit for review                                           |
 | Bundle SHA-256       | A fingerprint for the zip; different files have a different fingerprint              |
-| Runtime              | The JavaScript file that the published site loads and runs                           |
+| Runtime              | The production JavaScript that the published site loads and runs                     |
+| Runtime file         | One immutable JavaScript file used by that runtime                                   |
+| Runtime set          | Every runtime file that must execute together in one test scenario                   |
 | Runtime SHA-256      | A fingerprint for the runtime file that actually ran                                 |
 | SRI                  | The integrity value the browser uses to check a script before it runs                |
-| Runtime Test Package | The saved bundle, site, runtime, and test settings for one review attempt            |
+| Runtime Test Package | The saved bundle, site, runtime set, and settings for one test scenario              |
 | Observation job      | One server-requested browser run against one test package                            |
 | E2B sandbox          | The short-lived remote computer that runs the browser                                |
 | `webflow_observed`   | Evidence produced by Webflow's server-owned browser, not your computer               |
@@ -77,9 +79,9 @@ Enter each field carefully:
 | ------------------------------- | ---------------------------------------------------------- | -------------------------------------------------------- |
 | Published Webflow test URL      | The dedicated site's published `https://...webflow.io` URL | The browser tested a real published Webflow site         |
 | Webflow installation or site ID | The ID for that dedicated test site                        | The runtime license belongs to the named installation    |
-| Immutable runtime URL           | The exact production JavaScript URL                        | The review points to one runtime file                    |
-| SHA-256                         | The lowercase SHA-256 for the runtime bytes                | The executed file matches the reviewed file              |
-| Script integrity (SRI)          | The `sha256-...` integrity value for those same bytes      | The page pins the script in the browser                  |
+| Immutable runtime URL           | The exact URL for the first production JavaScript file     | The review points to a specific runtime file             |
+| SHA-256                         | The lowercase SHA-256 for that file's bytes                | The executed file matches the reviewed file              |
+| Script integrity (SRI)          | The `sha256-...` integrity value for those same bytes      | The page pins that script in the browser                 |
 | Ready selector                  | A CSS selector added when the runtime is ready             | The runtime finished loading and reached its ready state |
 | Proxy probe URL template        | The approved proxy template with the canary placeholder    | The proxy refuses an arbitrary destination               |
 
@@ -91,9 +93,26 @@ Review the values before you continue. A previous setup may be loaded for conven
 
 The card should show **Test package ready** and a shortened bundle SHA.
 
-### Get SHA-256 and SRI from the same runtime file
+### Choose one file, one runtime set, or separate packages
 
-If the runtime URL is public, download it once and calculate both values from that file:
+Start with one runtime file. Most apps need only that row.
+
+Open **More runtime files** and select **Add another runtime file** when the first file loads another reviewed JavaScript file during the same page visit. Add every file that must execute for the ready selector to appear. The app accepts up to eight unique files in one runtime set.
+
+Use a separate Runtime Test Package when the files do not run together. For example, create separate packages for a US build and an EU build, a free-plan runtime and a paid-plan runtime, or two mutually exclusive release versions. One package is one scenario, so every file listed in it must load during that run.
+
+For each added file:
+
+1. use an immutable URL
+2. calculate SHA-256 from the downloaded bytes; the app supplies the matching SRI
+3. confirm the file runs on the dedicated test site
+4. keep it in the package only if it belongs to this exact scenario
+
+A runtime may create a script element for a declared file. That file still has to load and match its own SHA-256 and SRI. A child script that is not declared in the runtime set remains a security blocker. Declaring a file is test input; it does not close a bundle finding or create review approval.
+
+### Get SHA-256 and verify the matching SRI
+
+If a runtime URL is public, download it once and calculate its SHA-256:
 
 ```bash
 export RUNTIME_URL="https://cdn.example.com/runtime/version/runtime.js"
@@ -104,7 +123,9 @@ openssl dgst -sha256 -binary /tmp/app-review-runtime.js | openssl base64 -A
 
 Use the 64-character value from `shasum` as **SHA-256**. Add `sha256-` before the Base64 value from `openssl` and use the result as **Script integrity (SRI)**.
 
-Both values must describe the exact bytes served by the runtime URL. If a later download produces different values, the URL is not immutable enough for this package.
+In the Designer Extension, entering a valid lowercase SHA-256 fills the SRI field automatically. The OpenSSL result is an optional independent check or the value to use when calling the API directly. If the two values disagree, stop and download the immutable runtime again.
+
+Both values must describe the exact bytes served by that runtime URL. Repeat the calculation for every file in the runtime set. If a later download produces different values, the URL is not immutable enough for this package.
 
 For a ready selector, prefer one clear marker such as `[data-runtime-ready]`. The runtime must add that marker only after it is ready for review.
 
@@ -118,8 +139,9 @@ Create a new package when any of these values changes:
 - review-version ID
 - published test site
 - site or installation ID
-- runtime URL
-- runtime SHA-256 or SRI
+- any runtime file URL
+- any runtime file SHA-256 or SRI
+- which runtime files execute together
 - ready selector
 - proxy-check URL
 
@@ -177,14 +199,16 @@ The app checks each fact separately:
 
 - the browser reached the published site
 - the ready selector appeared
-- the page loaded the pinned runtime
-- the executed runtime matched the SHA-256
-- the script tag matched the SRI
-- the runtime did not create new script elements
+- the page loaded every pinned runtime file
+- every executed runtime file matched its SHA-256
+- every declared script tag matched its SRI
+- the runtime did not create undeclared script elements
 - no unreviewed child script appeared
 - the proxy canary was blocked
 
 A blocked result is useful evidence. It means the browser ran, but the app did not meet one or more runtime rules.
+
+Open **Runtime file results** to find the exact file that failed. Each row reports **Loaded**, **Hash matched**, and **SRI matched** separately. The runtime-file count tells you how many declared files were checked; the evidence-artifact count includes screenshots and sanitized logs, so it is usually larger.
 
 ### Proxy canary
 
@@ -310,6 +334,7 @@ review_id:
 review_version_id:
 bundle_sha256:
 runtime_test_package_id:
+runtime_files:
 developer_job_ids:
 reviewer_replay_job_id:
 security_results:

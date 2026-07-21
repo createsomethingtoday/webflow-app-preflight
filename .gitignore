@@ -18,5 +18,7 @@ context/
 *.tmp
 .DS_Store
 Thumbs.db
+.playwright-cli/
+output/
 
 packages/webflow-app-review-preflight/extension/bundle.zip

@@ -2,6 +2,8 @@
 
 Native Webflow large right-panel UI for uploading an app bundle, understanding deterministic feedback, preparing a reproducible Runtime Test Package, reading Webflow-controlled runtime evidence, uploading a revision, and reopening automatically saved review history.
 
+One Runtime Test Package represents one execution scenario. The form starts with one runtime file and can add up to eight files that must execute together. Each file keeps its own immutable URL and SHA-256; the form derives the matching SRI and the server verifies both encodings. Completed observations report loaded, hash-matched, and SRI-matched status for every file. Region, plan, build, or release variants that do not execute together use separate packages.
+
 ```bash
 pnpm build
 pnpm test

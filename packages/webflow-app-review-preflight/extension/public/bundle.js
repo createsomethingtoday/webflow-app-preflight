@@ -24521,6 +24521,35 @@
       minute: "2-digit"
     }).format(new Date(value));
   }
+  function sriFromSha256(value) {
+    if (!/^[a-f0-9]{64}$/.test(value)) return "";
+    const bytes = value.match(/.{2}/g).map((pair) => String.fromCharCode(Number.parseInt(pair, 16))).join("");
+    return `sha256-${btoa(bytes)}`;
+  }
+  function normalizedRuntimeUrl(value) {
+    try {
+      return new URL(value).toString();
+    } catch {
+      return null;
+    }
+  }
+  function runtimeFileName(value) {
+    try {
+      const url = new URL(value);
+      const name = url.pathname.split("/").filter(Boolean).at(-1);
+      return name ? decodeURIComponent(name) : url.hostname;
+    } catch {
+      return null;
+    }
+  }
+  function duplicateRuntimePosition(artifacts, index) {
+    const candidate = normalizedRuntimeUrl(artifacts[index]?.url ?? "");
+    if (!candidate) return null;
+    const previous = artifacts.findIndex(
+      (artifact, artifactIndex) => artifactIndex < index && normalizedRuntimeUrl(artifact.url) === candidate
+    );
+    return previous >= 0 ? previous : null;
+  }
   function UploadCard({
     busy,
     onFile
@@ -24674,25 +24703,25 @@
     const [confirm, setConfirm] = (0, import_react.useState)(false);
     const [targetUrl, setTargetUrl] = (0, import_react.useState)("");
     const [sandboxInstallationId, setSandboxInstallationId] = (0, import_react.useState)("");
-    const [artifactUrl, setArtifactUrl] = (0, import_react.useState)(discoveredArtifactUrl);
-    const [artifactSha256, setArtifactSha256] = (0, import_react.useState)("");
-    const [integrity, setIntegrity] = (0, import_react.useState)("");
+    const [runtimeArtifacts, setRuntimeArtifacts] = (0, import_react.useState)([{ url: discoveredArtifactUrl, sha256: "", integrity: "" }]);
     const [readySelector, setReadySelector] = (0, import_react.useState)("[data-runtime-ready]");
     const [proxyTemplate, setProxyTemplate] = (0, import_react.useState)("");
     const [showNewPackage, setShowNewPackage] = (0, import_react.useState)(false);
+    const [inputError, setInputError] = (0, import_react.useState)(null);
     const cardRef = (0, import_react.useRef)(null);
+    const actionableError = inputError;
     const trustLabel = latest?.observation?.trust === "webflow_observed" ? "Webflow observed" : latest ? "Partner supplied" : "Not prepared";
     const canRequestRun = !latest?.observation || latest.observation.status === "complete" || latest.observation.status === "failed" || latest.observation.status === "expired" || latest.observation.status === "revoked";
     (0, import_react.useEffect)(() => {
       setShowNewPackage(false);
     }, [latest?.id]);
     const fillFromPackage = (source) => {
-      const artifact = source?.runtimeArtifacts[0];
+      setInputError(null);
       setTargetUrl(source?.target.url ?? "");
       setSandboxInstallationId(source?.sandboxInstallationId ?? "");
-      setArtifactUrl(artifact?.url ?? discoveredArtifactUrl);
-      setArtifactSha256(artifact?.sha256 ?? "");
-      setIntegrity(artifact?.integrity ?? "");
+      setRuntimeArtifacts(
+        source?.runtimeArtifacts.length ? source.runtimeArtifacts.map((artifact) => ({ ...artifact })) : [{ url: discoveredArtifactUrl, sha256: "", integrity: "" }]
+      );
       setReadySelector(source?.lifecycle.readySelector ?? "[data-runtime-ready]");
       setProxyTemplate(source?.negativeProxyProbe.urlTemplate ?? "");
     };
@@ -24701,10 +24730,13 @@
       fillFromPackage(previous);
     }, [review.latestVersion.id, previous?.id]);
     (0, import_react.useEffect)(() => {
-      if (!runtimeError || !cardRef.current) return;
+      setInputError(runtimeError);
+    }, [runtimeError]);
+    (0, import_react.useEffect)(() => {
+      if (!actionableError || !cardRef.current) return;
       cardRef.current.focus();
       cardRef.current.scrollIntoView?.({ behavior: "smooth", block: "center" });
-    }, [runtimeError]);
+    }, [actionableError]);
     const submit = () => {
       onPrepare({
         targetUrl,
@@ -24714,9 +24746,7 @@
           mode: "installation_allowlist",
           expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1e3).toISOString()
         },
-        runtimeArtifacts: [
-          { url: artifactUrl, sha256: artifactSha256, integrity }
-        ],
+        runtimeArtifacts,
         negativeProxyProbe: {
           method: "GET",
           urlTemplate: proxyTemplate
@@ -24749,7 +24779,7 @@
             )
           ] }),
           /* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", { children: "Make a dedicated Webflow test installation available. Webflow runs the browser in E2B and captures the evidence automatically; output from your computer is not used as review evidence." }),
-          runtimeError ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { className: "error-banner", role: "alert", children: runtimeError }) : null,
+          actionableError ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { className: "error-banner", role: "alert", children: actionableError }) : null,
           latest && !showNewPackage ? /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "observation-status", role: "status", children: [
             /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "checkpoint-row", children: [
               /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "checkpoint-number", children: "1" }),
@@ -24769,8 +24799,16 @@
                 /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { children: [
                   /* @__PURE__ */ (0, import_jsx_runtime.jsx)("strong", { children: "Evidence captured by Webflow" }),
                   /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("p", { children: [
+                    latest.observation.evidence.runtimeFiles.length,
+                    " runtime",
+                    " ",
+                    latest.observation.evidence.runtimeFiles.length === 1 ? "file" : "files",
+                    " verified",
+                    " \xB7 ",
                     latest.observation.evidence.artifactCount,
-                    " immutable artifacts"
+                    " evidence",
+                    " ",
+                    latest.observation.evidence.artifactCount === 1 ? "artifact" : "artifacts"
                   ] })
                 ] })
               ] }),
@@ -24784,6 +24822,37 @@
                   /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: "This is observed evidence, not an approval decision." })
                 ] })
               ] }),
+              /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(
+                "details",
+                {
+                  className: "runtime-file-results",
+                  open: latest.observation.evidence.securityStatus === "blocked" || void 0,
+                  children: [
+                    /* @__PURE__ */ (0, import_jsx_runtime.jsx)("summary", { children: "Runtime file results" }),
+                    /* @__PURE__ */ (0, import_jsx_runtime.jsx)("ul", { children: latest.observation.evidence.runtimeFiles.map((runtimeFile, index) => {
+                      const name = runtimeFileName(runtimeFile.url) ?? `Runtime file ${index + 1}`;
+                      return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(
+                        "li",
+                        {
+                          "aria-label": `Runtime file result: ${name}`,
+                          children: [
+                            /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "runtime-result-heading", children: [
+                              /* @__PURE__ */ (0, import_jsx_runtime.jsx)("strong", { children: name }),
+                              /* @__PURE__ */ (0, import_jsx_runtime.jsx)("code", { children: runtimeFile.url })
+                            ] }),
+                            /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "runtime-result-checks", children: [
+                              /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: runtimeFile.loadedByPage ? "pass" : "fail", children: runtimeFile.loadedByPage ? "Loaded" : "Not loaded" }),
+                              /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: runtimeFile.hashMatched ? "pass" : "fail", children: runtimeFile.hashMatched ? "Hash matched" : "Hash mismatch" }),
+                              /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: runtimeFile.integrityMatched ? "pass" : "fail", children: runtimeFile.integrityMatched ? "SRI matched" : "SRI mismatch" })
+                            ] })
+                          ]
+                        },
+                        runtimeFile.url
+                      );
+                    }) })
+                  ]
+                }
+              ),
               /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("details", { className: "artifact-details", children: [
                 /* @__PURE__ */ (0, import_jsx_runtime.jsx)("summary", { children: "Evidence artifact details" }),
                 /* @__PURE__ */ (0, import_jsx_runtime.jsx)("ul", { children: latest.observation.evidence.artifacts.map((artifact) => /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("li", { children: [
@@ -24838,12 +24907,23 @@
               className: "observation-form",
               onSubmit: (event) => {
                 event.preventDefault();
+                const duplicateIndex = runtimeArtifacts.findIndex(
+                  (_, index) => duplicateRuntimePosition(runtimeArtifacts, index) !== null
+                );
+                if (duplicateIndex >= 0) {
+                  const previousIndex = duplicateRuntimePosition(runtimeArtifacts, duplicateIndex);
+                  setInputError(
+                    `Runtime file ${duplicateIndex + 1} duplicates runtime file ${previousIndex + 1}. Use each immutable URL once.`
+                  );
+                  return;
+                }
+                setInputError(null);
                 setConfirm(true);
               },
               children: [
                 previous ? /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "prefill-note", role: "status", children: [
                   /* @__PURE__ */ (0, import_jsx_runtime.jsx)("strong", { children: "Previous setup loaded" }),
-                  /* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", { children: "We reused the last test site, runtime pin, selector, and proxy check. Review the values before continuing; Webflow will verify the runtime bytes and SRI again for this bundle." })
+                  /* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", { children: "We reused the last test site, runtime pins, selector, and proxy check. Review the values before continuing. Webflow will verify every runtime file and its SRI again for this bundle." })
                 ] }) : null,
                 /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("fieldset", { children: [
                   /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("legend", { children: [
@@ -24862,19 +24942,100 @@
                 /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("fieldset", { children: [
                   /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("legend", { children: [
                     /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: "2" }),
-                    " Pin the reviewed runtime"
+                    " Pin the reviewed runtime set"
                   ] }),
-                  /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("label", { children: [
-                    "Immutable runtime URL",
-                    /* @__PURE__ */ (0, import_jsx_runtime.jsx)("input", { required: true, type: "url", value: artifactUrl, onChange: (event) => setArtifactUrl(event.target.value) })
-                  ] }),
-                  /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("label", { children: [
-                    "SHA-256",
-                    /* @__PURE__ */ (0, import_jsx_runtime.jsx)("input", { required: true, pattern: "[a-f0-9]{64}", value: artifactSha256, onChange: (event) => setArtifactSha256(event.target.value), placeholder: "64 lowercase hex characters" })
-                  ] }),
-                  /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("label", { children: [
-                    "Script integrity (SRI)",
-                    /* @__PURE__ */ (0, import_jsx_runtime.jsx)("input", { required: true, value: integrity, onChange: (event) => setIntegrity(event.target.value), placeholder: "sha256-\u2026" })
+                  /* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", { className: "runtime-set-intro", children: "List every JavaScript file that runs in this test. Each file must match its own SHA-256 and SRI pin." }),
+                  runtimeArtifacts.map((artifact, index) => {
+                    const number = index + 1;
+                    const suffix = index === 0 ? "" : ` \u2014 file ${number}`;
+                    const fileName = runtimeFileName(artifact.url);
+                    const duplicateIndex = duplicateRuntimePosition(runtimeArtifacts, index);
+                    const update = (field, value) => {
+                      setInputError(null);
+                      setRuntimeArtifacts(
+                        (current) => current.map(
+                          (item, itemIndex) => itemIndex === index ? field === "sha256" ? { ...item, sha256: value, integrity: sriFromSha256(value) } : { ...item, [field]: value } : item
+                        )
+                      );
+                    };
+                    return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("section", { className: "runtime-file", children: [
+                      /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "runtime-file-heading", children: [
+                        /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("h3", { children: [
+                          "Runtime file ",
+                          number
+                        ] }),
+                        fileName ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)("code", { className: "runtime-file-name", children: fileName }) : null,
+                        index > 0 ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
+                          "button",
+                          {
+                            className: "button button-tertiary",
+                            type: "button",
+                            "aria-label": `Remove runtime file ${number}`,
+                            onClick: () => {
+                              setRuntimeArtifacts(
+                                (current) => current.filter((_, itemIndex) => itemIndex !== index)
+                              );
+                            },
+                            children: "Remove"
+                          }
+                        ) : null
+                      ] }),
+                      /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("label", { children: [
+                        `Immutable runtime URL${suffix}`,
+                        /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
+                          "input",
+                          {
+                            required: true,
+                            type: "url",
+                            value: artifact.url,
+                            "aria-invalid": duplicateIndex !== null || void 0,
+                            onChange: (event) => update("url", event.target.value)
+                          }
+                        ),
+                        duplicateIndex !== null ? /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("small", { className: "field-error", children: [
+                          "Duplicates runtime file ",
+                          duplicateIndex + 1,
+                          "."
+                        ] }) : null
+                      ] }),
+                      /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("label", { children: [
+                        `SHA-256${suffix}`,
+                        /* @__PURE__ */ (0, import_jsx_runtime.jsx)("input", { required: true, pattern: "[a-f0-9]{64}", value: artifact.sha256, onChange: (event) => update("sha256", event.target.value), placeholder: "64 lowercase hex characters" })
+                      ] }),
+                      /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("label", { children: [
+                        `Script integrity (SRI)${suffix}`,
+                        /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
+                          "input",
+                          {
+                            required: true,
+                            readOnly: true,
+                            "aria-label": `Script integrity (SRI)${suffix}`,
+                            value: artifact.integrity,
+                            placeholder: "Calculated from SHA-256"
+                          }
+                        ),
+                        /* @__PURE__ */ (0, import_jsx_runtime.jsx)("small", { children: "Calculated from the SHA-256 above." })
+                      ] })
+                    ] }, index);
+                  }),
+                  /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("details", { className: "runtime-set-settings", open: runtimeArtifacts.length > 1 || void 0, children: [
+                    /* @__PURE__ */ (0, import_jsx_runtime.jsx)("summary", { children: "More runtime files" }),
+                    /* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", { children: "Add a file only when it must execute in this same test. Use another test package for region, plan, or build variants that do not run together." }),
+                    /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
+                      "button",
+                      {
+                        className: "button button-secondary",
+                        type: "button",
+                        disabled: runtimeArtifacts.length >= 8,
+                        onClick: () => {
+                          setRuntimeArtifacts(
+                            (current) => current.length >= 8 ? current : [...current, { url: "", sha256: "", integrity: "" }]
+                          );
+                        },
+                        children: "Add another runtime file"
+                      }
+                    ),
+                    runtimeArtifacts.length >= 8 ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)("small", { children: "Eight runtime files is the limit for one test package." }) : null
                   ] })
                 ] }),
                 /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("details", { className: "advanced-settings", children: [
@@ -24914,6 +25075,12 @@
             /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "eyebrow", children: "Partner checkpoint" }),
             /* @__PURE__ */ (0, import_jsx_runtime.jsx)("h2", { id: dialogTitle, children: "Confirm dedicated test access" }),
             /* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", { children: "Confirm this is a Webflow-controlled test installation with no customer data, and that its license is allowlisted for the next 24 hours. Webflow\u2014not this browser\u2014will run the test." }),
+            /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("p", { children: [
+              runtimeArtifacts.length,
+              " runtime ",
+              runtimeArtifacts.length === 1 ? "file" : "files",
+              " will be tested together."
+            ] }),
             /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("ul", { children: [
               /* @__PURE__ */ (0, import_jsx_runtime.jsx)("li", { children: "Runtime bytes are pinned to this bundle version" }),
               /* @__PURE__ */ (0, import_jsx_runtime.jsx)("li", { children: "Evidence is captured in a fresh Webflow browser" }),
@@ -25143,10 +25310,13 @@
             await refreshRuntimePackages(review.id);
             await refreshHistory();
           }),
-          onPrepareRuntimePackage: (input) => run(async () => {
-            const prepared = await api.createRuntimeTestPackage(review.id, input);
-            setRuntimeTestPackages([prepared]);
-          }),
+          onPrepareRuntimePackage: (input) => {
+            setRuntimeError(null);
+            void run(async () => {
+              const prepared = await api.createRuntimeTestPackage(review.id, input);
+              setRuntimeTestPackages([prepared]);
+            }, setRuntimeError);
+          },
           onRunRuntimeObservation: (testPackageId) => {
             setRuntimeError(null);
             void run(async () => {
@@ -25216,7 +25386,7 @@
   }
 
   // src/config.ts
-  var PREFLIGHT_API_BASE = true ? "" : "";
+  var PREFLIGHT_API_BASE = true ? "https://webflow-app-review-preflight.createsomething.workers.dev" : "";
 
   // src/api.ts
   function apiBase() {
