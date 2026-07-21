@@ -60,7 +60,7 @@
 - [x] Push `codex/CRE-1381-multi-runtime-sets`.
 - [x] Open draft pull request <https://github.com/createsomethingtoday/webflow-app-preflight/pull/1> against `main` with invariant, tests, approval boundaries, and rollback.
 - [x] Record exact commit, PR, local checks, successful CI run `29862809657`, UI proof, bundle digest, and rollback in CRE-1381.
-- [ ] Mark CRE-1381 done only when no required implementation or review artifact remains.
+- [x] Mark CRE-1381 done only when no required implementation or review artifact remains.
 - [x] Mark the initial repo-local milestone complete. User steering subsequently reopened the same goal for operator-readiness hardening; the thread-level registry remains reserved by the earlier paused CRE-1264 goal and was not overwritten.
 
 ## Phase 7: Make multi-runtime failures actionable
@@ -98,20 +98,20 @@ Exit criteria
 
 ## Phase 9: Verify, bundle, and merge
 
-Status: in progress
+Status: complete
 
 Implementation
 - [x] Rebuild the production extension bundle and replace the Downloads handoff with the verified archive.
 - [x] Update PR 1 and CRE-1381 with the final evidence and rollback receipt.
-- [ ] Mark PR 1 ready, merge after required checks pass, and leave deployment/upload boundaries unchanged.
+- [x] Mark PR 1 ready, merge after required checks pass, and leave deployment/upload boundaries unchanged.
 
 Verification
 - [x] Run focused red/green tests, complete `pnpm test` (122 tests), `pnpm check`, `pnpm build`, `pnpm format:check`, and `git diff --check`.
 - [x] Exercise duplicate/error recovery, confirmation, Webflow-observed per-file results, reload/prefill, and narrow viewport on the rendered local Worker/D1 surface.
-- [ ] Record screenshots, final bundle size/SHA-256, clean working tree, successful CI, and merged-main readback. Local screenshots, the 181,263-byte bundle SHA-256 `90f7f79381dab093741dec96ee9e3986951efca7c3f07498ed4c4a896ac5f743`, and successful run `29867169000` for head `8e7bcf8` are recorded; the closeout commit CI and merged-main readback remain.
+- [x] Record screenshots, final bundle size/SHA-256, clean working tree, successful CI, and merged-main readback. Final head `15e4da9` passed run `29867350469`; PR 1 merged as `bc8ee861dce00a349b8c5cca1b1f0c5ac07a0ccf`; local and remote `main` matched.
 
 Exit criteria
-- [ ] PR 1 is merged, CRE-1381 is complete with exact evidence, the final bundle is in Downloads, and no Worker/E2B/Designer deployment occurred.
+- [x] PR 1 is merged, CRE-1381 is complete with exact evidence, the final bundle is in Downloads, and no Worker/E2B/Designer deployment occurred.
 
 ## Approval boundaries
 
