@@ -652,9 +652,15 @@ openssl dgst -sha256 -binary /tmp/reviewed-runtime.js \\
                   <p>
                     For a page-loaded file, put the SRI value in the published script's{' '}
                     <code>integrity</code> attribute and add{' '}
-                    <code>crossorigin=&quot;anonymous&quot;</code>. For a vendor-created child file, select
-                    “Loaded by another pinned runtime.” Webflow will require the child bytes to
-                    match their pin and prove that another pinned runtime initiated the request.
+                    <code>crossorigin=&quot;anonymous&quot;</code> only when the script response allows
+                    cross-origin reads with an <code>Access-Control-Allow-Origin</code> header. If
+                    the vendor does not send that header, browser SRI will block the script. Keep
+                    the test page working without the SRI attributes, keep the calculated pin in
+                    this package, and run the test. The result will correctly report missing
+                    browser-enforced SRI as a blocker. Ask the vendor to add CORS before expecting
+                    that check to pass. For a vendor-created child file, select “Loaded by another
+                    pinned runtime.” Webflow will require the child bytes to match their pin and
+                    prove that another pinned runtime initiated the request.
                   </p>
                 </section>
               </div>

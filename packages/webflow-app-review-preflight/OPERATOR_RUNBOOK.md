@@ -131,6 +131,15 @@ In the Designer Extension, entering a valid lowercase SHA-256 fills the SRI fiel
 
 Both values must describe the exact bytes served by that runtime URL. Repeat the calculation for every file in the runtime set. If a later download produces different values, the URL is not immutable enough for this package.
 
+For a page-loaded cross-origin script, browser-enforced SRI also requires the runtime response to include an `Access-Control-Allow-Origin` header. Check the real GET response before adding SRI to the published test page:
+
+```bash
+curl -fsSL -D - -o /dev/null --referer "$TEST_URL/" "$RUNTIME_URL" \
+  | grep -i '^access-control-allow-origin:'
+```
+
+If that command prints no header, adding `integrity` will make the browser block the runtime. Leave the published script working without `integrity` and `crossorigin`, but keep the calculated SHA-256 and SRI in the Runtime Test Package. Run the observation anyway. The runtime can execute, its downloaded bytes can still be compared with the SHA-256 pin, and the result will honestly report missing browser-enforced SRI as a security blocker. Ask the runtime vendor to add CORS before expecting the SRI check to pass.
+
 For a ready selector, prefer one clear marker such as `[data-runtime-ready]`. The runtime must add that marker only after it is ready for review.
 
 If the app has a proxy or fetch-through endpoint, choose **Yes** and use its real URL template. The template must contain `{canaryUrl}` where the test URL belongs. Do not replace the placeholder yourself. If the app has no such surface, choose **No**. This records a developer declaration as **not applicable**; it does not pretend that Webflow observed a blocked request.

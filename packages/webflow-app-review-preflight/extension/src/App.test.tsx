@@ -636,6 +636,7 @@ describe('App Review Preflight extension', () => {
     expect(screen.getByText(/include every child script it creates/i)).toBeVisible();
     expect(screen.getByText(/SHA-256 is the 64-character fingerprint/i)).toBeVisible();
     expect(screen.getByText(/SRI is the same fingerprint encoded for a script tag/i)).toBeVisible();
+    expect(screen.getByText(/If the vendor does not send that header, browser SRI will block the script/i)).toBeVisible();
     fireEvent.click(screen.getByText('Runtime-ready selector and proxy check'));
     expect(screen.getByText(/Do not use an example URL or invent a blocked response/i)).toBeVisible();
     expect(screen.getByText(/A JavaScript flag such as/i)).toBeVisible();
