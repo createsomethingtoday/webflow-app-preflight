@@ -29,7 +29,7 @@ export interface RuntimeRunnerResult {
   status: 'complete';
   trust: 'webflow_observed';
   cleanupStatus: 'clean' | 'residue_detected' | 'not_tested';
-  negativeProxyOutcome: 'blocked' | 'exposed' | 'error';
+  negativeProxyOutcome: 'blocked' | 'exposed' | 'error' | 'not_applicable';
   artifactCount: number;
 }
 
@@ -50,6 +50,7 @@ interface RuntimeArtifactObservation {
   domIntegrity: string | null;
   domCrossOrigin: string | null;
   loadedByPage: boolean;
+  trustedRuntimeInitiator: boolean;
   sourceMap: { available: boolean; url?: string };
 }
 
@@ -87,6 +88,7 @@ interface TrustedScriptRequest {
 
 interface TrustedExecutionEvidence {
   executedDigestsByUrl: Map<string, Set<string>>;
+  trustedRuntimeInitiatedUrls: Set<string>;
   runtimeCreatedScripts: string[];
   unreviewedRuntimeScripts: string[];
 }
@@ -189,6 +191,7 @@ async function collectTrustedExecutionEvidence(
   const pinnedUrls = new Set(pins.map((pin) => sanitizeUrl(pin.url)));
   const runtimeHosts = new Set(pins.map((pin) => new URL(pin.url).hostname.toLowerCase()));
   const executedDigestsByUrl = new Map<string, Set<string>>();
+  const trustedRuntimeInitiatedUrls = new Set<string>();
   const runtimeCreatedScripts = new Set<string>();
   const unreviewedRuntimeScripts = new Set<string>();
 
@@ -219,6 +222,7 @@ async function collectTrustedExecutionEvidence(
       const digests = executedDigestsByUrl.get(parsedUrl) ?? new Set<string>();
       digests.add(digest);
       executedDigestsByUrl.set(parsedUrl, digests);
+      if (initiatedByPinnedRuntime) trustedRuntimeInitiatedUrls.add(parsedUrl);
       continue;
     }
 
@@ -230,9 +234,12 @@ async function collectTrustedExecutionEvidence(
 
   for (const request of scriptRequests.slice(0, 1_000)) {
     const requestedUrl = sanitizeUrl(request.url);
-    if (pinnedUrls.has(requestedUrl)) continue;
     const initiatorUrls = stackUrls(request.initiator);
     const initiatedByPinnedRuntime = [...initiatorUrls].some((url) => pinnedUrls.has(url));
+    if (pinnedUrls.has(requestedUrl)) {
+      if (initiatedByPinnedRuntime) trustedRuntimeInitiatedUrls.add(requestedUrl);
+      continue;
+    }
     let isRuntimeHostScript = false;
     if (requestedUrl !== '[invalid-url]') {
       try {
@@ -263,6 +270,7 @@ async function collectTrustedExecutionEvidence(
   }
   return {
     executedDigestsByUrl,
+    trustedRuntimeInitiatedUrls,
     runtimeCreatedScripts: [...runtimeCreatedScripts].slice(0, 100),
     unreviewedRuntimeScripts: [...unreviewedRuntimeScripts].slice(0, 100)
   };
@@ -284,6 +292,9 @@ export function validateObservationContract(
     contract.controls.networkMode !== 'exact_host_allowlist' ||
     contract.controls.evidenceTrust !== 'webflow_observed' ||
     contract.controls.executionEvidence !== 'chromium_cdp_v1' ||
+    (contract.negativeProxyProbe.mode === 'none_declared'
+      ? contract.controls.negativeProxyCanaryUrl !== null
+      : typeof contract.controls.negativeProxyCanaryUrl !== 'string') ||
     contract.controls.allowedHosts.length === 0 ||
     contract.controls.allowedHosts.length > 12
   ) {
@@ -293,7 +304,9 @@ export function validateObservationContract(
   const allowed = new Set(contract.controls.allowedHosts);
   const urls = [
     contract.target.url,
-    contract.negativeProxyProbe.url,
+    ...(contract.negativeProxyProbe.mode === 'none_declared'
+      ? []
+      : [contract.negativeProxyProbe.url]),
     ...contract.runtimeArtifacts.map((artifact) => artifact.url)
   ];
   for (const value of urls) {
@@ -310,7 +323,9 @@ export function validateObservationContract(
   if (
     contract.runtimeArtifacts.some(
       (artifact) =>
-        !/^[a-f0-9]{64}$/.test(artifact.sha256) || !artifact.integrity.startsWith('sha256-')
+        !/^[a-f0-9]{64}$/.test(artifact.sha256) ||
+        !artifact.integrity.startsWith('sha256-') ||
+        !['document', 'runtime_child'].includes(artifact.loadMode ?? 'document')
     )
   ) {
     throw new Error(`Observation job ${jobId} contains an unpinned runtime artifact.`);
@@ -439,7 +454,8 @@ async function observeRuntimeArtifact(
   response: PlaywrightResponse | null,
   allowedHosts: Set<string>,
   scripts: BrowserState['scripts'],
-  executedDigestsByUrl: Map<string, Set<string>>
+  executedDigestsByUrl: Map<string, Set<string>>,
+  trustedRuntimeInitiatedUrls: Set<string>
 ): Promise<RuntimeArtifactObservation> {
   const bytes = response
     ? new Uint8Array(await response.body())
@@ -484,6 +500,7 @@ async function observeRuntimeArtifact(
     loadedByPage:
       response !== null &&
       (executedDigestsByUrl.get(sanitizeUrl(pin.url))?.has(observedSha256) ?? false),
+    trustedRuntimeInitiator: trustedRuntimeInitiatedUrls.has(sanitizeUrl(pin.url)),
     sourceMap
   };
 }
@@ -495,7 +512,7 @@ async function capture(
   manifest: Record<string, unknown>;
   artifacts: EvidenceArtifact[];
   cleanupStatus: 'clean' | 'residue_detected' | 'not_tested';
-  negativeProxyOutcome: 'blocked' | 'exposed' | 'error';
+  negativeProxyOutcome: 'blocked' | 'exposed' | 'error' | 'not_applicable';
 }> {
   const startedAt = new Date();
   const allowedHosts = new Set(contract.controls.allowedHosts);
@@ -518,7 +535,8 @@ async function capture(
   const context = await browser.newContext({
     viewport: { width: 1280, height: 720 },
     serviceWorkers: 'block',
-    acceptDownloads: false
+    acceptDownloads: false,
+    userAgent: `Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${browser.version()} Safari/537.36`
   });
   await context.addInitScript(() => {
     const marker = Symbol.for('webflow.runtime-created-script');
@@ -698,23 +716,26 @@ async function capture(
     installedState.scripts = await captureTrustedScripts(cdp, page.url());
     const afterInstall = await screenshot(page);
 
-    let negativeProxyOutcome: 'blocked' | 'exposed' | 'error' = 'error';
+    let negativeProxyOutcome: 'blocked' | 'exposed' | 'error' | 'not_applicable' =
+      contract.negativeProxyProbe.mode === 'none_declared' ? 'not_applicable' : 'error';
     let negativeProxyStatusCode: number | null = null;
-    try {
-      const probe = await context.request.get(contract.negativeProxyProbe.url, {
-        failOnStatusCode: false,
-        maxRedirects: 0,
-        timeout: contract.controls.requestTimeoutMs
-          });
-      negativeProxyStatusCode = probe.status();
-      negativeProxyOutcome =
-        negativeProxyStatusCode >= 200 && negativeProxyStatusCode < 300
-          ? 'exposed'
-          : negativeProxyStatusCode === 401 || negativeProxyStatusCode === 403
-            ? 'blocked'
-            : 'error';
-    } catch {
-      negativeProxyOutcome = 'error';
+    if (contract.negativeProxyProbe.mode !== 'none_declared') {
+      try {
+        const probe = await context.request.get(contract.negativeProxyProbe.url, {
+          failOnStatusCode: false,
+          maxRedirects: 0,
+          timeout: contract.controls.requestTimeoutMs
+        });
+        negativeProxyStatusCode = probe.status();
+        negativeProxyOutcome =
+          negativeProxyStatusCode >= 200 && negativeProxyStatusCode < 300
+            ? 'exposed'
+            : negativeProxyStatusCode === 401 || negativeProxyStatusCode === 403
+              ? 'blocked'
+              : 'error';
+      } catch {
+        negativeProxyOutcome = 'error';
+      }
     }
 
     if (contract.lifecycle.cleanupTrigger) {
@@ -757,7 +778,8 @@ async function capture(
           artifactResponses.get(pin.url) ?? null,
           allowedHosts,
           [...requestBoundaryScripts.values()],
-          trustedExecution.executedDigestsByUrl
+          trustedExecution.executedDigestsByUrl,
+          trustedExecution.trustedRuntimeInitiatedUrls
         )
       )
     );
@@ -936,7 +958,10 @@ export async function runRuntimeObservation(
 
   const contract = await fetchJob(apiBase.toString(), input.observationJobId, input.capability);
   const ownsBrowser = !input.browser;
-  const browser = input.browser ?? (await chromium.launch({ headless: true }));
+  const browser = input.browser ?? (await chromium.launch({
+    headless: true,
+    args: ['--disable-blink-features=AutomationControlled']
+  }));
   let timeout: ReturnType<typeof setTimeout> | undefined;
   try {
     const result = await Promise.race([

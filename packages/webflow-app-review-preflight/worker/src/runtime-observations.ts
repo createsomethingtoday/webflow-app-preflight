@@ -327,10 +327,20 @@ function parseArtifacts(value: unknown, env: Env): RuntimeArtifactPin[] {
         `${file}: the SHA-256 and SRI must describe the same SHA-256 bytes.`
       );
     }
+    if (
+      artifact.loadMode !== undefined &&
+      artifact.loadMode !== 'document' &&
+      artifact.loadMode !== 'runtime_child'
+    ) {
+      throw new RuntimeTestPackageError(
+        `${file}: choose whether the page or another pinned runtime loads this file.`
+      );
+    }
     return {
       url: url.toString(),
       sha256: artifact.sha256,
-      integrity: artifact.integrity
+      integrity: artifact.integrity,
+      loadMode: artifact.loadMode ?? 'document'
     };
   });
 }
@@ -345,7 +355,16 @@ function parseNegativeProxyProbe(
     ? (value as Record<string, unknown>)
     : null;
   if (
+    probe?.mode === 'none_declared' &&
+    probe.declaration === 'no_proxy_surface' &&
+    probe.method === undefined &&
+    probe.urlTemplate === undefined
+  ) {
+    return { mode: 'none_declared', declaration: 'no_proxy_surface' };
+  }
+  if (
     !probe ||
+    (probe.mode !== undefined && probe.mode !== 'probe') ||
     probe.method !== 'GET' ||
     typeof probe.urlTemplate !== 'string' ||
     probe.urlTemplate.length > 2048 ||
@@ -368,7 +387,15 @@ function parseNegativeProxyProbe(
       'Negative proxy probe must use the sandbox or a pinned runtime host.'
     );
   }
-  return { method: 'GET', urlTemplate: probe.urlTemplate };
+  return { mode: 'probe', method: 'GET', urlTemplate: probe.urlTemplate };
+}
+
+function normalizeStoredProxyPolicy(
+  value: RuntimeTestPackage['negativeProxyProbe']
+): RuntimeTestPackage['negativeProxyProbe'] {
+  return value.mode === 'none_declared'
+    ? { mode: 'none_declared', declaration: 'no_proxy_surface' }
+    : { mode: 'probe', method: 'GET', urlTemplate: value.urlTemplate };
 }
 
 function parsePackageInput(
@@ -597,6 +624,7 @@ export async function listRuntimeTestPackages(
   const views: RuntimeTestPackageView[] = [];
   for (const row of rows.results) {
     const testPackage = JSON.parse(row.package_json) as RuntimeTestPackage;
+    testPackage.negativeProxyProbe = normalizeStoredProxyPolicy(testPackage.negativeProxyProbe);
     const expired = Date.parse(testPackage.license.expiresAt) <= Date.now();
     let observation: RuntimeObservationSummary | null = null;
     if (row.job_id && row.job_status && row.approved_at && row.expires_at) {
@@ -633,9 +661,13 @@ export async function listRuntimeTestPackages(
         const observed = runtimeObservations.find((item) => item.url === pin.url);
         return {
           url: pin.url,
+          loadMode: pin.loadMode ?? 'document',
           loadedByPage: observed?.loadedByPage === true,
           hashMatched: observed?.observedSha256 === pin.sha256,
-          integrityMatched: observed?.domIntegrity === pin.integrity
+          integrityMatched:
+            (pin.loadMode ?? 'document') === 'runtime_child'
+              ? observed?.trustedRuntimeInitiator === true
+              : observed?.domIntegrity === pin.integrity
         };
       });
       const artifactRows =
@@ -671,7 +703,10 @@ export async function listRuntimeTestPackages(
           securityPredicates !== null &&
           typeof securityPredicates === 'object' &&
           Array.isArray(securityBlockers) &&
-          (proxyOutcome === 'blocked' || proxyOutcome === 'exposed' || proxyOutcome === 'error')
+          (proxyOutcome === 'blocked' ||
+            proxyOutcome === 'exposed' ||
+            proxyOutcome === 'error' ||
+            proxyOutcome === 'not_applicable')
             ? {
                 securityStatus,
                 securityPredicates: securityPredicates as RuntimeSecurityPredicates,
@@ -884,6 +919,7 @@ function validateManifest(
       record.expectedSha256 !== pin.sha256 ||
       record.integrity !== pin.integrity ||
       typeof record.loadedByPage !== 'boolean' ||
+      typeof record.trustedRuntimeInitiator !== 'boolean' ||
       (record.domIntegrity !== null && typeof record.domIntegrity !== 'string') ||
       (record.domCrossOrigin !== null && typeof record.domCrossOrigin !== 'string') ||
       typeof record.observedSha256 !== 'string' ||
@@ -947,14 +983,21 @@ function validateManifest(
   }
 
   const canary = requireRecord(manifest.negativeProxyCanary, 'Negative proxy canary');
-  if (
-    canary.url !== contract.controls.negativeProxyCanaryUrl ||
-    !['blocked', 'exposed', 'error'].includes(String(canary.outcome)) ||
-    (canary.statusCode !== null &&
-      (!Number.isInteger(canary.statusCode) ||
-        Number(canary.statusCode) < 0 ||
-        Number(canary.statusCode) > 599))
-  ) {
+  const noProxyDeclared = contract.negativeProxyProbe.mode === 'none_declared';
+  const validNoProxyEvidence =
+    noProxyDeclared &&
+    canary.url === null &&
+    canary.outcome === 'not_applicable' &&
+    canary.statusCode === null;
+  const validProbeEvidence =
+    !noProxyDeclared &&
+    canary.url === contract.controls.negativeProxyCanaryUrl &&
+    ['blocked', 'exposed', 'error'].includes(String(canary.outcome)) &&
+    (canary.statusCode === null ||
+      (Number.isInteger(canary.statusCode) &&
+        Number(canary.statusCode) >= 0 &&
+        Number(canary.statusCode) <= 599));
+  if (!validNoProxyEvidence && !validProbeEvidence) {
     throw new RuntimeObservationEvidenceError('Negative proxy canary evidence is invalid.');
   }
 
@@ -1010,6 +1053,7 @@ export function evaluateRuntimeSecurity(
 } {
   const observations = manifest.runtimeArtifacts as Array<Record<string, unknown>>;
   const canary = manifest.negativeProxyCanary as Record<string, unknown>;
+  const noProxyDeclared = contract.negativeProxyProbe?.mode === 'none_declared';
   const targetHost = new URL(contract.target.url).hostname.toLowerCase();
   const predicates: RuntimeSecurityPredicates = {
     publishedTarget:
@@ -1025,14 +1069,24 @@ export function evaluateRuntimeSecurity(
       observations.some((item) => item.url === pin.url && item.observedSha256 === pin.sha256)
     ),
     runtimeIntegrityMatched: contract.runtimeArtifacts.every((pin) =>
-      observations.some((item) => item.url === pin.url && item.domIntegrity === pin.integrity)
+      observations.some(
+        (item) =>
+          item.url === pin.url &&
+          ((pin.loadMode ?? 'document') === 'runtime_child'
+            ? item.trustedRuntimeInitiator === true
+            : item.domIntegrity === pin.integrity)
+      )
     ),
     noRuntimeCreatedScripts:
       Array.isArray(manifest.runtimeCreatedScripts) && manifest.runtimeCreatedScripts.length === 0,
     noUnreviewedRuntimeScripts:
       Array.isArray(manifest.unreviewedRuntimeScripts) &&
       manifest.unreviewedRuntimeScripts.length === 0,
-    negativeProxyBlocked: canary.outcome === 'blocked'
+    negativeProxyBlocked: canary.outcome === 'blocked',
+    proxyPolicySatisfied:
+      noProxyDeclared
+        ? canary.outcome === 'not_applicable'
+        : canary.outcome === 'blocked'
   };
   const blockers = [
     !predicates.publishedTarget ? 'Use a real published Webflow test-site URL.' : null,
@@ -1046,7 +1100,7 @@ export function evaluateRuntimeSecurity(
       ? 'The executed runtime bytes did not match the pinned SHA-256.'
       : null,
     !predicates.runtimeIntegrityMatched
-      ? 'The runtime script did not carry the pinned SRI value.'
+      ? 'A page-loaded runtime lacked its pinned SRI, or a child runtime was not initiated by another pinned runtime.'
       : null,
     !predicates.noRuntimeCreatedScripts
       ? 'The runtime created additional script elements at execution time.'
@@ -1054,7 +1108,11 @@ export function evaluateRuntimeSecurity(
     !predicates.noUnreviewedRuntimeScripts
       ? 'The runtime loaded additional unreviewed scripts.'
       : null,
-    !predicates.negativeProxyBlocked ? 'The negative proxy canary was not blocked.' : null
+    !predicates.proxyPolicySatisfied
+      ? noProxyDeclared
+        ? 'The no-proxy declaration was not preserved by the observation.'
+        : 'The negative proxy canary was not blocked.'
+      : null
   ].filter((item): item is string => item !== null);
   return {
     status: blockers.length === 0 ? 'passed' : 'blocked',
@@ -1480,13 +1538,16 @@ async function issueRuntimeObservationJob(
   }
 
   const testPackage = JSON.parse(row.package_json) as RuntimeTestPackage;
-  let canaryUrl: URL;
-  try {
-    canaryUrl = normalizeUrl(env.RUNTIME_CANARY_URL, env, 'canary');
-  } catch (error) {
-    throw new RuntimeObservationApprovalError(
-      error instanceof Error ? error.message : 'Runtime canary is not configured.'
-    );
+  testPackage.negativeProxyProbe = normalizeStoredProxyPolicy(testPackage.negativeProxyProbe);
+  let canaryUrl: URL | null = null;
+  if (testPackage.negativeProxyProbe.mode !== 'none_declared') {
+    try {
+      canaryUrl = normalizeUrl(env.RUNTIME_CANARY_URL, env, 'canary');
+    } catch (error) {
+      throw new RuntimeObservationApprovalError(
+        error instanceof Error ? error.message : 'Runtime canary is not configured.'
+      );
+    }
   }
 
   const capability = randomCapability();
@@ -1510,13 +1571,17 @@ async function issueRuntimeObservationJob(
     target: testPackage.target,
     sandboxInstallationId: testPackage.sandboxInstallationId,
     runtimeArtifacts: testPackage.runtimeArtifacts,
-    negativeProxyProbe: {
-      method: 'GET',
-      url: testPackage.negativeProxyProbe.urlTemplate.replace(
-        '{canaryUrl}',
-        encodeURIComponent(canaryUrl.toString())
-      )
-    },
+    negativeProxyProbe:
+      testPackage.negativeProxyProbe.mode === 'none_declared'
+        ? { mode: 'none_declared', declaration: 'no_proxy_surface' }
+        : {
+            mode: 'probe',
+            method: 'GET',
+            url: testPackage.negativeProxyProbe.urlTemplate.replace(
+              '{canaryUrl}',
+              encodeURIComponent(canaryUrl!.toString())
+            )
+          },
     lifecycle: testPackage.lifecycle,
     controls: {
       allowedHosts: [...new Set(allowedHosts)].sort(),
@@ -1526,7 +1591,7 @@ async function issueRuntimeObservationJob(
       networkMode: 'exact_host_allowlist',
       evidenceTrust: 'webflow_observed',
       executionEvidence: 'chromium_cdp_v1',
-      negativeProxyCanaryUrl: canaryUrl.toString()
+      negativeProxyCanaryUrl: canaryUrl?.toString() ?? null
     },
     boundaries: {
       partnerCanSubmitEvidence: false,

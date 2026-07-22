@@ -267,8 +267,9 @@ function RuntimeObservationCard({
   const [sandboxInstallationId, setSandboxInstallationId] = useState('');
   const [runtimeArtifacts, setRuntimeArtifacts] = useState<
     RuntimeTestPackageInput['runtimeArtifacts']
-  >([{ url: discoveredArtifactUrl, sha256: '', integrity: '' }]);
+  >([{ url: discoveredArtifactUrl, sha256: '', integrity: '', loadMode: 'document' }]);
   const [readySelector, setReadySelector] = useState('[data-runtime-ready]');
+  const [proxyMode, setProxyMode] = useState<'probe' | 'none_declared'>('probe');
   const [proxyTemplate, setProxyTemplate] = useState('');
   const [showNewPackage, setShowNewPackage] = useState(false);
   const [inputError, setInputError] = useState<string | null>(null);
@@ -296,11 +297,19 @@ function RuntimeObservationCard({
     setSandboxInstallationId(source?.sandboxInstallationId ?? '');
     setRuntimeArtifacts(
       source?.runtimeArtifacts.length
-        ? source.runtimeArtifacts.map((artifact) => ({ ...artifact }))
-        : [{ url: discoveredArtifactUrl, sha256: '', integrity: '' }]
+        ? source.runtimeArtifacts.map((artifact) => ({
+            ...artifact,
+            loadMode: artifact.loadMode ?? 'document'
+          }))
+        : [{ url: discoveredArtifactUrl, sha256: '', integrity: '', loadMode: 'document' }]
     );
     setReadySelector(source?.lifecycle.readySelector ?? '[data-runtime-ready]');
-    setProxyTemplate(source?.negativeProxyProbe.urlTemplate ?? '');
+    setProxyMode(source?.negativeProxyProbe.mode === 'none_declared' ? 'none_declared' : 'probe');
+    setProxyTemplate(
+      source?.negativeProxyProbe.mode === 'none_declared'
+        ? ''
+        : source?.negativeProxyProbe.urlTemplate ?? ''
+    );
   };
 
   useEffect(() => {
@@ -328,10 +337,10 @@ function RuntimeObservationCard({
         expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString()
       },
       runtimeArtifacts,
-      negativeProxyProbe: {
-        method: 'GET',
-        urlTemplate: proxyTemplate
-      },
+      negativeProxyProbe:
+        proxyMode === 'none_declared'
+          ? { mode: 'none_declared', declaration: 'no_proxy_surface' }
+          : { mode: 'probe', method: 'GET', urlTemplate: proxyTemplate },
       lifecycle: {
         readySelector
       }
@@ -401,15 +410,29 @@ function RuntimeObservationCard({
                       : latest.observation.evidence.blockers.join(' ')}
                   </span>
                 </div>
-                <div className={latest.observation.evidence.negativeProxyOutcome === 'blocked' ? 'pass' : 'fail'}>
+                <div
+                  className={
+                    latest.observation.evidence.negativeProxyOutcome === 'blocked'
+                      ? 'pass'
+                      : latest.observation.evidence.negativeProxyOutcome === 'not_applicable'
+                        ? 'neutral'
+                        : 'fail'
+                  }
+                >
                   <strong>
                     {latest.observation.evidence.negativeProxyOutcome === 'blocked'
                       ? 'Proxy canary blocked'
+                      : latest.observation.evidence.negativeProxyOutcome === 'not_applicable'
+                        ? 'Proxy check not applicable'
                       : latest.observation.evidence.negativeProxyOutcome === 'exposed'
                         ? 'Proxy canary exposed'
                         : 'Proxy canary inconclusive'}
                   </strong>
-                  <span>This is observed evidence, not an approval decision.</span>
+                  <span>
+                    {latest.observation.evidence.negativeProxyOutcome === 'not_applicable'
+                      ? 'Developer declared no proxy or fetch-through surface. A reviewer can verify this declaration.'
+                      : 'This is observed evidence, not an approval decision.'}
+                  </span>
                 </div>
               </div>
               <details
@@ -437,7 +460,13 @@ function RuntimeObservationCard({
                             {runtimeFile.hashMatched ? 'Hash matched' : 'Hash mismatch'}
                           </span>
                           <span className={runtimeFile.integrityMatched ? 'pass' : 'fail'}>
-                            {runtimeFile.integrityMatched ? 'SRI matched' : 'SRI mismatch'}
+                            {runtimeFile.loadMode === 'runtime_child'
+                              ? runtimeFile.integrityMatched
+                                ? 'Pinned parent verified'
+                                : 'Pinned parent not verified'
+                              : runtimeFile.integrityMatched
+                                ? 'SRI matched'
+                                : 'SRI mismatch'}
                           </span>
                         </div>
                       </li>
@@ -534,11 +563,19 @@ function RuntimeObservationCard({
             <legend><span>1</span> Dedicated test installation</legend>
             <label>
               Published Webflow test URL
-              <input required type="url" value={targetUrl} onChange={(event) => setTargetUrl(event.target.value)} placeholder="https://app-review-sandbox.webflow.io" />
+              <input aria-label="Published Webflow test URL" required type="url" value={targetUrl} onChange={(event) => setTargetUrl(event.target.value)} placeholder="https://app-review-sandbox.webflow.io" />
+              <small>
+                Use the published test page, not its Designer URL. Keep customer data and
+                production credentials out of this site.
+              </small>
             </label>
             <label>
               Webflow installation or site ID
-              <input required value={sandboxInstallationId} onChange={(event) => setSandboxInstallationId(event.target.value)} placeholder="webflow-sandbox-site-123" />
+              <input aria-label="Webflow installation or site ID" required value={sandboxInstallationId} onChange={(event) => setSandboxInstallationId(event.target.value)} placeholder="webflow-sandbox-site-123" />
+              <small>
+                Copy the installation ID supplied by your app, or the site ID shown in Webflow
+                Site settings. A site slug is not a site ID.
+              </small>
             </label>
           </fieldset>
           <fieldset>
@@ -547,13 +584,88 @@ function RuntimeObservationCard({
               List every JavaScript file that runs in this test. Each file must match its own
               SHA-256 and SRI pin.
             </p>
+            <details className="runtime-guide">
+              <summary>How to find and pin runtime files</summary>
+              <div className="runtime-guide-body">
+                <section>
+                  <h3>1. Find every runtime file</h3>
+                  <p>
+                    A runtime is JavaScript that your app loads on the published site, outside
+                    the uploaded app bundle. Start with the script in your install instructions.
+                  </p>
+                  <ol>
+                    <li>Open the published test page in a new browser tab.</li>
+                    <li>Open Developer Tools, choose Network, and filter for JavaScript.</li>
+                    <li>Reload the page and exercise the app once.</li>
+                    <li>
+                      Record the entry script, then include every child script it creates as a
+                      separate runtime file.
+                    </li>
+                  </ol>
+                  <p>
+                    Region, plan, or release alternatives belong in separate test packages when
+                    they do not execute together.
+                  </p>
+                </section>
+                <section>
+                  <h3>2. Download the exact bytes</h3>
+                  <p>
+                    Fetch the same URL used by the published page. The referrer matters for some
+                    runtime hosts. Replace both example values before running these commands.
+                  </p>
+                  <pre><code>{`TEST_URL="https://your-test-site.webflow.io"
+RUNTIME_URL="https://cdn.example.com/runtime.js"
+
+curl --fail --silent --show-error --location \\
+  --referer "$TEST_URL/" \\
+  "$RUNTIME_URL" \\
+  --output /tmp/reviewed-runtime.js
+
+shasum -a 256 /tmp/reviewed-runtime.js
+
+printf 'sha256-'
+openssl dgst -sha256 -binary /tmp/reviewed-runtime.js \\
+  | openssl base64 -A`}</code></pre>
+                  <p>
+                    If the download is blocked, do not hash an error page. Confirm the URL,
+                    publish state, test-site allowlist, and vendor access rules first.
+                  </p>
+                </section>
+                <section>
+                  <h3>3. Understand the two pins</h3>
+                  <dl>
+                    <div>
+                      <dt>SHA-256</dt>
+                      <dd>
+                        SHA-256 is the 64-character fingerprint of the downloaded file. Paste the
+                        lowercase value printed before the temporary filename.
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>SRI</dt>
+                      <dd>
+                        SRI is the same fingerprint encoded for a script tag. It starts with
+                        <code>sha256-</code> and lets the browser reject different bytes.
+                      </dd>
+                    </div>
+                  </dl>
+                  <p>
+                    For a page-loaded file, put the SRI value in the published script's{' '}
+                    <code>integrity</code> attribute and add{' '}
+                    <code>crossorigin=&quot;anonymous&quot;</code>. For a vendor-created child file, select
+                    “Loaded by another pinned runtime.” Webflow will require the child bytes to
+                    match their pin and prove that another pinned runtime initiated the request.
+                  </p>
+                </section>
+              </div>
+            </details>
             {runtimeArtifacts.map((artifact, index) => {
               const number = index + 1;
               const suffix = index === 0 ? '' : ` — file ${number}`;
               const fileName = runtimeFileName(artifact.url);
               const duplicateIndex = duplicateRuntimePosition(runtimeArtifacts, index);
               const update = (
-                field: keyof RuntimeTestPackageInput['runtimeArtifacts'][number],
+                field: 'url' | 'sha256',
                 value: string
               ) => {
                 setInputError(null);
@@ -590,21 +702,71 @@ function RuntimeObservationCard({
                   <label>
                     {`Immutable runtime URL${suffix}`}
                     <input
+                      aria-label={`Immutable runtime URL${suffix}`}
                       required
                       type="url"
                       value={artifact.url}
                       aria-invalid={duplicateIndex !== null || undefined}
                       onChange={(event) => update('url', event.target.value)}
                     />
+                    <small>
+                      Use the exact JavaScript request from the published test page. Prefer a
+                      versioned URL whose bytes will not change after review.
+                    </small>
                     {duplicateIndex !== null ? (
                       <small className="field-error">
                         Duplicates runtime file {duplicateIndex + 1}.
                       </small>
                     ) : null}
                   </label>
+                  <fieldset className="runtime-load-choice">
+                    <legend>{`How runtime file ${number} loads`}</legend>
+                    <label>
+                      <input
+                        type="radio"
+                        name={`runtime-load-mode-${index}`}
+                        value="document"
+                        checked={(artifact.loadMode ?? 'document') === 'document'}
+                        onChange={() => {
+                          setInputError(null);
+                          setRuntimeArtifacts((current) =>
+                            current.map((item, itemIndex) =>
+                              itemIndex === index ? { ...item, loadMode: 'document' } : item
+                            )
+                          );
+                        }}
+                      />
+                      Loaded directly by the published page
+                    </label>
+                    <label>
+                      <input
+                        type="radio"
+                        name={`runtime-load-mode-${index}`}
+                        value="runtime_child"
+                        checked={artifact.loadMode === 'runtime_child'}
+                        onChange={() => {
+                          setInputError(null);
+                          setRuntimeArtifacts((current) =>
+                            current.map((item, itemIndex) =>
+                              itemIndex === index ? { ...item, loadMode: 'runtime_child' } : item
+                            )
+                          );
+                        }}
+                      />
+                      Loaded by another pinned runtime
+                    </label>
+                    <small>
+                      Page-loaded files must carry this SRI in the DOM. Child files must be
+                      requested by another pinned runtime and match their own SHA-256.
+                    </small>
+                  </fieldset>
                   <label>
                     {`SHA-256${suffix}`}
-                    <input required pattern="[a-f0-9]{64}" value={artifact.sha256} onChange={(event) => update('sha256', event.target.value)} placeholder="64 lowercase hex characters" />
+                    <input aria-label={`SHA-256${suffix}`} required pattern="[a-f0-9]{64}" value={artifact.sha256} onChange={(event) => update('sha256', event.target.value)} placeholder="64 lowercase hex characters" />
+                    <small>
+                      Paste the lowercase SHA-256 of the downloaded JavaScript bytes—not the zip
+                      bundle and not a browser error response.
+                    </small>
                   </label>
                   <label>
                     {`Script integrity (SRI)${suffix}`}
@@ -615,7 +777,11 @@ function RuntimeObservationCard({
                       value={artifact.integrity}
                       placeholder="Calculated from SHA-256"
                     />
-                    <small>Calculated from the SHA-256 above.</small>
+                    <small>
+                      This app calculates SRI from the SHA-256 above. For a page-loaded file,
+                      publish this exact value in the script's <code>integrity</code> attribute.
+                      For a child file, it remains the human-readable form of the verified pin.
+                    </small>
                   </label>
                 </section>
               );
@@ -634,7 +800,12 @@ function RuntimeObservationCard({
                   setRuntimeArtifacts((current) =>
                     current.length >= 8
                       ? current
-                      : [...current, { url: '', sha256: '', integrity: '' }]
+                      : [...current, {
+                          url: '',
+                          sha256: '',
+                          integrity: '',
+                          loadMode: 'runtime_child'
+                        }]
                   );
                 }}
               >
@@ -649,12 +820,64 @@ function RuntimeObservationCard({
             <summary>Runtime-ready selector and proxy check</summary>
             <label>
               Ready selector
-              <input required value={readySelector} onChange={(event) => setReadySelector(event.target.value)} />
+              <input aria-label="Ready selector" required value={readySelector} onChange={(event) => setReadySelector(event.target.value)} />
+              <small>
+                Use a stable element or data attribute that appears only after every runtime file
+                is usable. Check it on the published page with{' '}
+                <code>document.querySelector('your-selector')</code>; the result must be an
+                element. A JavaScript flag such as <code>window.vendor.ready</code> is not a CSS
+                selector—have the runtime's ready event add a data attribute first.
+              </small>
             </label>
-            <label>
-              Proxy probe URL template
-              <input required value={proxyTemplate} onChange={(event) => setProxyTemplate(event.target.value)} placeholder="https://api.example.com/proxy?url={canaryUrl}" />
-            </label>
+            <fieldset className="proxy-choice">
+              <legend>Proxy or fetch-through surface</legend>
+              <label>
+                <input
+                  type="radio"
+                  name="proxy-mode"
+                  value="probe"
+                  checked={proxyMode === 'probe'}
+                  onChange={() => setProxyMode('probe')}
+                />
+                Yes — test my real proxy endpoint
+              </label>
+              <label>
+                <input
+                  type="radio"
+                  name="proxy-mode"
+                  value="none_declared"
+                  checked={proxyMode === 'none_declared'}
+                  onChange={() => {
+                    setProxyMode('none_declared');
+                    setProxyTemplate('');
+                  }}
+                />
+                No — this app has no proxy or fetch-through surface
+              </label>
+              <small>
+                “No” is a developer declaration, not observed proof. It remains visible to the
+                reviewer and will never be labeled “Proxy canary blocked.”
+              </small>
+            </fieldset>
+            {proxyMode === 'probe' ? (
+              <label>
+                Proxy probe URL template
+                <input aria-label="Proxy probe URL template" required value={proxyTemplate} onChange={(event) => setProxyTemplate(event.target.value)} placeholder="https://api.example.com/proxy?url={canaryUrl}" />
+                <small>
+                  Use your app's real proxy or fetch-through endpoint and include{' '}
+                  <code>{'{canaryUrl}'}</code> exactly once. Do not use an example URL or invent a
+                  blocked response.
+                </small>
+              </label>
+            ) : (
+              <div className="proxy-declaration" role="status">
+                <strong>Proxy check: not applicable</strong>
+                <p>
+                  The package will record that you declared no proxy surface. Webflow will not
+                  send a canary request or turn this declaration into observed blocking evidence.
+                </p>
+              </div>
+            )}
           </details>
           <button className="button button-primary" disabled={busy} type="submit">
             Prepare Webflow run
