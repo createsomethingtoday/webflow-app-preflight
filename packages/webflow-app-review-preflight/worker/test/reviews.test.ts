@@ -116,7 +116,8 @@ describe('review API', () => {
       runtimeIntegrityMatched: false,
       noRuntimeCreatedScripts: false,
       noUnreviewedRuntimeScripts: false,
-      negativeProxyBlocked: false
+      negativeProxyBlocked: false,
+      proxyPolicySatisfied: false
     });
     expect(result.blockers).toHaveLength(7);
   });
@@ -179,6 +180,68 @@ describe('review API', () => {
     );
     expect(passed.status).toBe('passed');
     expect(passed.blockers).toEqual([]);
+  });
+
+  test('accepts a pinned child runtime and a truthful no-proxy declaration', () => {
+    const runtimeArtifacts = [
+      {
+        url: 'https://api.concord.tech/site-v1/site-id/site-client',
+        sha256: 'a'.repeat(64),
+        integrity: 'sha256-entry',
+        loadMode: 'document' as const
+      },
+      {
+        url: 'https://api.concord.tech/site-v1/site-id/widget',
+        sha256: 'b'.repeat(64),
+        integrity: 'sha256-widget',
+        loadMode: 'runtime_child' as const
+      }
+    ];
+    const result = evaluateRuntimeSecurity(
+      {
+        runtimeReadyObserved: true,
+        runtimeArtifacts: [
+          {
+            url: runtimeArtifacts[0].url,
+            observedSha256: runtimeArtifacts[0].sha256,
+            loadedByPage: true,
+            domIntegrity: runtimeArtifacts[0].integrity,
+            trustedRuntimeInitiator: false
+          },
+          {
+            url: runtimeArtifacts[1].url,
+            observedSha256: runtimeArtifacts[1].sha256,
+            loadedByPage: true,
+            domIntegrity: null,
+            trustedRuntimeInitiator: true
+          }
+        ],
+        runtimeCreatedScripts: [],
+        unreviewedRuntimeScripts: [],
+        negativeProxyCanary: { url: null, outcome: 'not_applicable', statusCode: null }
+      },
+      {
+        target: {
+          url: 'https://app-concord-privacy.webflow.io/',
+          host: 'app-concord-privacy.webflow.io'
+        },
+        runtimeArtifacts,
+        negativeProxyProbe: {
+          mode: 'none_declared',
+          declaration: 'no_proxy_surface'
+        }
+      } as any
+    );
+
+    expect(result).toMatchObject({
+      status: 'passed',
+      predicates: {
+        runtimeIntegrityMatched: true,
+        negativeProxyBlocked: false,
+        proxyPolicySatisfied: true
+      },
+      blockers: []
+    });
   });
 
   test('returns the resolved Webflow identity and server-owned companion role', async () => {
@@ -1479,6 +1542,7 @@ describe('review API', () => {
           domIntegrity: TEST_RUNTIME_INTEGRITY,
           domCrossOrigin: 'anonymous',
           loadedByPage: true,
+          trustedRuntimeInitiator: false,
           sourceMap: { available: false }
         },
         {
@@ -1489,6 +1553,7 @@ describe('review API', () => {
           domIntegrity: TEST_RUNTIME_INTEGRITY,
           domCrossOrigin: 'anonymous',
           loadedByPage: true,
+          trustedRuntimeInitiator: false,
           sourceMap: { available: false }
         }
       ],
@@ -1817,7 +1882,8 @@ describe('review API', () => {
           runtimeIntegrityMatched: true,
           noRuntimeCreatedScripts: true,
           noUnreviewedRuntimeScripts: true,
-          negativeProxyBlocked: true
+          negativeProxyBlocked: true,
+          proxyPolicySatisfied: true
         },
         blockers: []
       }
@@ -1858,12 +1924,14 @@ describe('review API', () => {
     ).toEqual([
       {
         url: 'http://127.0.0.1:4173/runtime-v1.js',
+        loadMode: 'document',
         loadedByPage: true,
         hashMatched: true,
         integrityMatched: true
       },
       {
         url: 'http://127.0.0.1:4173/runtime-v2.js',
+        loadMode: 'document',
         loadedByPage: true,
         hashMatched: true,
         integrityMatched: true

@@ -82,7 +82,19 @@ export interface RuntimeArtifactPin {
   url: string;
   sha256: string;
   integrity: string;
+  loadMode?: 'document' | 'runtime_child';
 }
+
+export type RuntimeProxyPolicy =
+  | {
+      mode?: 'probe';
+      method: 'GET';
+      urlTemplate: string;
+    }
+  | {
+      mode: 'none_declared';
+      declaration: 'no_proxy_surface';
+    };
 
 export interface RuntimeLifecycleContract {
   readySelector: string;
@@ -101,10 +113,7 @@ export interface RuntimeTestPackageInput {
     expiresAt: string;
   };
   runtimeArtifacts: RuntimeArtifactPin[];
-  negativeProxyProbe: {
-    method: 'GET';
-    urlTemplate: string;
-  };
+  negativeProxyProbe: RuntimeProxyPolicy;
   lifecycle: RuntimeLifecycleContract;
 }
 
@@ -143,10 +152,16 @@ export interface RuntimeObservationJobContract {
   target: RuntimeTestPackage['target'];
   sandboxInstallationId: string;
   runtimeArtifacts: RuntimeArtifactPin[];
-  negativeProxyProbe: {
-    method: 'GET';
-    url: string;
-  };
+  negativeProxyProbe:
+    | {
+        mode?: 'probe';
+        method: 'GET';
+        url: string;
+      }
+    | {
+        mode: 'none_declared';
+        declaration: 'no_proxy_surface';
+      };
   lifecycle: RuntimeLifecycleContract;
   controls: {
     allowedHosts: string[];
@@ -156,7 +171,7 @@ export interface RuntimeObservationJobContract {
     networkMode: 'exact_host_allowlist';
     evidenceTrust: 'webflow_observed';
     executionEvidence: 'chromium_cdp_v1';
-    negativeProxyCanaryUrl: string;
+    negativeProxyCanaryUrl: string | null;
   };
   boundaries: {
     partnerCanSubmitEvidence: false;
@@ -185,17 +200,19 @@ export interface RuntimeObservationSummary {
       noRuntimeCreatedScripts: boolean;
       noUnreviewedRuntimeScripts: boolean;
       negativeProxyBlocked: boolean;
+      proxyPolicySatisfied?: boolean;
     };
     blockers: string[];
     runtimeFiles: Array<{
       url: string;
+      loadMode?: 'document' | 'runtime_child';
       loadedByPage: boolean;
       hashMatched: boolean;
       integrityMatched: boolean;
     }>;
     cleanupStatus: 'clean' | 'residue_detected' | 'not_tested';
     cleanupResidue: string[];
-    negativeProxyOutcome: 'blocked' | 'exposed' | 'error';
+    negativeProxyOutcome: 'blocked' | 'exposed' | 'error' | 'not_applicable';
     artifactCount: number;
     artifacts: Array<{
       kind: string;

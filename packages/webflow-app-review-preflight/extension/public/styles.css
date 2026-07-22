@@ -238,11 +238,29 @@ h3 { font-size: 12px; line-height: 1.3; font-weight: 600; }
 .observation-form input, .advanced-settings input { width: 100%; min-height: 34px; padding: 0 var(--space-2); border: 1px solid var(--color-border2); border-radius: var(--radius-sm); background: var(--color-background1); color: var(--color-text1); }
 .observation-form input:focus { outline: 2px solid var(--color-info); outline-offset: 1px; }
 .runtime-set-intro { margin: var(--space-2) 0 0; color: var(--color-text2); }
+.runtime-guide { margin-top: var(--space-3); border: 1px solid #34547d; border-radius: var(--radius-sm); background: #1b283a; }
+.runtime-guide > summary { padding: var(--space-3); color: var(--color-info); cursor: pointer; font-weight: 700; }
+.runtime-guide-body { display: grid; gap: 1px; border-top: 1px solid #34547d; background: #34547d; }
+.runtime-guide-body section { padding: var(--space-3); background: #1f2c3d; }
+.runtime-guide-body h3 { color: var(--color-text1); }
+.runtime-guide-body p, .runtime-guide-body ol, .runtime-guide-body dl { margin: var(--space-2) 0 0; color: var(--color-text2); }
+.runtime-guide-body ol { padding-left: var(--space-5); }
+.runtime-guide-body li + li { margin-top: var(--space-1); }
+.runtime-guide-body pre { overflow: auto; margin: var(--space-2) 0 0; padding: var(--space-2); border-radius: var(--radius-sm); background: #111820; color: #d6e4f8; font-size: 9px; line-height: 1.5; white-space: pre; }
+.runtime-guide-body dl div { display: grid; grid-template-columns: 72px 1fr; gap: var(--space-2); padding: var(--space-2) 0; border-top: 1px solid var(--color-border1); }
+.runtime-guide-body dt { color: var(--color-text1); font-weight: 700; }
+.runtime-guide-body dd { margin: 0; }
+.runtime-guide-body :not(pre) > code, .observation-form small code { color: #b9d3ff; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .95em; }
 .runtime-file { margin-top: var(--space-3); padding: var(--space-3); border: 1px solid var(--color-border1); border-radius: var(--radius-sm); background: var(--color-background1); }
 .runtime-file-heading { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); }
 .runtime-file-heading h3 { margin: 0; color: var(--color-text1); font-size: 12px; }
 .runtime-file-name { overflow: hidden; margin-right: auto; color: var(--color-text3); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .runtime-file-heading .button { min-height: 28px; padding: 0 var(--space-2); }
+.runtime-load-choice { margin-top: var(--space-3); padding: var(--space-3); border-color: var(--color-border1); background: var(--color-background2); }
+.runtime-load-choice label { display: grid; grid-template-columns: auto 1fr; align-items: center; gap: var(--space-2); margin-top: var(--space-2); color: var(--color-text2); font-weight: 500; }
+.runtime-load-choice input { width: auto; min-height: 0; margin: 0; accent-color: var(--color-action); }
+.runtime-load-choice > small { display: block; margin-top: var(--space-2); color: var(--color-text3); }
+.observation-form label > small { color: var(--color-text3); font-weight: 400; line-height: 1.45; }
 .field-error { color: var(--color-error); }
 .runtime-set-settings { margin-top: var(--space-3); padding: var(--space-3); border: 1px solid var(--color-border1); border-radius: var(--radius-sm); }
 .runtime-set-settings summary { color: var(--color-text2); cursor: pointer; font-weight: 600; }
@@ -250,6 +268,13 @@ h3 { font-size: 12px; line-height: 1.3; font-weight: 600; }
 .runtime-set-settings small { display: block; margin-top: var(--space-2); color: var(--color-text2); }
 .advanced-settings { padding: var(--space-3); border: 1px solid var(--color-border1); border-radius: var(--radius-md); }
 .advanced-settings summary { color: var(--color-text2); cursor: pointer; font-weight: 600; }
+.advanced-settings .proxy-choice { margin-top: var(--space-3); margin-bottom: 0; padding: var(--space-3); }
+.proxy-choice label { display: grid; grid-template-columns: auto 1fr; align-items: center; gap: var(--space-2); margin-top: var(--space-2); color: var(--color-text2); font-weight: 500; }
+.proxy-choice input { width: auto; min-height: 0; margin: 0; accent-color: var(--color-action); }
+.proxy-choice > small { display: block; margin-top: var(--space-2); color: var(--color-text3); }
+.proxy-declaration { margin-top: var(--space-3); padding: var(--space-3); border: 1px solid #34547d; border-radius: var(--radius-sm); background: #1f3048; }
+.proxy-declaration strong { color: var(--color-info); }
+.proxy-declaration p { margin-top: var(--space-1); color: var(--color-text2); }
 .observation-status { margin-top: var(--space-4); }
 .checkpoint-row { display: flex; gap: var(--space-2); padding: var(--space-3); border-left: 2px solid var(--color-info); background: #202b3b; }
 .checkpoint-row + .checkpoint-row { margin-top: 1px; }
@@ -265,6 +290,7 @@ h3 { font-size: 12px; line-height: 1.3; font-weight: 600; }
 .observation-results span { margin-top: 3px; color: var(--color-text3); font-size: 10px; }
 .observation-results .pass strong { color: var(--color-success); }
 .observation-results .fail strong { color: var(--color-error); }
+.observation-results .neutral strong { color: var(--color-info); }
 .runtime-file-results { margin-top: var(--space-3); padding: var(--space-3); border: 1px solid var(--color-border1); border-radius: var(--radius-md); color: var(--color-text2); }
 .runtime-file-results summary { cursor: pointer; font-weight: 600; }
 .runtime-file-results ul { margin: var(--space-2) 0 0; padding: 0; list-style: none; }

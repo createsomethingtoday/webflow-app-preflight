@@ -595,14 +595,107 @@ describe('App Review Preflight extension', () => {
           {
             url: 'https://api.consentpro.com/v2/cdn/runtime-v1.js',
             sha256: 'a'.repeat(64),
-            integrity: sriFromHex('a'.repeat(64))
+            integrity: sriFromHex('a'.repeat(64)),
+            loadMode: 'document'
           },
           {
             url: 'https://api.consentpro.com/v2/cdn/preferences-v1.js',
             sha256: 'b'.repeat(64),
-            integrity: sriFromHex('b'.repeat(64))
+            integrity: sriFromHex('b'.repeat(64)),
+            loadMode: 'runtime_child'
           }
         ]
+      })
+    );
+  });
+
+  test('guides a junior developer through locating and pinning production runtimes', async () => {
+    const review = consentProReview();
+    const runtimeApi: PreflightApi = {
+      ...api,
+      listReviews: async () => [{
+        id: review.id,
+        name: review.name,
+        updatedAt: review.updatedAt,
+        latestSequence: 1,
+        readiness: 'changes_required',
+        appName: 'Consent Pro by Finsweet',
+        coverage: review.latestVersion.result.coverage
+      }],
+      getReview: async () => review,
+      listRuntimeTestPackages: async () => []
+    };
+
+    render(<App api={runtimeApi} />);
+    fireEvent.click(await screen.findByRole('button', { name: /Consent Pro preflight/i }));
+
+    expect(await screen.findByText('How to find and pin runtime files')).toBeVisible();
+    fireEvent.click(screen.getByText('How to find and pin runtime files'));
+
+    expect(screen.getByText(/A runtime is JavaScript that your app loads on the published site/i)).toBeVisible();
+    expect(screen.getByText(/include every child script it creates/i)).toBeVisible();
+    expect(screen.getByText(/SHA-256 is the 64-character fingerprint/i)).toBeVisible();
+    expect(screen.getByText(/SRI is the same fingerprint encoded for a script tag/i)).toBeVisible();
+    fireEvent.click(screen.getByText('Runtime-ready selector and proxy check'));
+    expect(screen.getByText(/Do not use an example URL or invent a blocked response/i)).toBeVisible();
+    expect(screen.getByText(/A JavaScript flag such as/i)).toBeVisible();
+    expect(screen.getByText(/Use the exact JavaScript request from the published test page/i)).toBeVisible();
+    expect(screen.getByText(/This app calculates SRI from the SHA-256/i)).toBeVisible();
+  });
+
+  test('records no proxy surface without inventing a canary result', async () => {
+    const review = consentProReview();
+    const createRuntimeTestPackage = vi
+      .fn<PreflightApi['createRuntimeTestPackage']>()
+      .mockRejectedValue(new Error('Test stopped after package submission.'));
+    const runtimeApi: PreflightApi = {
+      ...api,
+      listReviews: async () => [{
+        id: review.id,
+        name: review.name,
+        updatedAt: review.updatedAt,
+        latestSequence: 1,
+        readiness: 'changes_required',
+        appName: 'Consent Pro by Finsweet',
+        coverage: review.latestVersion.result.coverage
+      }],
+      getReview: async () => review,
+      listRuntimeTestPackages: async () => [],
+      createRuntimeTestPackage
+    };
+
+    render(<App api={runtimeApi} />);
+    fireEvent.click(await screen.findByRole('button', { name: /Consent Pro preflight/i }));
+    fireEvent.change(await screen.findByLabelText('Published Webflow test URL'), {
+      target: { value: 'https://app-review-sandbox.webflow.io' }
+    });
+    fireEvent.change(screen.getByLabelText('Webflow installation or site ID'), {
+      target: { value: 'webflow-sandbox-site-123' }
+    });
+    fireEvent.change(screen.getByLabelText('Immutable runtime URL'), {
+      target: { value: 'https://api.consentpro.com/v2/cdn/runtime-v1.js' }
+    });
+    fireEvent.change(screen.getByLabelText('SHA-256'), {
+      target: { value: 'a'.repeat(64) }
+    });
+    fireEvent.click(screen.getByText('Runtime-ready selector and proxy check'));
+    fireEvent.click(
+      screen.getByRole('radio', { name: 'No — this app has no proxy or fetch-through surface' })
+    );
+
+    expect(screen.queryByLabelText('Proxy probe URL template')).not.toBeInTheDocument();
+    expect(screen.getByText('Proxy check: not applicable')).toBeVisible();
+    fireEvent.click(screen.getByRole('button', { name: 'Prepare Webflow run' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm test package' }));
+
+    await waitFor(() => expect(createRuntimeTestPackage).toHaveBeenCalledTimes(1));
+    expect(createRuntimeTestPackage).toHaveBeenCalledWith(
+      review.id,
+      expect.objectContaining({
+        negativeProxyProbe: {
+          mode: 'none_declared',
+          declaration: 'no_proxy_surface'
+        }
       })
     );
   });

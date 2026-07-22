@@ -17,7 +17,7 @@ You will:
 5. Repeat the developer test on the same package.
 6. Ask a reviewer to replay that exact package.
 
-At the end, you will know whether the published site ran the reviewed runtime and blocked the proxy canary.
+At the end, you will know whether the published site ran the reviewed runtime and whether its declared proxy policy held.
 
 ## Before you start
 
@@ -31,7 +31,7 @@ Have these items ready:
 - the SHA-256 for each runtime file
 - the matching SRI value for each file; the app calculates it from a valid SHA-256
 - a CSS selector that appears only when the runtime is ready
-- the approved proxy-check URL template
+- the approved proxy-check URL template, or confirmation that the app has no proxy or fetch-through surface
 
 Do not use a customer site. Do not use a runtime URL that can change while the review is running.
 
@@ -43,6 +43,8 @@ Do not use a customer site. Do not use a runtime URL that can change while the r
 | Bundle SHA-256       | A fingerprint for the zip; different files have a different fingerprint              |
 | Runtime              | The production JavaScript that the published site loads and runs                     |
 | Runtime file         | One immutable JavaScript file used by that runtime                                   |
+| Page-loaded file     | A runtime file loaded by the page; its script element must carry the pinned SRI      |
+| Child runtime file   | A file requested by another pinned runtime; its bytes and pinned parent are verified |
 | Runtime set          | Every runtime file that must execute together in one test scenario                   |
 | Runtime SHA-256      | A fingerprint for the runtime file that actually ran                                 |
 | SRI                  | The integrity value the browser uses to check a script before it runs                |
@@ -50,7 +52,7 @@ Do not use a customer site. Do not use a runtime URL that can change while the r
 | Observation job      | One server-requested browser run against one test package                            |
 | E2B sandbox          | The short-lived remote computer that runs the browser                                |
 | `webflow_observed`   | Evidence produced by Webflow's server-owned browser, not your computer               |
-| Proxy canary         | A harmless request used to prove that the app proxy does not expose an arbitrary URL |
+| Proxy canary         | A harmless request used when an app has a proxy or fetch-through surface             |
 
 ## Step 1: Upload the bundle
 
@@ -82,8 +84,9 @@ Enter each field carefully:
 | Immutable runtime URL           | The exact URL for the first production JavaScript file     | The review points to a specific runtime file             |
 | SHA-256                         | The lowercase SHA-256 for that file's bytes                | The executed file matches the reviewed file              |
 | Script integrity (SRI)          | The `sha256-...` integrity value for those same bytes      | The page pins that script in the browser                 |
+| How the runtime file loads      | Directly from the page or from another pinned runtime      | Selects the correct integrity proof for this file        |
 | Ready selector                  | A CSS selector added when the runtime is ready             | The runtime finished loading and reached its ready state |
-| Proxy probe URL template        | The approved proxy template with the canary placeholder    | The proxy refuses an arbitrary destination               |
+| Proxy or fetch-through surface  | A real probe template, or **No** when none exists          | Tests the surface without inventing a proxy result       |
 
 Review the values before you continue. A previous setup may be loaded for convenience, but the loaded values are still test input. They are not evidence.
 
@@ -108,7 +111,7 @@ For each added file:
 3. confirm the file runs on the dedicated test site
 4. keep it in the package only if it belongs to this exact scenario
 
-A runtime may create a script element for a declared file. That file still has to load and match its own SHA-256 and SRI. A child script that is not declared in the runtime set remains a security blocker. Declaring a file is test input; it does not close a bundle finding or create review approval.
+A runtime may create a script element for a declared file. Select **Loaded by another pinned runtime** for that child. The child must load, match its own SHA-256, and be initiated by another pinned file in the same runtime set. It does not need a DOM SRI attribute. A child script that is not declared remains a security blocker. Declaring a file is test input; it does not close a bundle finding or create review approval.
 
 ### Get SHA-256 and verify the matching SRI
 
@@ -116,7 +119,8 @@ If a runtime URL is public, download it once and calculate its SHA-256:
 
 ```bash
 export RUNTIME_URL="https://cdn.example.com/runtime/version/runtime.js"
-curl -fsSL "$RUNTIME_URL" -o /tmp/app-review-runtime.js
+export TEST_URL="https://your-test-site.webflow.io"
+curl -fsSL --referer "$TEST_URL/" "$RUNTIME_URL" -o /tmp/app-review-runtime.js
 shasum -a 256 /tmp/app-review-runtime.js
 openssl dgst -sha256 -binary /tmp/app-review-runtime.js | openssl base64 -A
 ```
@@ -129,7 +133,7 @@ Both values must describe the exact bytes served by that runtime URL. Repeat the
 
 For a ready selector, prefer one clear marker such as `[data-runtime-ready]`. The runtime must add that marker only after it is ready for review.
 
-The proxy template must contain `{canaryUrl}` where the test URL belongs. Do not replace the placeholder yourself.
+If the app has a proxy or fetch-through endpoint, choose **Yes** and use its real URL template. The template must contain `{canaryUrl}` where the test URL belongs. Do not replace the placeholder yourself. If the app has no such surface, choose **No**. This records a developer declaration as **not applicable**; it does not pretend that Webflow observed a blocked request.
 
 ### When to create a new package
 
@@ -143,7 +147,7 @@ Create a new package when any of these values changes:
 - any runtime file SHA-256 or SRI
 - which runtime files execute together
 - ready selector
-- proxy-check URL
+- proxy policy or proxy-check URL
 
 Do not create a new package merely because you want to run the same test again.
 
@@ -201,22 +205,24 @@ The app checks each fact separately:
 - the ready selector appeared
 - the page loaded every pinned runtime file
 - every executed runtime file matched its SHA-256
-- every declared script tag matched its SRI
+- every page-loaded script tag matched its SRI
+- every declared child runtime was initiated by another pinned runtime
 - the runtime did not create undeclared script elements
 - no unreviewed child script appeared
-- the proxy canary was blocked
+- the proxy canary was blocked, or the package preserved the explicit no-proxy declaration
 
 A blocked result is useful evidence. It means the browser ran, but the app did not meet one or more runtime rules.
 
-Open **Runtime file results** to find the exact file that failed. Each row reports **Loaded**, **Hash matched**, and **SRI matched** separately. The runtime-file count tells you how many declared files were checked; the evidence-artifact count includes screenshots and sanitized logs, so it is usually larger.
+Open **Runtime file results** to find the exact file that failed. Each row reports **Loaded** and **Hash matched**. A page-loaded file reports **SRI matched**; a child file reports whether its pinned parent was verified. The runtime-file count tells you how many declared files were checked; the evidence-artifact count includes screenshots and sanitized logs, so it is usually larger.
 
 ### Proxy canary
 
-| Result                        | Meaning                                                                 |
-| ----------------------------- | ----------------------------------------------------------------------- |
-| **Proxy canary blocked**      | Expected result; the proxy refused the canary destination               |
-| **Proxy canary exposed**      | Security blocker; the proxy allowed the canary destination              |
-| **Proxy canary inconclusive** | The check failed to reach a clear result; investigate before continuing |
+| Result                         | Meaning                                                                   |
+| ------------------------------ | ------------------------------------------------------------------------- |
+| **Proxy canary blocked**       | Expected result; the proxy refused the canary destination                 |
+| **Proxy canary exposed**       | Security blocker; the proxy allowed the canary destination                |
+| **Proxy canary inconclusive**  | The check failed to reach a clear result; investigate before continuing   |
+| **Proxy check not applicable** | The developer declared no proxy surface; a reviewer can verify that claim |
 
 ### Evidence artifacts
 
@@ -277,7 +283,7 @@ Do not change the app merely to make a service error disappear.
 - a prior E2B sandbox is not verified as terminated
 - the reviewer workspace opens a different package
 - the developer and reviewer runs disagree
-- the proxy canary is exposed or inconclusive
+- the proxy canary is exposed or inconclusive, or the no-proxy declaration is disputed
 - anyone asks you to upload, edit, or relabel observed evidence
 - anyone describes a Preflight result as an official decision
 

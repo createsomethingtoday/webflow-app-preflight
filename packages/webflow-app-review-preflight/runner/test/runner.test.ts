@@ -160,7 +160,8 @@ async function runAdversarialFixture({
         ? [{
             url: `${origin}/runtime-v2.js`,
             sha256: secondaryDigest.toString('hex'),
-            integrity: secondaryIntegrity
+            integrity: secondaryIntegrity,
+            loadMode: 'runtime_child' as const
           }]
         : [])
     ],
@@ -217,6 +218,32 @@ describe('runtime observation runner boundaries', () => {
     ).toThrow('attempts to broaden its host boundary');
   });
 
+  test('accepts an explicit no-proxy policy only with a null canary URL', () => {
+    const safe = contract();
+    const noProxy = {
+      ...safe,
+      negativeProxyProbe: {
+        mode: 'none_declared' as const,
+        declaration: 'no_proxy_surface' as const
+      },
+      controls: {
+        ...safe.controls,
+        negativeProxyCanaryUrl: null
+      }
+    };
+
+    expect(() => validateObservationContract('job-1', noProxy)).not.toThrow();
+    expect(() =>
+      validateObservationContract('job-1', {
+        ...noProxy,
+        controls: {
+          ...noProxy.controls,
+          negativeProxyCanaryUrl: 'http://127.0.0.1:4174/canary'
+        }
+      })
+    ).toThrow('unsafe contract');
+  });
+
   test('does not let reviewed page code forge a blocked proxy canary', async () => {
     const { result, manifest } = await runAdversarialFixture({
       proxyStatus: 503,
@@ -226,6 +253,21 @@ describe('runtime observation runner boundaries', () => {
     });
     expect(result.negativeProxyOutcome).toBe('error');
     expect(manifest.negativeProxyCanary).toMatchObject({ outcome: 'error', statusCode: 503 });
+  }, 30_000);
+
+  test('uses a production-like Chrome identity for automation-sensitive runtimes', async () => {
+    const { manifest } = await runAdversarialFixture({
+      proxyStatus: 403,
+      runtimeSource: `
+        const looksLikeChrome = navigator.userAgent.includes('Chrome/');
+        if (looksLikeChrome && navigator.webdriver === false) {
+          document.body.setAttribute('data-runtime-ready', '');
+        }`,
+      markup: (integrity) =>
+        `<script src="/runtime-v1.js" integrity="${integrity}" crossorigin="anonymous"></script>`
+    });
+
+    expect(manifest.runtimeReadyObserved).toBe(true);
   }, 30_000);
 
   test('does not treat a fetched but unexecuted pinned script as loaded', async () => {
@@ -326,8 +368,8 @@ describe('runtime observation runner boundaries', () => {
     });
 
     expect(manifest.runtimeArtifacts).toEqual([
-      expect.objectContaining({ loadedByPage: true }),
-      expect.objectContaining({ loadedByPage: true })
+      expect.objectContaining({ loadedByPage: true, trustedRuntimeInitiator: false }),
+      expect.objectContaining({ loadedByPage: true, trustedRuntimeInitiator: true })
     ]);
     expect(manifest.runtimeCreatedScripts).toEqual([]);
     expect(manifest.unreviewedRuntimeScripts).toEqual([]);

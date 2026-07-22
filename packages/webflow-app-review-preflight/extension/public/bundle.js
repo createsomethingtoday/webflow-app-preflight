@@ -24703,8 +24703,9 @@
     const [confirm, setConfirm] = (0, import_react.useState)(false);
     const [targetUrl, setTargetUrl] = (0, import_react.useState)("");
     const [sandboxInstallationId, setSandboxInstallationId] = (0, import_react.useState)("");
-    const [runtimeArtifacts, setRuntimeArtifacts] = (0, import_react.useState)([{ url: discoveredArtifactUrl, sha256: "", integrity: "" }]);
+    const [runtimeArtifacts, setRuntimeArtifacts] = (0, import_react.useState)([{ url: discoveredArtifactUrl, sha256: "", integrity: "", loadMode: "document" }]);
     const [readySelector, setReadySelector] = (0, import_react.useState)("[data-runtime-ready]");
+    const [proxyMode, setProxyMode] = (0, import_react.useState)("probe");
     const [proxyTemplate, setProxyTemplate] = (0, import_react.useState)("");
     const [showNewPackage, setShowNewPackage] = (0, import_react.useState)(false);
     const [inputError, setInputError] = (0, import_react.useState)(null);
@@ -24720,10 +24721,16 @@
       setTargetUrl(source?.target.url ?? "");
       setSandboxInstallationId(source?.sandboxInstallationId ?? "");
       setRuntimeArtifacts(
-        source?.runtimeArtifacts.length ? source.runtimeArtifacts.map((artifact) => ({ ...artifact })) : [{ url: discoveredArtifactUrl, sha256: "", integrity: "" }]
+        source?.runtimeArtifacts.length ? source.runtimeArtifacts.map((artifact) => ({
+          ...artifact,
+          loadMode: artifact.loadMode ?? "document"
+        })) : [{ url: discoveredArtifactUrl, sha256: "", integrity: "", loadMode: "document" }]
       );
       setReadySelector(source?.lifecycle.readySelector ?? "[data-runtime-ready]");
-      setProxyTemplate(source?.negativeProxyProbe.urlTemplate ?? "");
+      setProxyMode(source?.negativeProxyProbe.mode === "none_declared" ? "none_declared" : "probe");
+      setProxyTemplate(
+        source?.negativeProxyProbe.mode === "none_declared" ? "" : source?.negativeProxyProbe.urlTemplate ?? ""
+      );
     };
     (0, import_react.useEffect)(() => {
       if (latest) return;
@@ -24747,10 +24754,7 @@
           expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1e3).toISOString()
         },
         runtimeArtifacts,
-        negativeProxyProbe: {
-          method: "GET",
-          urlTemplate: proxyTemplate
-        },
+        negativeProxyProbe: proxyMode === "none_declared" ? { mode: "none_declared", declaration: "no_proxy_surface" } : { mode: "probe", method: "GET", urlTemplate: proxyTemplate },
         lifecycle: {
           readySelector
         }
@@ -24817,10 +24821,16 @@
                   /* @__PURE__ */ (0, import_jsx_runtime.jsx)("strong", { children: latest.observation.evidence.securityStatus === "passed" ? "Runtime security passed" : "Runtime security blocked" }),
                   /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: latest.observation.evidence.securityStatus === "passed" ? "Published code matched its reviewed hash and SRI requirements." : latest.observation.evidence.blockers.join(" ") })
                 ] }),
-                /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: latest.observation.evidence.negativeProxyOutcome === "blocked" ? "pass" : "fail", children: [
-                  /* @__PURE__ */ (0, import_jsx_runtime.jsx)("strong", { children: latest.observation.evidence.negativeProxyOutcome === "blocked" ? "Proxy canary blocked" : latest.observation.evidence.negativeProxyOutcome === "exposed" ? "Proxy canary exposed" : "Proxy canary inconclusive" }),
-                  /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: "This is observed evidence, not an approval decision." })
-                ] })
+                /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(
+                  "div",
+                  {
+                    className: latest.observation.evidence.negativeProxyOutcome === "blocked" ? "pass" : latest.observation.evidence.negativeProxyOutcome === "not_applicable" ? "neutral" : "fail",
+                    children: [
+                      /* @__PURE__ */ (0, import_jsx_runtime.jsx)("strong", { children: latest.observation.evidence.negativeProxyOutcome === "blocked" ? "Proxy canary blocked" : latest.observation.evidence.negativeProxyOutcome === "not_applicable" ? "Proxy check not applicable" : latest.observation.evidence.negativeProxyOutcome === "exposed" ? "Proxy canary exposed" : "Proxy canary inconclusive" }),
+                      /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: latest.observation.evidence.negativeProxyOutcome === "not_applicable" ? "Developer declared no proxy or fetch-through surface. A reviewer can verify this declaration." : "This is observed evidence, not an approval decision." })
+                    ]
+                  }
+                )
               ] }),
               /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(
                 "details",
@@ -24843,7 +24853,7 @@
                             /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "runtime-result-checks", children: [
                               /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: runtimeFile.loadedByPage ? "pass" : "fail", children: runtimeFile.loadedByPage ? "Loaded" : "Not loaded" }),
                               /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: runtimeFile.hashMatched ? "pass" : "fail", children: runtimeFile.hashMatched ? "Hash matched" : "Hash mismatch" }),
-                              /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: runtimeFile.integrityMatched ? "pass" : "fail", children: runtimeFile.integrityMatched ? "SRI matched" : "SRI mismatch" })
+                              /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: runtimeFile.integrityMatched ? "pass" : "fail", children: runtimeFile.loadMode === "runtime_child" ? runtimeFile.integrityMatched ? "Pinned parent verified" : "Pinned parent not verified" : runtimeFile.integrityMatched ? "SRI matched" : "SRI mismatch" })
                             ] })
                           ]
                         },
@@ -24932,11 +24942,13 @@
                   ] }),
                   /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("label", { children: [
                     "Published Webflow test URL",
-                    /* @__PURE__ */ (0, import_jsx_runtime.jsx)("input", { required: true, type: "url", value: targetUrl, onChange: (event) => setTargetUrl(event.target.value), placeholder: "https://app-review-sandbox.webflow.io" })
+                    /* @__PURE__ */ (0, import_jsx_runtime.jsx)("input", { "aria-label": "Published Webflow test URL", required: true, type: "url", value: targetUrl, onChange: (event) => setTargetUrl(event.target.value), placeholder: "https://app-review-sandbox.webflow.io" }),
+                    /* @__PURE__ */ (0, import_jsx_runtime.jsx)("small", { children: "Use the published test page, not its Designer URL. Keep customer data and production credentials out of this site." })
                   ] }),
                   /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("label", { children: [
                     "Webflow installation or site ID",
-                    /* @__PURE__ */ (0, import_jsx_runtime.jsx)("input", { required: true, value: sandboxInstallationId, onChange: (event) => setSandboxInstallationId(event.target.value), placeholder: "webflow-sandbox-site-123" })
+                    /* @__PURE__ */ (0, import_jsx_runtime.jsx)("input", { "aria-label": "Webflow installation or site ID", required: true, value: sandboxInstallationId, onChange: (event) => setSandboxInstallationId(event.target.value), placeholder: "webflow-sandbox-site-123" }),
+                    /* @__PURE__ */ (0, import_jsx_runtime.jsx)("small", { children: "Copy the installation ID supplied by your app, or the site ID shown in Webflow Site settings. A site slug is not a site ID." })
                   ] })
                 ] }),
                 /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("fieldset", { children: [
@@ -24945,6 +24957,66 @@
                     " Pin the reviewed runtime set"
                   ] }),
                   /* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", { className: "runtime-set-intro", children: "List every JavaScript file that runs in this test. Each file must match its own SHA-256 and SRI pin." }),
+                  /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("details", { className: "runtime-guide", children: [
+                    /* @__PURE__ */ (0, import_jsx_runtime.jsx)("summary", { children: "How to find and pin runtime files" }),
+                    /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "runtime-guide-body", children: [
+                      /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("section", { children: [
+                        /* @__PURE__ */ (0, import_jsx_runtime.jsx)("h3", { children: "1. Find every runtime file" }),
+                        /* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", { children: "A runtime is JavaScript that your app loads on the published site, outside the uploaded app bundle. Start with the script in your install instructions." }),
+                        /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("ol", { children: [
+                          /* @__PURE__ */ (0, import_jsx_runtime.jsx)("li", { children: "Open the published test page in a new browser tab." }),
+                          /* @__PURE__ */ (0, import_jsx_runtime.jsx)("li", { children: "Open Developer Tools, choose Network, and filter for JavaScript." }),
+                          /* @__PURE__ */ (0, import_jsx_runtime.jsx)("li", { children: "Reload the page and exercise the app once." }),
+                          /* @__PURE__ */ (0, import_jsx_runtime.jsx)("li", { children: "Record the entry script, then include every child script it creates as a separate runtime file." })
+                        ] }),
+                        /* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", { children: "Region, plan, or release alternatives belong in separate test packages when they do not execute together." })
+                      ] }),
+                      /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("section", { children: [
+                        /* @__PURE__ */ (0, import_jsx_runtime.jsx)("h3", { children: "2. Download the exact bytes" }),
+                        /* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", { children: "Fetch the same URL used by the published page. The referrer matters for some runtime hosts. Replace both example values before running these commands." }),
+                        /* @__PURE__ */ (0, import_jsx_runtime.jsx)("pre", { children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)("code", { children: `TEST_URL="https://your-test-site.webflow.io"
+RUNTIME_URL="https://cdn.example.com/runtime.js"
+
+curl --fail --silent --show-error --location \\
+  --referer "$TEST_URL/" \\
+  "$RUNTIME_URL" \\
+  --output /tmp/reviewed-runtime.js
+
+shasum -a 256 /tmp/reviewed-runtime.js
+
+printf 'sha256-'
+openssl dgst -sha256 -binary /tmp/reviewed-runtime.js \\
+  | openssl base64 -A` }) }),
+                        /* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", { children: "If the download is blocked, do not hash an error page. Confirm the URL, publish state, test-site allowlist, and vendor access rules first." })
+                      ] }),
+                      /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("section", { children: [
+                        /* @__PURE__ */ (0, import_jsx_runtime.jsx)("h3", { children: "3. Understand the two pins" }),
+                        /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("dl", { children: [
+                          /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { children: [
+                            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("dt", { children: "SHA-256" }),
+                            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("dd", { children: "SHA-256 is the 64-character fingerprint of the downloaded file. Paste the lowercase value printed before the temporary filename." })
+                          ] }),
+                          /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { children: [
+                            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("dt", { children: "SRI" }),
+                            /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("dd", { children: [
+                              "SRI is the same fingerprint encoded for a script tag. It starts with",
+                              /* @__PURE__ */ (0, import_jsx_runtime.jsx)("code", { children: "sha256-" }),
+                              " and lets the browser reject different bytes."
+                            ] })
+                          ] })
+                        ] }),
+                        /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("p", { children: [
+                          "For a page-loaded file, put the SRI value in the published script's",
+                          " ",
+                          /* @__PURE__ */ (0, import_jsx_runtime.jsx)("code", { children: "integrity" }),
+                          " attribute and add",
+                          " ",
+                          /* @__PURE__ */ (0, import_jsx_runtime.jsx)("code", { children: 'crossorigin="anonymous"' }),
+                          ". For a vendor-created child file, select \u201CLoaded by another pinned runtime.\u201D Webflow will require the child bytes to match their pin and prove that another pinned runtime initiated the request."
+                        ] })
+                      ] })
+                    ] })
+                  ] }),
                   runtimeArtifacts.map((artifact, index) => {
                     const number = index + 1;
                     const suffix = index === 0 ? "" : ` \u2014 file ${number}`;
@@ -24985,6 +25057,7 @@
                         /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
                           "input",
                           {
+                            "aria-label": `Immutable runtime URL${suffix}`,
                             required: true,
                             type: "url",
                             value: artifact.url,
@@ -24992,15 +25065,61 @@
                             onChange: (event) => update("url", event.target.value)
                           }
                         ),
+                        /* @__PURE__ */ (0, import_jsx_runtime.jsx)("small", { children: "Use the exact JavaScript request from the published test page. Prefer a versioned URL whose bytes will not change after review." }),
                         duplicateIndex !== null ? /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("small", { className: "field-error", children: [
                           "Duplicates runtime file ",
                           duplicateIndex + 1,
                           "."
                         ] }) : null
                       ] }),
+                      /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("fieldset", { className: "runtime-load-choice", children: [
+                        /* @__PURE__ */ (0, import_jsx_runtime.jsx)("legend", { children: `How runtime file ${number} loads` }),
+                        /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("label", { children: [
+                          /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
+                            "input",
+                            {
+                              type: "radio",
+                              name: `runtime-load-mode-${index}`,
+                              value: "document",
+                              checked: (artifact.loadMode ?? "document") === "document",
+                              onChange: () => {
+                                setInputError(null);
+                                setRuntimeArtifacts(
+                                  (current) => current.map(
+                                    (item, itemIndex) => itemIndex === index ? { ...item, loadMode: "document" } : item
+                                  )
+                                );
+                              }
+                            }
+                          ),
+                          "Loaded directly by the published page"
+                        ] }),
+                        /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("label", { children: [
+                          /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
+                            "input",
+                            {
+                              type: "radio",
+                              name: `runtime-load-mode-${index}`,
+                              value: "runtime_child",
+                              checked: artifact.loadMode === "runtime_child",
+                              onChange: () => {
+                                setInputError(null);
+                                setRuntimeArtifacts(
+                                  (current) => current.map(
+                                    (item, itemIndex) => itemIndex === index ? { ...item, loadMode: "runtime_child" } : item
+                                  )
+                                );
+                              }
+                            }
+                          ),
+                          "Loaded by another pinned runtime"
+                        ] }),
+                        /* @__PURE__ */ (0, import_jsx_runtime.jsx)("small", { children: "Page-loaded files must carry this SRI in the DOM. Child files must be requested by another pinned runtime and match their own SHA-256." })
+                      ] }),
                       /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("label", { children: [
                         `SHA-256${suffix}`,
-                        /* @__PURE__ */ (0, import_jsx_runtime.jsx)("input", { required: true, pattern: "[a-f0-9]{64}", value: artifact.sha256, onChange: (event) => update("sha256", event.target.value), placeholder: "64 lowercase hex characters" })
+                        /* @__PURE__ */ (0, import_jsx_runtime.jsx)("input", { "aria-label": `SHA-256${suffix}`, required: true, pattern: "[a-f0-9]{64}", value: artifact.sha256, onChange: (event) => update("sha256", event.target.value), placeholder: "64 lowercase hex characters" }),
+                        /* @__PURE__ */ (0, import_jsx_runtime.jsx)("small", { children: "Paste the lowercase SHA-256 of the downloaded JavaScript bytes\u2014not the zip bundle and not a browser error response." })
                       ] }),
                       /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("label", { children: [
                         `Script integrity (SRI)${suffix}`,
@@ -25014,7 +25133,11 @@
                             placeholder: "Calculated from SHA-256"
                           }
                         ),
-                        /* @__PURE__ */ (0, import_jsx_runtime.jsx)("small", { children: "Calculated from the SHA-256 above." })
+                        /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("small", { children: [
+                          "This app calculates SRI from the SHA-256 above. For a page-loaded file, publish this exact value in the script's ",
+                          /* @__PURE__ */ (0, import_jsx_runtime.jsx)("code", { children: "integrity" }),
+                          " attribute. For a child file, it remains the human-readable form of the verified pin."
+                        ] })
                       ] })
                     ] }, index);
                   }),
@@ -25029,7 +25152,12 @@
                         disabled: runtimeArtifacts.length >= 8,
                         onClick: () => {
                           setRuntimeArtifacts(
-                            (current) => current.length >= 8 ? current : [...current, { url: "", sha256: "", integrity: "" }]
+                            (current) => current.length >= 8 ? current : [...current, {
+                              url: "",
+                              sha256: "",
+                              integrity: "",
+                              loadMode: "runtime_child"
+                            }]
                           );
                         },
                         children: "Add another runtime file"
@@ -25042,11 +25170,61 @@
                   /* @__PURE__ */ (0, import_jsx_runtime.jsx)("summary", { children: "Runtime-ready selector and proxy check" }),
                   /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("label", { children: [
                     "Ready selector",
-                    /* @__PURE__ */ (0, import_jsx_runtime.jsx)("input", { required: true, value: readySelector, onChange: (event) => setReadySelector(event.target.value) })
+                    /* @__PURE__ */ (0, import_jsx_runtime.jsx)("input", { "aria-label": "Ready selector", required: true, value: readySelector, onChange: (event) => setReadySelector(event.target.value) }),
+                    /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("small", { children: [
+                      "Use a stable element or data attribute that appears only after every runtime file is usable. Check it on the published page with",
+                      " ",
+                      /* @__PURE__ */ (0, import_jsx_runtime.jsx)("code", { children: "document.querySelector('your-selector')" }),
+                      "; the result must be an element. A JavaScript flag such as ",
+                      /* @__PURE__ */ (0, import_jsx_runtime.jsx)("code", { children: "window.vendor.ready" }),
+                      " is not a CSS selector\u2014have the runtime's ready event add a data attribute first."
+                    ] })
                   ] }),
-                  /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("label", { children: [
+                  /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("fieldset", { className: "proxy-choice", children: [
+                    /* @__PURE__ */ (0, import_jsx_runtime.jsx)("legend", { children: "Proxy or fetch-through surface" }),
+                    /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("label", { children: [
+                      /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
+                        "input",
+                        {
+                          type: "radio",
+                          name: "proxy-mode",
+                          value: "probe",
+                          checked: proxyMode === "probe",
+                          onChange: () => setProxyMode("probe")
+                        }
+                      ),
+                      "Yes \u2014 test my real proxy endpoint"
+                    ] }),
+                    /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("label", { children: [
+                      /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
+                        "input",
+                        {
+                          type: "radio",
+                          name: "proxy-mode",
+                          value: "none_declared",
+                          checked: proxyMode === "none_declared",
+                          onChange: () => {
+                            setProxyMode("none_declared");
+                            setProxyTemplate("");
+                          }
+                        }
+                      ),
+                      "No \u2014 this app has no proxy or fetch-through surface"
+                    ] }),
+                    /* @__PURE__ */ (0, import_jsx_runtime.jsx)("small", { children: "\u201CNo\u201D is a developer declaration, not observed proof. It remains visible to the reviewer and will never be labeled \u201CProxy canary blocked.\u201D" })
+                  ] }),
+                  proxyMode === "probe" ? /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("label", { children: [
                     "Proxy probe URL template",
-                    /* @__PURE__ */ (0, import_jsx_runtime.jsx)("input", { required: true, value: proxyTemplate, onChange: (event) => setProxyTemplate(event.target.value), placeholder: "https://api.example.com/proxy?url={canaryUrl}" })
+                    /* @__PURE__ */ (0, import_jsx_runtime.jsx)("input", { "aria-label": "Proxy probe URL template", required: true, value: proxyTemplate, onChange: (event) => setProxyTemplate(event.target.value), placeholder: "https://api.example.com/proxy?url={canaryUrl}" }),
+                    /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("small", { children: [
+                      "Use your app's real proxy or fetch-through endpoint and include",
+                      " ",
+                      /* @__PURE__ */ (0, import_jsx_runtime.jsx)("code", { children: "{canaryUrl}" }),
+                      " exactly once. Do not use an example URL or invent a blocked response."
+                    ] })
+                  ] }) : /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "proxy-declaration", role: "status", children: [
+                    /* @__PURE__ */ (0, import_jsx_runtime.jsx)("strong", { children: "Proxy check: not applicable" }),
+                    /* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", { children: "The package will record that you declared no proxy surface. Webflow will not send a canary request or turn this declaration into observed blocking evidence." })
                   ] })
                 ] }),
                 /* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", { className: "button button-primary", disabled: busy, type: "submit", children: "Prepare Webflow run" }),
