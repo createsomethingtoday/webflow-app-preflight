@@ -11,7 +11,9 @@ The Worker stores immutable review versions and evidence. E2B runs each producti
 
 ## Start here
 
-- [Operator guide](./packages/webflow-app-review-preflight/OPERATOR_RUNBOOK.md) — learn how to validate a production runtime with the app
+- [Production runtime guide - Markdown](./docs/WEBFLOW_RUNTIME_VALIDATION_GUIDE.md) - junior-friendly walkthrough with a worked example
+- [Production runtime guide - PDF](./output/pdf/webflow-runtime-validation-guide.pdf) - Webflow-branded print and handoff edition
+- [Maintainer runbook](./packages/webflow-app-review-preflight/OPERATOR_RUNBOOK.md) - detailed operating and service procedures
 - [Architecture and security boundaries](./packages/webflow-app-review-preflight/README.md)
 - [Designer Extension guide](./packages/webflow-app-review-preflight/extension/README.md)
 - [E2B runtime template](./packages/webflow-app-review-runtime-template/README.md)
