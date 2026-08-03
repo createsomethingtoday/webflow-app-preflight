@@ -1,10 +1,12 @@
 import type {
   BundleReview,
+  CreateHostedRuntimeReviewInput,
   RuntimeTestPackageInput,
   RuntimeTestPackageView
 } from '@create-something/webflow-app-review-preflight';
 
 export type { RuntimeTestPackageInput, RuntimeTestPackageView };
+export type { CreateHostedRuntimeReviewInput };
 
 export interface ReviewVersion {
   id: string;
@@ -28,6 +30,7 @@ export interface ReviewSummary {
   latestSequence: number;
   readiness: BundleReview['summary']['readiness'];
   appName: string | null;
+  reviewType?: 'bundle' | 'runtime_manifest';
   coverage: BundleReview['coverage'];
 }
 
@@ -59,6 +62,7 @@ export interface PreflightApi {
   listReviews(): Promise<ReviewSummary[]>;
   getReview(id: string): Promise<StoredReview>;
   createReview(file: File, name?: string): Promise<StoredReview>;
+  createRuntimeReview(input: CreateHostedRuntimeReviewInput): Promise<StoredReview>;
   addRevision(reviewId: string, file: File): Promise<RevisionResult>;
   listRuntimeTestPackages(reviewId: string): Promise<RuntimeTestPackageView[]>;
   createRuntimeTestPackage(

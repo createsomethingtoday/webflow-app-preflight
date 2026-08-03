@@ -73,6 +73,61 @@ describe('E2B runtime launcher', () => {
     }
   });
 
+  it('injects a fresh per-sandbox launch secret and sends it only on the sandbox /run call', async () => {
+    const observed: Array<{ url: string; headers: Record<string, string>; body: any }> = [];
+    const mockFetch = vi.fn<typeof fetch>(async (target, init) => {
+      const url = String(target);
+      const headers = Object.fromEntries(new Headers(init?.headers).entries());
+      const body = init?.body ? JSON.parse(String(init.body)) : null;
+      observed.push({ url, headers, body });
+      if (url === 'https://api.e2b.app/sandboxes') {
+        return Response.json(
+          {
+            templateID: '040h2lvinyukiy8eym45',
+            sandboxID: `sandbox-secret-${observed.length}`,
+            trafficAccessToken: 'traffic-access-token'
+          },
+          { status: 201 }
+        );
+      }
+      return new Response(JSON.stringify({ accepted: true }), { status: 202 });
+    });
+    vi.stubGlobal('fetch', mockFetch);
+    const env = {
+      E2B_API_KEY: 'e2b-test-key',
+      E2B_RUNTIME_TEMPLATE_ID: 'app-review-companion-runtime:f47ac10b-58cc-4372-a567-0e02b2c3d479'
+    } as Env;
+
+    try {
+      const first = await launchRuntimeObservationInE2B(input, env);
+      const second = await launchRuntimeObservationInE2B(input, env);
+
+      const [createA, runA, createB, runB] = observed;
+      const secretA = createA!.body.envVars.APP_REVIEW_RUNTIME_LAUNCH_SECRET as string;
+      const secretB = createB!.body.envVars.APP_REVIEW_RUNTIME_LAUNCH_SECRET as string;
+
+      // Fresh, cryptographically sized, per-sandbox secret.
+      expect(secretA).toMatch(/^[A-Za-z0-9_-]{40,}$/);
+      expect(secretB).toMatch(/^[A-Za-z0-9_-]{40,}$/);
+      expect(secretA).not.toBe(secretB);
+      expect(secretA).not.toBe(input.capability);
+
+      // Sent to the sandbox /run route in the agreed header.
+      expect(runA!.url).toContain('/run');
+      expect(runA!.headers['x-webflow-runtime-launch-secret']).toBe(secretA);
+      expect(runB!.headers['x-webflow-runtime-launch-secret']).toBe(secretB);
+
+      // Never appears in the /run body, the create metadata, or the value
+      // returned toward any user surface.
+      expect(JSON.stringify(runA!.body)).not.toContain(secretA);
+      expect(JSON.stringify(createA!.body.metadata)).not.toContain(secretA);
+      expect(JSON.stringify(first)).not.toContain(secretA);
+      expect(JSON.stringify(second)).not.toContain(secretB);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('verifies sandbox termination through an E2B 404 read-back', async () => {
     const request = vi
       .fn<typeof fetch>()

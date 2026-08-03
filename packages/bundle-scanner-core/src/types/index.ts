@@ -55,6 +55,12 @@ export interface ScanConfig {
     zipSafety: {
       preventZipSlip: boolean;
       maxTotalUnzippedBytes: number;
+      /**
+       * Cap on a single entry's uncompressed size, enforced against the
+       * declared size BEFORE decompression to block single-entry
+       * decompression bombs. Defaults to maxTotalUnzippedBytes when absent.
+       */
+      maxEntryUnzippedBytes?: number;
       maxFiles: number;
     };
   };
@@ -277,53 +283,6 @@ export interface ScanHistoryEntry {
   totalBytes: number;
   findingCount: number;
   fullReport: ScanReport;
-}
-
-// ============================================================================
-// AI ANALYSIS
-// ============================================================================
-
-/**
- * A potential risk missed by the scanner
- */
-export interface AiMissedRisk {
-  title: string;
-  whyItMatters: string;
-  evidence: Array<{ filePath: string; line: number | null; snippet: string }>;
-  confidence: Confidence;
-  suggestedNextCheck: string;
-}
-
-/**
- * Suggested new rule to add
- */
-export interface AiSuggestedRuleAddition {
-  proposedRuleName: string;
-  rationale: string;
-  suggestedRegexOrAstIdea: string;
-  recommendedFileGlobs: string[];
-  falsePositiveNotes: string[];
-  confidence: Confidence;
-}
-
-/**
- * Suggestion to reduce false positives
- */
-export interface AiSuggestedNoiseReduction {
-  currentIssue: string;
-  proposal: string;
-  riskOfHidingRealIssues: Confidence;
-}
-
-/**
- * Complete AI analysis result
- */
-export interface AiAnalysisResult {
-  missedRisks: AiMissedRisk[];
-  suggestedRuleAdditions: AiSuggestedRuleAddition[];
-  suggestedNoiseReductions: AiSuggestedNoiseReduction[];
-  questionsForReviewer: string[];
-  reviewStatusRecommendation?: 'MANUAL_REVIEW_REQUIRED' | 'LOOKS_GOOD';
 }
 
 // ============================================================================

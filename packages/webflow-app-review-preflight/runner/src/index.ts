@@ -15,6 +15,9 @@ const SECRET_TEXT =
 const EMAIL = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi;
 const JOB_FETCH_TIMEOUT_MS = 10_000;
 const EVIDENCE_UPLOAD_TIMEOUT_MS = 30_000;
+// Caps for reading attacker-controlled bytes into runner memory.
+const MAX_RUNTIME_ARTIFACT_BYTES = 16 * 1024 * 1024;
+const MAX_SOURCE_MAP_BYTES = 16 * 1024 * 1024;
 
 export interface RuntimeRunnerInput {
   apiBaseUrl: string;
@@ -124,9 +127,24 @@ function isPrivateNetworkAddress(address: string): boolean {
   );
 }
 
+function privateHostsAllowed(): boolean {
+  return process.env.RUNTIME_ALLOW_PRIVATE_HOSTS === '1';
+}
+
 async function assertResolvedHostBoundary(hosts: Set<string>): Promise<void> {
+  const allowPrivate = privateHostsAllowed();
   for (const host of hosts) {
-    if (host === 'localhost' || isPrivateNetworkAddress(host)) continue;
+    if (host === 'localhost' || isPrivateNetworkAddress(host)) {
+      // Loopback / RFC1918 hosts are exactly what this boundary exists to block:
+      // reaching them lets the sandboxed browser hit the template's own launch
+      // endpoint (http://127.0.0.1:3000/run) or cloud metadata surfaces. They are
+      // permitted ONLY as an explicit test/integration opt-in.
+      if (allowPrivate) continue;
+      throw new Error(
+        `Allowed host ${host} is a loopback or private-network address; ` +
+          'set RUNTIME_ALLOW_PRIVATE_HOSTS=1 only in trusted local fixtures to permit it.'
+      );
+    }
     const addresses = await lookup(host, { all: true, verbatim: true });
     if (
       addresses.length === 0 ||
@@ -134,6 +152,11 @@ async function assertResolvedHostBoundary(hosts: Set<string>): Promise<void> {
     ) {
       throw new Error(`Allowed host ${host} did not resolve to a public network address.`);
     }
+    // TOCTOU: we resolve here, but the browser resolves the host again when it
+    // actually connects. A DNS-rebinding server can return a public address now
+    // and a private one at navigation time. The CDP Network.responseReceived
+    // private-IP detection (privateNetworkResponses) is the defense-in-depth
+    // backstop for that window.
   }
 }
 
@@ -163,17 +186,20 @@ function safeIdentifier(value: string): string {
   return /^[a-zA-Z0-9_.:-]{1,80}$/.test(value) ? value : `[redacted:${sha256(value).slice(0, 12)}]`;
 }
 
+// Collects RAW initiator URLs. These are used only for equality comparison
+// against the raw pinned-runtime URLs; they are never serialized, so they are
+// not sanitized here (keeping them raw prevents query-string aliasing).
 function stackUrls(value: unknown, result = new Set<string>()): Set<string> {
   if (!value || typeof value !== 'object') return result;
   const record = value as Record<string, unknown>;
   if (typeof record.url === 'string' && record.url) {
-    result.add(sanitizeUrl(record.url));
+    result.add(record.url);
   }
   if (Array.isArray(record.callFrames)) {
     for (const frame of record.callFrames) {
       if (!frame || typeof frame !== 'object') continue;
       const url = (frame as Record<string, unknown>).url;
-      if (typeof url === 'string' && url) result.add(sanitizeUrl(url));
+      if (typeof url === 'string' && url) result.add(url);
     }
   }
   if (record.stack) stackUrls(record.stack, result);
@@ -188,7 +214,10 @@ async function collectTrustedExecutionEvidence(
   workerUrls: string[],
   pins: RuntimeObservationJobContract['runtimeArtifacts']
 ): Promise<TrustedExecutionEvidence> {
-  const pinnedUrls = new Set(pins.map((pin) => sanitizeUrl(pin.url)));
+  // Evidence maps are keyed on the RAW url so that distinct query strings
+  // (runtime.js?v=1 vs runtime.js?v=2) never collapse to one key. URLs are
+  // sanitized only when they become serialized labels below.
+  const pinnedUrls = new Set(pins.map((pin) => pin.url));
   const runtimeHosts = new Set(pins.map((pin) => new URL(pin.url).hostname.toLowerCase()));
   const executedDigestsByUrl = new Map<string, Set<string>>();
   const trustedRuntimeInitiatedUrls = new Set<string>();
@@ -196,19 +225,16 @@ async function collectTrustedExecutionEvidence(
   const unreviewedRuntimeScripts = new Set<string>();
 
   for (const parsed of parsedScripts.slice(0, 1_000)) {
-    const parsedUrl = sanitizeUrl(parsed.url);
+    const rawUrl = parsed.url;
+    const isValidUrl = rawUrl !== '' && URL.canParse(rawUrl);
     const initiatorUrls = stackUrls(parsed.stackTrace);
     stackUrls(parsed.frameInitiatorStack, initiatorUrls);
     const initiatedByPinnedRuntime = [...initiatorUrls].some((url) => pinnedUrls.has(url));
     let isRuntimeHostScript = false;
-    if (parsedUrl !== '[invalid-url]') {
-      try {
-        isRuntimeHostScript = runtimeHosts.has(new URL(parsedUrl).hostname.toLowerCase());
-      } catch {
-        isRuntimeHostScript = false;
-      }
+    if (isValidUrl) {
+      isRuntimeHostScript = runtimeHosts.has(new URL(rawUrl).hostname.toLowerCase());
     }
-    if (!pinnedUrls.has(parsedUrl) && !initiatedByPinnedRuntime && !isRuntimeHostScript) continue;
+    if (!pinnedUrls.has(rawUrl) && !initiatedByPinnedRuntime && !isRuntimeHostScript) continue;
 
     let source = '';
     try {
@@ -218,48 +244,43 @@ async function collectTrustedExecutionEvidence(
       source = '';
     }
     const digest = sha256(source);
-    if (pinnedUrls.has(parsedUrl)) {
-      const digests = executedDigestsByUrl.get(parsedUrl) ?? new Set<string>();
+    if (pinnedUrls.has(rawUrl)) {
+      const digests = executedDigestsByUrl.get(rawUrl) ?? new Set<string>();
       digests.add(digest);
-      executedDigestsByUrl.set(parsedUrl, digests);
-      if (initiatedByPinnedRuntime) trustedRuntimeInitiatedUrls.add(parsedUrl);
+      executedDigestsByUrl.set(rawUrl, digests);
+      if (initiatedByPinnedRuntime) trustedRuntimeInitiatedUrls.add(rawUrl);
       continue;
     }
 
-    const label =
-      parsedUrl === '[invalid-url]' ? `[inline-or-eval:${digest.slice(0, 12)}]` : parsedUrl;
+    const label = isValidUrl ? sanitizeUrl(rawUrl) : `[inline-or-eval:${digest.slice(0, 12)}]`;
     if (initiatedByPinnedRuntime) runtimeCreatedScripts.add(label);
     if (initiatedByPinnedRuntime || isRuntimeHostScript) unreviewedRuntimeScripts.add(label);
   }
 
   for (const request of scriptRequests.slice(0, 1_000)) {
-    const requestedUrl = sanitizeUrl(request.url);
+    const rawUrl = request.url;
+    const isValidUrl = URL.canParse(rawUrl);
     const initiatorUrls = stackUrls(request.initiator);
     const initiatedByPinnedRuntime = [...initiatorUrls].some((url) => pinnedUrls.has(url));
-    if (pinnedUrls.has(requestedUrl)) {
-      if (initiatedByPinnedRuntime) trustedRuntimeInitiatedUrls.add(requestedUrl);
+    if (pinnedUrls.has(rawUrl)) {
+      if (initiatedByPinnedRuntime) trustedRuntimeInitiatedUrls.add(rawUrl);
       continue;
     }
     let isRuntimeHostScript = false;
-    if (requestedUrl !== '[invalid-url]') {
-      try {
-        isRuntimeHostScript = runtimeHosts.has(new URL(requestedUrl).hostname.toLowerCase());
-      } catch {
-        isRuntimeHostScript = false;
-      }
+    if (isValidUrl) {
+      isRuntimeHostScript = runtimeHosts.has(new URL(rawUrl).hostname.toLowerCase());
     }
     if (!initiatedByPinnedRuntime && !isRuntimeHostScript) continue;
-    const label =
-      requestedUrl === '[invalid-url]'
-        ? `[${request.resourceType.toLowerCase()}-request]`
-        : requestedUrl;
+    const label = isValidUrl
+      ? sanitizeUrl(rawUrl)
+      : `[${request.resourceType.toLowerCase()}-request]`;
     if (initiatedByPinnedRuntime || isRuntimeHostScript) runtimeCreatedScripts.add(label);
     unreviewedRuntimeScripts.add(label);
   }
 
   for (const workerUrl of workerUrls.slice(0, 100)) {
+    if (pinnedUrls.has(workerUrl)) continue;
     const label = sanitizeUrl(workerUrl);
-    if (pinnedUrls.has(label)) continue;
     runtimeCreatedScripts.add(label);
     unreviewedRuntimeScripts.add(label);
   }
@@ -386,15 +407,21 @@ async function captureState(page: Page): Promise<BrowserState> {
   });
   return {
     ...value,
-    scripts: value.scripts.map((script) => ({
-      ...script,
-      src: sanitizeUrl(script.src)
-    })),
+    // src is kept RAW; sanitize only at serialization (see serializeScripts).
     storage: {
       local: value.storage.local.map((item) => ({ ...item, key: safeIdentifier(item.key) })),
       session: value.storage.session.map((item) => ({ ...item, key: safeIdentifier(item.key) }))
     }
   };
+}
+
+// Sanitizes script src values for evidence artifacts. Internal comparisons use
+// the raw src; only serialized output passes through here.
+function serializeScripts(scripts: BrowserState['scripts']): BrowserState['scripts'] {
+  return scripts.map((script) => ({
+    ...script,
+    src: script.src === '[invalid-url]' ? script.src : sanitizeUrl(script.src)
+  }));
 }
 
 function attributesRecord(attributes: string[]): Record<string, string> {
@@ -422,9 +449,10 @@ async function captureTrustedScripts(
     const { attributes } = await cdp.send('DOM.getAttributes', { nodeId });
     const values = attributesRecord(attributes);
     if (!values.src) continue;
+    // Keep src RAW; sanitize only at serialization (see serializeScripts).
     let src = '[invalid-url]';
     try {
-      src = sanitizeUrl(new URL(values.src, documentUrl).toString());
+      src = new URL(values.src, documentUrl).toString();
     } catch {
       src = '[invalid-url]';
     }
@@ -449,6 +477,66 @@ async function screenshot(page: Page): Promise<Uint8Array> {
   );
 }
 
+// Reads a response body while enforcing a byte cap, so a hostile server cannot
+// exhaust runner memory with an unbounded (or Content-Length-lying) body.
+async function readCapped(response: Response, maxBytes: number): Promise<Uint8Array> {
+  const declared = Number(response.headers.get('content-length') ?? '');
+  if (Number.isFinite(declared) && declared > maxBytes) {
+    throw new Error('Response exceeds the byte cap.');
+  }
+  if (!response.body) {
+    const buffer = new Uint8Array(await response.arrayBuffer());
+    if (buffer.byteLength > maxBytes) throw new Error('Response exceeds the byte cap.');
+    return buffer;
+  }
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value) {
+        total += value.byteLength;
+        if (total > maxBytes) throw new Error('Response exceeds the byte cap.');
+        chunks.push(value);
+      }
+    }
+  } finally {
+    await reader.cancel().catch(() => {});
+  }
+  const merged = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    merged.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return merged;
+}
+
+async function readCappedBody(url: string, maxBytes: number): Promise<Uint8Array> {
+  const response = await fetch(url, {
+    redirect: 'manual',
+    signal: AbortSignal.timeout(5_000)
+  });
+  return readCapped(response, maxBytes);
+}
+
+async function sourceMapReachable(url: URL, maxBytes: number): Promise<boolean> {
+  const response = await fetch(url, {
+    method: 'GET',
+    redirect: 'manual',
+    signal: AbortSignal.timeout(5_000)
+  });
+  if (!response.ok) {
+    await response.body?.cancel().catch(() => {});
+    return false;
+  }
+  // Drain within the cap so a hostile map cannot blow up runner memory.
+  await readCapped(response, maxBytes);
+  return true;
+}
+
 async function observeRuntimeArtifact(
   pin: RuntimeObservationJobContract['runtimeArtifacts'][number],
   response: PlaywrightResponse | null,
@@ -459,61 +547,59 @@ async function observeRuntimeArtifact(
 ): Promise<RuntimeArtifactObservation> {
   const bytes = response
     ? new Uint8Array(await response.body())
-    : new Uint8Array(
-        await (
-          await fetch(pin.url, {
-            redirect: 'manual',
-            signal: AbortSignal.timeout(5_000)
-          })
-        ).arrayBuffer()
-      );
+    : await readCappedBody(pin.url, MAX_RUNTIME_ARTIFACT_BYTES);
   const source = new TextDecoder().decode(bytes);
   const match = source.match(/[#@]\s*sourceMappingURL=([^\s*]+)/);
   let sourceMap: RuntimeArtifactObservation['sourceMap'] = { available: false };
   if (match?.[1]) {
     const sourceMapUrl = new URL(match[1], pin.url);
-    if (allowedHosts.has(sourceMapUrl.hostname.toLowerCase())) {
+    // The sourceMappingURL is attacker-controlled runtime bytes. Restrict to an
+    // explicit http(s) protocol allowlist (not just an incidental empty-hostname
+    // filter) and to the host allowlist, and cap the response body.
+    if (
+      ['http:', 'https:'].includes(sourceMapUrl.protocol) &&
+      allowedHosts.has(sourceMapUrl.hostname.toLowerCase())
+    ) {
       try {
-        const mapResponse = await fetch(sourceMapUrl, {
-          method: 'GET',
-          redirect: 'manual',
-          signal: AbortSignal.timeout(5_000)
-        });
-        sourceMap = {
-          available: mapResponse.ok,
-          url: sanitizeUrl(sourceMapUrl.toString())
-        };
+        const available = await sourceMapReachable(sourceMapUrl, MAX_SOURCE_MAP_BYTES);
+        sourceMap = { available, url: sanitizeUrl(sourceMapUrl.toString()) };
       } catch {
         sourceMap = { available: false, url: sanitizeUrl(sourceMapUrl.toString()) };
       }
     }
   }
   const observedSha256 = sha256(bytes);
+  // scripts (request-boundary DOM captures) and the evidence maps are all keyed
+  // on the RAW pin url, so each pin resolves to exactly its own file even when
+  // two pins share a sanitized query string.
   return {
     url: pin.url,
     expectedSha256: pin.sha256,
     observedSha256,
     integrity: pin.integrity,
-    domIntegrity: scripts.find((script) => script.src === sanitizeUrl(pin.url))?.integrity ?? null,
-    domCrossOrigin:
-      scripts.find((script) => script.src === sanitizeUrl(pin.url))?.crossOrigin ?? null,
+    domIntegrity: scripts.find((script) => script.src === pin.url)?.integrity ?? null,
+    domCrossOrigin: scripts.find((script) => script.src === pin.url)?.crossOrigin ?? null,
     loadedByPage:
       response !== null &&
-      (executedDigestsByUrl.get(sanitizeUrl(pin.url))?.has(observedSha256) ?? false),
-    trustedRuntimeInitiator: trustedRuntimeInitiatedUrls.has(sanitizeUrl(pin.url)),
+      (executedDigestsByUrl.get(pin.url)?.has(observedSha256) ?? false),
+    trustedRuntimeInitiator: trustedRuntimeInitiatedUrls.has(pin.url),
     sourceMap
   };
+}
+
+interface CaptureResult {
+  status: 'complete' | 'failed';
+  manifest: Record<string, unknown>;
+  artifacts: EvidenceArtifact[];
+  cleanupStatus: 'clean' | 'residue_detected' | 'not_tested';
+  negativeProxyOutcome: 'blocked' | 'exposed' | 'error' | 'not_applicable';
+  failureReason?: string;
 }
 
 async function capture(
   contract: RuntimeObservationJobContract,
   browser: Browser
-): Promise<{
-  manifest: Record<string, unknown>;
-  artifacts: EvidenceArtifact[];
-  cleanupStatus: 'clean' | 'residue_detected' | 'not_tested';
-  negativeProxyOutcome: 'blocked' | 'exposed' | 'error' | 'not_applicable';
-}> {
+): Promise<CaptureResult> {
   const startedAt = new Date();
   const allowedHosts = new Set(contract.controls.allowedHosts);
   await assertResolvedHostBoundary(allowedHosts);
@@ -573,27 +659,39 @@ async function capture(
       await route.continue();
       return;
     }
-    const requestedUrl = sanitizeUrl(url.toString());
+    const rawUrl = url.toString();
     if (
       cdp &&
       request.resourceType() === 'script' &&
-      contract.runtimeArtifacts.some((artifact) => sanitizeUrl(artifact.url) === requestedUrl) &&
-      !observedRuntimeArtifactRequests.has(requestedUrl)
+      contract.runtimeArtifacts.some((artifact) => artifact.url === rawUrl) &&
+      !observedRuntimeArtifactRequests.has(rawUrl)
     ) {
-      observedRuntimeArtifactRequests.add(requestedUrl);
+      observedRuntimeArtifactRequests.add(rawUrl);
       try {
         const scripts = await captureTrustedScripts(cdp, contract.target.url);
-        const script = scripts.find((candidate) => candidate.src === requestedUrl);
-        if (script) requestBoundaryScripts.set(requestedUrl, script);
+        // captureTrustedScripts now returns RAW src; match on the raw url.
+        const script = scripts.find((candidate) => candidate.src === rawUrl);
+        if (script) requestBoundaryScripts.set(rawUrl, script);
       } catch {
         // Missing request-boundary attributes fail closed in the final predicate.
       }
     }
+    // Off-allowlist requests must not consume the request budget, otherwise
+    // adversarial noise can exhaust maxRequests and starve the pinned runtime
+    // request (surfaced as a false "Declared runtime did not load" blocker).
+    if (!allowedHosts.has(url.hostname.toLowerCase())) {
+      recordNetwork({
+        phase: 'request',
+        url: sanitizeUrl(url.toString()),
+        method: request.method(),
+        resourceType: request.resourceType(),
+        blocked: true
+      });
+      await route.abort('blockedbyclient');
+      return;
+    }
     requestCount += 1;
-    if (
-      requestCount > contract.controls.maxRequests ||
-      !allowedHosts.has(url.hostname.toLowerCase())
-    ) {
+    if (requestCount > contract.controls.maxRequests) {
       recordNetwork({
         phase: 'request',
         url: sanitizeUrl(url.toString()),
@@ -695,12 +793,26 @@ async function capture(
     }
   });
 
-  try {
+  // Artifacts are accumulated as they are produced so that a mid-run failure or
+  // budget timeout can still upload partial evidence (FIX 2).
+  const partialArtifacts: EvidenceArtifact[] = [];
+  const collectLogArtifacts = (): EvidenceArtifact[] => [
+    jsonArtifact('network_log', { entries: network, droppedEntries: droppedNetworkEntries }),
+    jsonArtifact('console_log', {
+      messages: consoleMessages,
+      pageErrors,
+      droppedMessages: droppedConsoleMessages,
+      droppedPageErrors
+    })
+  ];
+
+  const runObservation = async (): Promise<CaptureResult> => {
     await page.goto(contract.target.url, {
       waitUntil: 'domcontentloaded',
       timeout: contract.controls.requestTimeoutMs
     });
     const before = await screenshot(page);
+    partialArtifacts.push(pngArtifact('screenshot_before', before));
     let runtimeReadyObserved = false;
     try {
       await page.waitForSelector(contract.lifecycle.readySelector, {
@@ -715,6 +827,7 @@ async function capture(
     const installedState = await captureState(page);
     installedState.scripts = await captureTrustedScripts(cdp, page.url());
     const afterInstall = await screenshot(page);
+    partialArtifacts.push(pngArtifact('screenshot_after_install', afterInstall));
 
     let negativeProxyOutcome: 'blocked' | 'exposed' | 'error' | 'not_applicable' =
       contract.negativeProxyProbe.mode === 'none_declared' ? 'not_applicable' : 'error';
@@ -738,28 +851,37 @@ async function capture(
       }
     }
 
+    // A stale or unclickable cleanup selector must not abort the whole run; it
+    // downgrades cleanup to 'not_tested' instead (FIX 2).
+    let cleanupTested = Boolean(contract.lifecycle.cleanupTrigger);
     if (contract.lifecycle.cleanupTrigger) {
-      await page.locator(contract.lifecycle.cleanupTrigger.selector).click({
-        timeout: contract.controls.requestTimeoutMs
-      });
-      await page.waitForTimeout(250);
+      try {
+        await page.locator(contract.lifecycle.cleanupTrigger.selector).click({
+          timeout: contract.controls.requestTimeoutMs
+        });
+        await page.waitForTimeout(250);
+      } catch {
+        cleanupTested = false;
+        recordPageError('Cleanup trigger could not be exercised; cleanup not tested.');
+      }
     }
     const observedState = await captureState(page);
     observedState.scripts = await captureTrustedScripts(cdp, page.url());
     const afterObservation = await screenshot(page);
+    partialArtifacts.push(pngArtifact('screenshot_after_observation', afterObservation));
 
-    const pinnedUrls = new Set(
-      contract.runtimeArtifacts.map((artifact) => sanitizeUrl(artifact.url))
-    );
+    // Keyed on the RAW artifact url; sanitize only when emitting labels.
+    const pinnedUrls = new Set(contract.runtimeArtifacts.map((artifact) => artifact.url));
     const observedResidue = [
       ...observedState.scripts
         .filter((script) => pinnedUrls.has(script.src))
-        .map((script) => `script:${script.src}`),
+        .map((script) => `script:${sanitizeUrl(script.src)}`),
       ...observedState.storage.local.map((item) => `localStorage:${item.key}`),
       ...observedState.storage.session.map((item) => `sessionStorage:${item.key}`)
     ].slice(0, 100);
-    const residue = contract.lifecycle.cleanupTrigger ? observedResidue : [];
-    const cleanupStatus = contract.lifecycle.cleanupTrigger
+    const cleanupExercised = Boolean(contract.lifecycle.cleanupTrigger) && cleanupTested;
+    const residue = cleanupExercised ? observedResidue : [];
+    const cleanupStatus: 'clean' | 'residue_detected' | 'not_tested' = cleanupExercised
       ? residue.length === 0
         ? 'clean'
         : 'residue_detected'
@@ -796,7 +918,7 @@ async function capture(
           return false;
         }
       })
-      .map((script) => script.src)
+      .map((script) => sanitizeUrl(script.src))
       .slice(0, 100);
     const pageWorldRuntimeCreatedScripts = installedState.scripts
       .filter(
@@ -806,7 +928,7 @@ async function capture(
           script.src !== '[invalid-url]' &&
           !pinnedUrls.has(script.src)
       )
-      .map((script) => script.src)
+      .map((script) => sanitizeUrl(script.src))
       .slice(0, 100);
     const unreviewedRuntimeScripts = [
       ...new Set([
@@ -836,7 +958,7 @@ async function capture(
       jsonArtifact('dom_snapshot', {
         installed: installedState.dom,
         afterObservation: observedState.dom,
-        scriptsAfterObservation: observedState.scripts
+        scriptsAfterObservation: serializeScripts(observedState.scripts)
       }),
       jsonArtifact('storage_snapshot', {
         beforeNavigation: { local: [], session: [] },
@@ -848,6 +970,7 @@ async function capture(
     const finishedAt = new Date();
     const manifest = {
       schemaVersion: 'runtime_observation_evidence.v1',
+      status: 'complete',
       observationJobId: '',
       testPackageId: contract.testPackageId,
       reviewVersionId: contract.reviewVersionId,
@@ -883,8 +1006,68 @@ async function capture(
         sha256: artifact.sha256
       }))
     };
-    return { manifest, artifacts, cleanupStatus, negativeProxyOutcome };
+    return { status: 'complete', manifest, artifacts, cleanupStatus, negativeProxyOutcome };
+  };
+
+  let budgetTimer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race<CaptureResult>([
+      runObservation(),
+      new Promise<never>((_, reject) => {
+        budgetTimer = setTimeout(
+          () => reject(new Error('Observation exceeded the total runtime budget.')),
+          contract.controls.totalTimeoutMs
+        );
+      })
+    ]);
+  } catch (error) {
+    // Any mid-run exception or budget timeout still produces a redacted,
+    // partial-evidence 'failed' manifest so the developer's panel reports a
+    // failure instead of hanging in 'running' until expiry (FIX 2).
+    const failureReason = redactText(
+      error instanceof Error ? error.message : 'Runtime observation failed.'
+    );
+    const failedArtifacts = [...partialArtifacts, ...collectLogArtifacts()];
+    const manifest: Record<string, unknown> = {
+      schemaVersion: 'runtime_observation_evidence.v1',
+      status: 'failed',
+      observationJobId: '',
+      testPackageId: contract.testPackageId,
+      reviewVersionId: contract.reviewVersionId,
+      bundleSha256: contract.bundleSha256,
+      nonce: contract.nonce,
+      targetUrl: contract.target.url,
+      trust: null,
+      executionEvidence: contract.controls.executionEvidence,
+      startedAt: startedAt.toISOString(),
+      finishedAt: new Date().toISOString(),
+      failureReason,
+      redaction: {
+        applied: true,
+        headersRemoved: true,
+        cookiesRemoved: true,
+        formValuesMasked: true
+      },
+      artifacts: failedArtifacts.map((artifact) => ({
+        field: artifact.field,
+        kind: artifact.kind,
+        fileName: artifact.fileName,
+        contentType: artifact.contentType,
+        bytes: artifact.bytes.byteLength,
+        sha256: artifact.sha256
+      }))
+    };
+    return {
+      status: 'failed',
+      manifest,
+      artifacts: failedArtifacts,
+      cleanupStatus: 'not_tested',
+      negativeProxyOutcome:
+        contract.negativeProxyProbe.mode === 'none_declared' ? 'not_applicable' : 'error',
+      failureReason
+    };
   } finally {
+    if (budgetTimer) clearTimeout(budgetTimer);
     await context.close();
   }
 }
@@ -962,17 +1145,10 @@ export async function runRuntimeObservation(
     headless: true,
     args: ['--disable-blink-features=AutomationControlled']
   }));
-  let timeout: ReturnType<typeof setTimeout> | undefined;
   try {
-    const result = await Promise.race([
-      capture(contract, browser),
-      new Promise<never>((_, reject) => {
-        timeout = setTimeout(
-          () => reject(new Error('Observation exceeded the total runtime budget.')),
-          contract.controls.totalTimeoutMs
-        );
-      })
-    ]);
+    // capture() owns the total-runtime budget internally so that a timeout still
+    // yields a partial-evidence 'failed' result rather than an orphaned run.
+    const result = await capture(contract, browser);
     if (input.outputDir) {
       await mkdir(input.outputDir, { recursive: true });
       result.manifest.observationJobId = input.observationJobId;
@@ -986,6 +1162,8 @@ export async function runRuntimeObservation(
         )
       ]);
     }
+    // Always upload — including on failure — through the one-time capability so
+    // the Worker marks the job failed instead of leaving it 'running'.
     await uploadEvidence(
       apiBase.toString(),
       input.observationJobId,
@@ -993,6 +1171,11 @@ export async function runRuntimeObservation(
       result.manifest,
       result.artifacts
     );
+    if (result.status === 'failed') {
+      throw new Error(
+        `Runtime observation failed and reported partial evidence: ${result.failureReason ?? 'unknown reason'}`
+      );
+    }
     return {
       observationJobId: input.observationJobId,
       status: 'complete',
@@ -1002,7 +1185,6 @@ export async function runRuntimeObservation(
       artifactCount: result.artifacts.length
     };
   } finally {
-    if (timeout) clearTimeout(timeout);
     if (ownsBrowser) await browser.close();
   }
 }

@@ -27,11 +27,37 @@ const PREFLIGHT_CONFIG: ScanConfig = {
       maxTotalUnzippedBytes: 50 * 1024 * 1024,
       maxFiles: 2000
     },
-    hardExcludeGlobs: defaultConfig.globalScanConfig.hardExcludeGlobs.filter(
-      (glob) => glob !== '**/dist/**' && glob !== '**/build/**'
-    )
+    // App-bundle review deliberately narrows the shipped default exclusions.
+    // The uploaded bundle IS the production artifact: minified output
+    // (**/*.min.js), vendored code (**/vendor/**, **/third_party/**), and
+    // built output (**/dist/**, **/build/**) execute on customer sites
+    // exactly as uploaded, so excluding them would let a partner hide
+    // blockers behind a filename ("if it is in your bundle, you own it").
+    // Only paths that are never part of the shipped artifact stay excluded.
+    hardExcludeGlobs: [
+      '**/node_modules/**',
+      '**/.git/**',
+      '**/__MACOSX/**',
+      '**/.DS_Store'
+    ]
   }
 };
+
+/**
+ * Extensions whose content can execute (or embed executable code) on a
+ * customer site. Any such file the scanner did not decode is surfaced as a
+ * manual-review input rather than silently passing.
+ */
+const EXECUTABLE_EXTENSIONS = new Set([
+  '.js',
+  '.mjs',
+  '.cjs',
+  '.ts',
+  '.jsx',
+  '.tsx',
+  '.html',
+  '.wasm'
+]);
 
 const NEXT_MOVES: Record<string, string> = {
   'SEC-SCRIPT-INJECTION':
@@ -149,14 +175,32 @@ function toGuidance(groups: Record<string, FindingGroup>): ReviewGuidance[] {
 export async function createBundleReview(
   input: CreateBundleReviewInput
 ): Promise<BundleReview> {
-  const unzipped = await processZipBuffer(input.bundle, PREFLIGHT_CONFIG, () => undefined);
+  const { files: unzipped, skippedUnsafePaths } = await processZipBuffer(
+    input.bundle,
+    PREFLIGHT_CONFIG,
+    () => undefined
+  );
   const inventory = buildInventory(unzipped, PREFLIGHT_CONFIG);
   const findings = runScan(inventory, defaultRuleset, PREFLIGHT_CONFIG, () => undefined);
+  const scannedFileCount = inventory.filter(
+    (file) => file.isTextCandidate && !file.isIgnored
+  ).length;
+  const skippedFileCount = inventory.length - scannedFileCount;
+  // Executable-looking files whose content the scanner never decoded
+  // (excluded paths, undecodable text, or binary formats like .wasm).
+  // Zero findings in these files means "not scanned", never "clean".
+  const skippedExecutablePaths = inventory
+    .filter(
+      (file) =>
+        EXECUTABLE_EXTENSIONS.has(file.ext) && !(file.isTextCandidate && !file.isIgnored)
+    )
+    .map((file) => file.path)
+    .sort();
   const report = generateReport(findings, defaultRuleset, PREFLIGHT_CONFIG, {
     fileCount: inventory.length,
     totalBytes: inventory.reduce((total, file) => total + file.sizeBytes, 0),
-    textFilesScanned: inventory.filter((file) => file.isTextCandidate && !file.isIgnored).length,
-    skippedFileCount: inventory.filter((file) => file.isIgnored).length
+    textFilesScanned: scannedFileCount,
+    skippedFileCount
   });
   const artifactScope = findManifest(inventory);
   const runtimeReferences = discoverRuntimeReferences(inventory);
@@ -219,6 +263,15 @@ export async function createBundleReview(
     evidence: {
       scanReportVersion: report.scanReportVersion,
       scanRunId: report.runId
+    },
+    scanCoverage: {
+      fileCount: inventory.length,
+      scannedFileCount,
+      skippedFileCount,
+      skippedExecutablePaths,
+      unsafeEntryPaths: [...skippedUnsafePaths].sort(),
+      manualReviewRequired:
+        skippedExecutablePaths.length > 0 || skippedUnsafePaths.length > 0
     },
     officialDecision: null
   };

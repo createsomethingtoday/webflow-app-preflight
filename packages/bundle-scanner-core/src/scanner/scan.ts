@@ -84,7 +84,6 @@ export function runScan(
   config: ScanConfig,
   onProgress: ProgressCallback
 ): Finding[] {
-  const startTime = performance.now();
   const findings: Finding[] = [];
 
   // Filter to text files only
@@ -101,8 +100,12 @@ export function runScan(
     for (const matcher of rule.matchers) {
       if (matcher.type === 'regex' && matcher.pattern) {
         try {
-          // Add 'd' flag for indices support
-          const flags = (matcher.flags ?? 'g') + (matcher.flags?.includes('d') ? '' : 'd');
+          // Force 'g' (the scan loop relies on lastIndex advancing; without
+          // it the first match repeats until the per-file cap and starves
+          // every later matcher) and 'd' for indices support.
+          let flags = matcher.flags ?? '';
+          if (!flags.includes('g')) flags += 'g';
+          if (!flags.includes('d')) flags += 'd';
           compiledMatchers.push({
             regex: new RegExp(matcher.pattern, flags),
             matcher,
@@ -268,8 +271,8 @@ export function runScan(
     }
   }
 
-  const duration = performance.now() - startTime;
-  console.log(`Scan completed in ${duration.toFixed(0)}ms - ${findings.length} findings`);
-
+  // Intentionally no completion logging here: per-upload timings and partner
+  // file context must not be written to shared Worker logs. Progress surfaces
+  // only through the caller-supplied onProgress callback.
   return findings;
 }

@@ -1,7 +1,11 @@
 import { env, exports } from 'cloudflare:workers';
 import JSZip from 'jszip';
 import { afterEach, describe, expect, test, vi } from 'vitest';
-import { evaluateRuntimeSecurity } from '../src/runtime-observations';
+import {
+  evaluateRuntimeSecurity,
+  reconcileRuntimeObservationJobs
+} from '../src/runtime-observations';
+import { isPrivateOrLocalHostname } from '../src/net';
 import worker from '../src/index';
 import type { Env } from '../src/types';
 
@@ -11,12 +15,17 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-async function createBundle(options: { injectScript?: boolean } = {}): Promise<Uint8Array> {
+async function createBundle(
+  options: { injectScript?: boolean; seed?: string } = {}
+): Promise<Uint8Array> {
   const zip = new JSZip();
   zip.file(
     'webflow.json',
     JSON.stringify({ name: 'Consent Pro', apiVersion: '2', publicDir: 'dist' })
   );
+  if (options.seed) {
+    zip.file('assets/seed.txt', options.seed);
+  }
   const source = [
     'const API = "https://api.consentpro.com";',
     'const runtime = "/v2/cdn/runtime.js";'
@@ -182,7 +191,7 @@ describe('review API', () => {
     expect(passed.blockers).toEqual([]);
   });
 
-  test('accepts a pinned child runtime and a truthful no-proxy declaration', () => {
+  test('accepts a genuinely runtime-created child pin but keeps a no-proxy declaration behind manual review', () => {
     const runtimeArtifacts = [
       {
         url: 'https://api.concord.tech/site-v1/site-id/site-client',
@@ -209,9 +218,11 @@ describe('review API', () => {
             trustedRuntimeInitiator: false
           },
           {
+            // A genuine child is NOT loaded by the page document; it is
+            // created at runtime by another pinned runtime.
             url: runtimeArtifacts[1].url,
             observedSha256: runtimeArtifacts[1].sha256,
-            loadedByPage: true,
+            loadedByPage: false,
             domIntegrity: null,
             trustedRuntimeInitiator: true
           }
@@ -233,15 +244,66 @@ describe('review API', () => {
       } as any
     );
 
+    // The child pin is honored, but a partner "no proxy surface" declaration
+    // can never remove the proxy predicate: it stays a mandatory
+    // manual-review blocker, so the automated status is blocked.
     expect(result).toMatchObject({
-      status: 'passed',
+      status: 'blocked',
       predicates: {
+        runtimeLoadedByPage: true,
         runtimeIntegrityMatched: true,
         negativeProxyBlocked: false,
-        proxyPolicySatisfied: true
-      },
-      blockers: []
+        proxyPolicySatisfied: false
+      }
     });
+    expect(result.blockers).toHaveLength(1);
+    expect(result.blockers[0]).toMatch(/manually confirm/i);
+  });
+
+  test('does not honor a runtime_child declaration for a script the page actually loaded', () => {
+    const runtimeArtifacts = [
+      {
+        // A partner mislabels an ordinary page-loaded script (with no SRI)
+        // as runtime_child to dodge the DOM-SRI equality check.
+        url: 'https://api.concord.tech/site-v1/site-id/widget',
+        sha256: 'b'.repeat(64),
+        integrity: 'sha256-widget',
+        loadMode: 'runtime_child' as const
+      }
+    ];
+    const result = evaluateRuntimeSecurity(
+      {
+        runtimeReadyObserved: true,
+        runtimeArtifacts: [
+          {
+            url: runtimeArtifacts[0].url,
+            observedSha256: runtimeArtifacts[0].sha256,
+            loadedByPage: true,
+            domIntegrity: null,
+            trustedRuntimeInitiator: true
+          }
+        ],
+        runtimeCreatedScripts: [],
+        unreviewedRuntimeScripts: [],
+        negativeProxyCanary: { url: 'https://canary.webflow.com/x', outcome: 'blocked', statusCode: 403 }
+      },
+      {
+        target: {
+          url: 'https://app-concord-privacy.webflow.io/',
+          host: 'app-concord-privacy.webflow.io'
+        },
+        runtimeArtifacts,
+        negativeProxyProbe: {
+          mode: 'probe',
+          method: 'GET',
+          urlTemplate: 'https://api.concord.tech/proxy?url={canaryUrl}'
+        }
+      } as any
+    );
+
+    expect(result.status).toBe('blocked');
+    expect(result.predicates.runtimeLoadedByPage).toBe(false);
+    expect(result.predicates.runtimeIntegrityMatched).toBe(false);
   });
 
   test('returns the resolved Webflow identity and server-owned companion role', async () => {
@@ -316,7 +378,7 @@ describe('review API', () => {
     }
   });
 
-  test('pairs the browser companion once and scopes its short-lived session to the exact review version', async () => {
+  test('retires the unauthenticated redeem endpoint and every companion write path in every environment', async () => {
     const form = new FormData();
     form.set(
       'bundle',
@@ -335,23 +397,6 @@ describe('review API', () => {
     const created = await createReviewResponse.json<{
       review: { id: string; latestVersion: { id: string } };
     }>();
-
-    const missingPackageResponse = await exports.default.fetch(
-      new Request(`https://preflight.test/v1/reviews/${created.review.id}/companion-pairings`, {
-          method: 'POST',
-          headers: {
-            authorization: 'Bearer test-token',
-            origin: 'http://localhost:1337',
-            'content-type': 'application/json'
-          },
-          body: JSON.stringify({ reviewVersionId: created.review.latestVersion.id })
-      })
-    );
-    expect(missingPackageResponse.status).toBe(400);
-    expect(await missingPackageResponse.json()).toMatchObject({
-      error: 'invalid_companion_pairing',
-      message: expect.stringMatching(/runtime test package/i)
-    });
     const runtimeTestPackageId = await createReadyRuntimePackage(created.review.id);
 
     const pairingResponse = await exports.default.fetch(
@@ -372,16 +417,36 @@ describe('review API', () => {
     const paired = await pairingResponse.json<{
       pairing: { code: string; expiresAt: string };
     }>();
-    expect(paired.pairing.code.length).toBeGreaterThanOrEqual(32);
-    expect(Date.parse(paired.pairing.expiresAt)).toBeGreaterThan(Date.now());
 
-    const wrongSurface = await exports.default.fetch(
-      new Request(
-        `https://preflight.test/reviewer/connect?code=${encodeURIComponent(paired.pairing.code)}`,
-        { redirect: 'manual' }
-      )
+    // The old unauthenticated redeem endpoint is retired everywhere,
+    // including development, and never returns a readable bearer.
+    const redeemResponse = await exports.default.fetch(
+      new Request('https://preflight.test/v1/companion-pairings/redeem', {
+        method: 'POST',
+        headers: {
+          origin: 'http://localhost:1337',
+          'content-type': 'application/json'
+        },
+        body: JSON.stringify({ code: paired.pairing.code })
+      })
     );
-    expect(wrongSurface.status).toBe(403);
+    expect(redeemResponse.status).toBe(410);
+    expect(await redeemResponse.json()).toMatchObject({
+      error: 'legacy_runtime_mutation_retired'
+    });
+
+    // A developer-role pairing code cannot enter the reviewer surface, and
+    // the failed attempt does not consume the one-time code.
+    const connectForm = new FormData();
+    connectForm.set('code', paired.pairing.code);
+    const wrongRole = await exports.default.fetch(
+      new Request('https://preflight.test/reviewer/connect', {
+        method: 'POST',
+        redirect: 'manual',
+        body: connectForm
+      })
+    );
+    expect(wrongRole.status).toBe(403);
     const unconsumed = await env.DB.prepare(
       `SELECT redeemed_at
          FROM companion_pairings
@@ -390,82 +455,117 @@ describe('review API', () => {
     ).first<{ redeemed_at: string | null }>();
     expect(unconsumed?.redeemed_at).toBeNull();
 
-    const redeem = () =>
-      exports.default.fetch(
-        new Request('https://preflight.test/v1/companion-pairings/redeem', {
+    // Every companion write route is gone in development too.
+    const retiredWrites: Array<{ path: string; body: string }> = [
+      {
+        path: `/v1/reviews/${created.review.id}/companion-runs`,
+        body: JSON.stringify({
+          reviewVersionId: created.review.latestVersion.id,
+          runtimeTestPackageId
+        })
+      },
+      { path: '/v1/companion-runs/any-run/complete', body: '{}' },
+      { path: '/v1/companion-runs/any-run/replay', body: '{}' },
+      { path: '/v1/companion-runs/any-run/missions/production_runtime', body: '{}' }
+    ];
+    for (const route of retiredWrites) {
+      const response = await exports.default.fetch(
+        new Request(`https://preflight.test${route.path}`, {
           method: 'POST',
           headers: {
+            authorization: 'Bearer test-token',
             origin: 'http://localhost:1337',
             'content-type': 'application/json'
           },
-          body: JSON.stringify({ code: paired.pairing.code })
+          body: route.body
         })
       );
-    const redeemResponse = await redeem();
-    expect(redeemResponse.status).toBe(200);
-    const session = await redeemResponse.json<{
-      session: {
-        token: string;
-        expiresAt: string;
-        reviewId: string;
-        reviewVersionId: string;
-        actorRole: string;
-        evidenceTrust: string;
-        runtimeTestPackageId: string;
-      };
+      expect(response.status, route.path).toBe(410);
+      expect(await response.json()).toMatchObject({
+        error: 'legacy_runtime_mutation_retired'
+      });
+    }
+    const runCount = await env.DB.prepare(
+      'SELECT COUNT(*) AS count FROM companion_runs'
+    ).first<{ count: number }>();
+    expect(runCount?.count).toBe(0);
+  });
+
+  test('keeps historical companion runs readable and blocks new webflow_observed receipts at the database', async () => {
+    const form = new FormData();
+    form.set(
+      'bundle',
+      new File([await createBundle()], 'historical-companion.zip', { type: 'application/zip' })
+    );
+    const createdResponse = await exports.default.fetch(
+      new Request('https://preflight.test/v1/reviews', {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer test-token',
+          origin: 'http://localhost:1337'
+        },
+        body: form
+      })
+    );
+    const created = await createdResponse.json<{
+      review: { id: string; latestVersion: { id: string; result: { artifact: { sha256: string } } } };
     }>();
-    expect(session.session).toMatchObject({
+
+    const runId = crypto.randomUUID();
+    const now = new Date().toISOString();
+    const historicalRun = {
+      id: runId,
       reviewId: created.review.id,
       reviewVersionId: created.review.latestVersion.id,
+      bundleSha256: created.review.latestVersion.result.artifact.sha256,
+      runtimeTestPackageId: null,
       actorRole: 'developer',
+      executionAuthority: 'partner',
       evidenceTrust: 'partner_supplied',
-      runtimeTestPackageId
-    });
+      policyVersion: 'companion-policy.v3',
+      status: 'blocked',
+      replayOfRunId: null,
+      missions: [],
+      createdAt: now,
+      updatedAt: now
+    };
+    await env.DB.prepare(
+      `INSERT INTO companion_runs
+        (id, review_id, review_version_id, owner_user_id, actor_user_id, actor_role,
+         evidence_trust, policy_version, status, replay_of_run_id, run_json,
+         created_at, updated_at)
+       VALUES (?, ?, ?, 'local-webflow-user', 'local-webflow-user', 'developer',
+               'partner_supplied', 'companion-policy.v3', 'blocked', NULL, ?, ?, ?)`
+    )
+      .bind(runId, created.review.id, created.review.latestVersion.id, JSON.stringify(historicalRun), now, now)
+      .run();
 
-    const genericApiAttempt = await exports.default.fetch(
-      new Request('https://preflight.test/v1/reviews', {
+    const readResponse = await exports.default.fetch(
+      new Request(`https://preflight.test/v1/companion-runs/${runId}`, {
         headers: {
-          authorization: `Bearer ${session.session.token}`,
+          authorization: 'Bearer test-token',
           origin: 'http://localhost:1337'
         }
       })
     );
-    expect(genericApiAttempt.status).toBe(401);
-
-    const versionEscapeAttempt = await exports.default.fetch(
-      new Request(`https://preflight.test/v1/reviews/${created.review.id}/companion-runs`, {
-          method: 'POST',
-          headers: {
-            authorization: `Bearer ${session.session.token}`,
-            origin: 'http://localhost:1337',
-            'content-type': 'application/json'
-          },
-          body: JSON.stringify({ reviewVersionId: 'another-version', runtimeTestPackageId })
-      })
-    );
-    expect(versionEscapeAttempt.status).toBe(404);
-
-    const runResponse = await exports.default.fetch(
-      new Request(`https://preflight.test/v1/reviews/${created.review.id}/companion-runs`, {
-          method: 'POST',
-          headers: {
-            authorization: `Bearer ${session.session.token}`,
-            origin: 'http://localhost:1337',
-            'content-type': 'application/json'
-          },
-          body: JSON.stringify({
-            reviewVersionId: created.review.latestVersion.id,
-            runtimeTestPackageId
-          })
-      })
-    );
-    expect(runResponse.status).toBe(201);
-
-    const secondRedeem = await redeem();
-    expect(secondRedeem.status).toBe(409);
-    expect(await secondRedeem.json()).toEqual({
-      error: 'companion_pairing_unavailable'
+    expect(readResponse.status).toBe(200);
+    expect(await readResponse.json()).toMatchObject({
+      run: { id: runId, evidenceTrust: 'partner_supplied', status: 'blocked' }
     });
+
+    // Migration 0008: new companion mission receipts can never claim the
+    // Webflow-owned trust level, even through a direct database write.
+    const receipt = (trust: string) =>
+      env.DB.prepare(
+        `INSERT INTO companion_mission_receipts
+          (id, run_id, mission_id, status, evidence_trust, evidence_digest,
+           event_count, artifact_count, manifest_json, observed_at, created_at, updated_at)
+         VALUES (?, ?, 'production_runtime', 'passed', ?, ?, 1, 1, '{}', ?, ?, ?)`
+      )
+        .bind(crypto.randomUUID(), runId, trust, 'a'.repeat(64), now, now, now)
+        .run();
+    await expect(receipt('webflow_observed')).rejects.toThrow(/webflow_observed/);
+    await expect(receipt('partner_supplied')).resolves.toMatchObject({ success: true });
   });
 
   test('rejects an expired pairing without issuing a companion session', async () => {
@@ -492,7 +592,7 @@ describe('review API', () => {
       new Request(`https://preflight.test/v1/reviews/${created.review.id}/companion-pairings`, {
           method: 'POST',
           headers: {
-            authorization: 'Bearer test-token',
+            authorization: 'Bearer reviewer-test-token',
             origin: 'http://localhost:1337',
             'content-type': 'application/json'
           },
@@ -508,18 +608,17 @@ describe('review API', () => {
         WHERE id = (SELECT id FROM companion_pairings ORDER BY created_at DESC LIMIT 1)`
     ).run();
 
+    const connectForm = new FormData();
+    connectForm.set('code', pairing.pairing.code);
     const expired = await exports.default.fetch(
-      new Request('https://preflight.test/v1/companion-pairings/redeem', {
+      new Request('https://preflight.test/reviewer/connect', {
         method: 'POST',
-        headers: {
-          origin: 'http://localhost:1337',
-          'content-type': 'application/json'
-        },
-        body: JSON.stringify({ code: pairing.pairing.code })
+        redirect: 'manual',
+        body: connectForm
       })
     );
-    expect(expired.status).toBe(409);
-    expect(await expired.json()).toEqual({ error: 'companion_pairing_unavailable' });
+    expect(expired.status).toBe(403);
+    expect(expired.headers.get('set-cookie')).toBeNull();
     const sessionCount = await env.DB.prepare(
       `SELECT COUNT(*) AS count FROM companion_sessions
         WHERE review_id = ? AND review_version_id = ?`
@@ -564,153 +663,35 @@ describe('review API', () => {
       })
     );
     const pairing = await pairingResponse.json<{ pairing: { code: string } }>();
+    const connectForm = new FormData();
+    connectForm.set('code', pairing.pairing.code);
     const redeemed = await exports.default.fetch(
-      new Request('https://preflight.test/v1/companion-pairings/redeem', {
+      new Request('https://preflight.test/reviewer/connect', {
         method: 'POST',
-        headers: {
-          origin: 'http://localhost:1337',
-          'content-type': 'application/json'
-        },
-        body: JSON.stringify({ code: pairing.pairing.code })
+        redirect: 'manual',
+        body: connectForm
       })
     );
-    expect(redeemed.status).toBe(200);
-    expect(await redeemed.json()).toMatchObject({
-      session: {
-        reviewId: created.review.id,
-        reviewVersionId: created.review.latestVersion.id,
-        actorRole: 'reviewer',
-        evidenceTrust: 'webflow_observed'
-      }
+    // The session is delivered only as an HttpOnly cookie: no readable
+    // bearer token or trust level ever appears in a response body.
+    expect(redeemed.status).toBe(303);
+    const cookie = redeemed.headers.get('set-cookie');
+    expect(cookie).toContain('app_review_reviewer_session=');
+    expect(cookie).toContain('HttpOnly');
+    expect(cookie).toContain('SameSite=Strict');
+    expect(await redeemed.text()).toBe('');
+
+    const session = await env.DB.prepare(
+      `SELECT actor_role, review_id, review_version_id
+         FROM companion_sessions
+        ORDER BY created_at DESC
+        LIMIT 1`
+    ).first<{ actor_role: string; review_id: string; review_version_id: string }>();
+    expect(session).toEqual({
+      actor_role: 'reviewer',
+      review_id: created.review.id,
+      review_version_id: created.review.latestVersion.id
     });
-  });
-
-  test('creates a version-bound developer companion run without trusting client authority', async () => {
-    const form = new FormData();
-    form.set(
-      'bundle',
-      new File([await createBundle()], 'consent-pro.zip', { type: 'application/zip' })
-    );
-    const createReviewResponse = await exports.default.fetch(
-      new Request('https://preflight.test/v1/reviews', {
-        method: 'POST',
-        headers: {
-          authorization: 'Bearer test-token',
-          origin: 'http://localhost:1337'
-        },
-        body: form
-      })
-    );
-    const created = await createReviewResponse.json<{
-      review: {
-        id: string;
-        latestVersion: { id: string; result: { artifact: { sha256: string } } };
-      };
-    }>();
-    const runtimeTestPackageId = await createReadyRuntimePackage(created.review.id);
-
-    const createRunResponse = await exports.default.fetch(
-      new Request(`https://preflight.test/v1/reviews/${created.review.id}/companion-runs`, {
-          method: 'POST',
-          headers: {
-            authorization: 'Bearer test-token',
-            origin: 'http://localhost:1337',
-            'content-type': 'application/json'
-          },
-          body: JSON.stringify({
-            reviewVersionId: created.review.latestVersion.id,
-            runtimeTestPackageId,
-            actorRole: 'reviewer',
-            evidenceTrust: 'webflow_observed',
-            status: 'validated'
-          })
-      })
-    );
-
-    expect(createRunResponse.status).toBe(201);
-    const createdRun = await createRunResponse.json<{
-      run: {
-        id: string;
-        reviewVersionId: string;
-        bundleSha256: string;
-        actorRole: string;
-        evidenceTrust: string;
-        policyVersion: string;
-        status: string;
-        missions: Array<{ id: string; status: string }>;
-      };
-    }>();
-    expect(createdRun.run).toMatchObject({
-      reviewVersionId: created.review.latestVersion.id,
-      bundleSha256: created.review.latestVersion.result.artifact.sha256,
-      actorRole: 'developer',
-      evidenceTrust: 'partner_supplied',
-      runtimeTestPackageId,
-      policyVersion: 'companion-policy.v3',
-      status: 'ready'
-    });
-    expect(createdRun.run.missions.map((mission) => mission.id)).toEqual(['production_runtime']);
-
-    const elevatedMission = await exports.default.fetch(
-      new Request(
-        `https://preflight.test/v1/companion-runs/${createdRun.run.id}/missions/configure`,
-        {
-          method: 'POST',
-          headers: {
-            authorization: 'Bearer test-token',
-            origin: 'http://localhost:1337',
-            'content-type': 'application/json'
-          },
-          body: JSON.stringify({
-            reviewVersionId: created.review.latestVersion.id,
-            evidenceTrust: 'webflow_observed',
-            status: 'passed',
-            evidenceDigest: 'b'.repeat(64),
-            eventCount: 4,
-            artifactCount: 1,
-            observedAt: '2026-07-14T20:01:00.000Z'
-          })
-        }
-      )
-    );
-
-    expect(elevatedMission.status).toBe(403);
-    expect(await elevatedMission.json()).toEqual({
-      error: 'companion_trust_escalation',
-      message: expect.stringMatching(/trust level/i)
-    });
-
-    const persisted = await env.DB.prepare(
-      'SELECT actor_role, evidence_trust, status FROM companion_runs WHERE id = ?'
-    )
-      .bind(createdRun.run.id)
-      .first<{ actor_role: string; evidence_trust: string; status: string }>();
-    expect(persisted).toEqual({
-      actor_role: 'developer',
-      evidence_trust: 'partner_supplied',
-      status: 'ready'
-    });
-
-    const replayResponse = await exports.default.fetch(
-      new Request(`https://preflight.test/v1/companion-runs/${createdRun.run.id}/replay`, {
-          method: 'POST',
-          headers: {
-            authorization: 'Bearer reviewer-test-token',
-            origin: 'http://localhost:1337'
-          }
-      })
-    );
-    expect(replayResponse.status).toBe(201);
-    const replay = await replayResponse.json<{ run: any }>();
-    expect(replay.run).toMatchObject({
-      reviewVersionId: createdRun.run.reviewVersionId,
-      bundleSha256: createdRun.run.bundleSha256,
-      actorRole: 'reviewer',
-      evidenceTrust: 'webflow_observed',
-      replayOfRunId: createdRun.run.id,
-      status: 'ready'
-    });
-    expect(replay.run.id).not.toBe(createdRun.run.id);
   });
 
   test('fails closed for missing identity and untrusted origins', async () => {
@@ -783,6 +764,89 @@ describe('review API', () => {
     const object = await env.ARTIFACTS.get(row!.artifact_key);
     expect(object).not.toBeNull();
     expect(new Uint8Array(await object!.arrayBuffer())).toEqual(bundle);
+  });
+
+  test('creates a durable Data Client review from hosted runtime URLs without a bundle', async () => {
+    const runtimeUrls = [
+      'https://webflow-websitespeedy13.b-cdn.net/speedyscripts/ecmrx_1234/ecmrx_1234_1.js',
+      'https://webflow-websitespeedy13.b-cdn.net/speedyscripts/ecmrx_1234/ecmrx_1234_2.js',
+      'https://webflow-websitespeedy13.b-cdn.net/speedyscripts/ecmrx_1234/ecmrx_1234_3.js'
+    ];
+    const response = await exports.default.fetch(
+      new Request('https://preflight.test/v1/runtime-reviews', {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer test-token',
+          origin: 'http://localhost:1337',
+          'content-type': 'application/json'
+        },
+        body: JSON.stringify({ appName: 'Website Speedy', runtimeUrls })
+      })
+    );
+
+    expect(response.status).toBe(201);
+    const created = await response.json<{
+      review: {
+        id: string;
+        name: string;
+        latestVersion: {
+          result: {
+            artifact: { kind: string; sha256: string; fileCount: number };
+            artifactScope: { primary: string; appType: string; appName: string };
+            runtime: { references: string[]; status: string };
+          };
+        };
+      };
+    }>();
+    expect(created.review).toMatchObject({
+      name: 'Website Speedy runtime review',
+      latestVersion: {
+        result: {
+          artifact: {
+            kind: 'runtime_manifest',
+            sha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+            fileCount: 3
+          },
+          artifactScope: {
+            primary: 'production_runtime',
+            appType: 'data_client',
+            appName: 'Website Speedy'
+          },
+          runtime: {
+            references: runtimeUrls,
+            status: 'discovered_unverified'
+          }
+        }
+      }
+    });
+
+    const stored = await env.DB.prepare(
+      `SELECT artifact_key, artifact_sha256, file_name
+         FROM review_versions
+        WHERE review_id = ?`
+    )
+      .bind(created.review.id)
+      .first<{ artifact_key: string; artifact_sha256: string; file_name: string }>();
+    expect(stored?.file_name).toBe('hosted-runtime-manifest.json');
+    expect(stored?.artifact_key).toMatch(/\.json$/);
+    const manifest = await env.ARTIFACTS.get(stored!.artifact_key);
+    expect(manifest).not.toBeNull();
+    expect(await sha256Hex(await manifest!.arrayBuffer())).toBe(stored?.artifact_sha256);
+
+    const listResponse = await exports.default.fetch(
+      new Request('https://preflight.test/v1/reviews', {
+        headers: {
+          authorization: 'Bearer test-token',
+          origin: 'http://localhost:1337'
+        }
+      })
+    );
+    const listed = await listResponse.json<{
+      reviews: Array<{ id: string; reviewType: string }>;
+    }>();
+    expect(listed.reviews).toContainEqual(
+      expect.objectContaining({ id: created.review.id, reviewType: 'runtime_manifest' })
+    );
   });
 
   test('adds a revision and reports deterministic progress', async () => {
@@ -1031,7 +1095,7 @@ describe('review API', () => {
     });
   });
 
-  test('rejects a runtime package for a site other than the authenticated Webflow site', async () => {
+  test('binds a runtime package to the authenticated Webflow site', async () => {
     const form = new FormData();
     form.set(
       'bundle',
@@ -1076,10 +1140,11 @@ describe('review API', () => {
         })
       })
     );
-    expect(response.status).toBe(400);
+    expect(response.status).toBe(201);
     expect(await response.json()).toMatchObject({
-      error: 'invalid_runtime_test_package',
-      message: expect.stringMatching(/authenticated Webflow site/i)
+      testPackage: {
+        sandboxInstallationId: 'local-webflow-site'
+      }
     });
   });
 
@@ -1767,6 +1832,36 @@ describe('review API', () => {
       })
     );
     expect(forbiddenResponse.status).toBe(400);
+
+    // The forbidden-key list also covers common credential field names such
+    // as access_token, apiKey, sessionId, bearer, and auth.
+    for (const [key, value] of [
+      ['access_token', 'sk-live-abcdef'],
+      ['apiKey', 'abc123'],
+      ['sessionId', 'sess-1'],
+      ['bearer', 'x'],
+      ['auth', 'x']
+    ] as const) {
+      const secretEvidence = new FormData();
+      secretEvidence.set(
+        'manifest',
+        JSON.stringify({ ...baseManifest, nested: { [key]: value } })
+      );
+      secretEvidence.set(
+        'screenshot_after_cleanup',
+        new File([screenshot], 'after-cleanup.png', { type: 'image/png' })
+      );
+      const secretResponse = await exports.default.fetch(
+        new Request(evidenceEndpoint, {
+          method: 'POST',
+          headers: {
+            authorization: `Bearer ${approvedBody.observationJob.capability}`
+          },
+          body: secretEvidence
+        })
+      );
+      expect(secretResponse.status, key).toBe(400);
+    }
     const artifactsBeforeAcceptance = await env.ARTIFACTS.list({
       prefix: 'runtime-observations/'
     });
@@ -1914,6 +2009,8 @@ describe('review API', () => {
               hashMatched: boolean;
               integrityMatched: boolean;
             }>;
+            runtimeCreatedScripts: string[];
+            unreviewedRuntimeScripts: string[];
           } | null;
         } | null;
       }>;
@@ -1937,6 +2034,11 @@ describe('review API', () => {
         integrityMatched: true
       }
     ]);
+    const observationEvidence = packagesAfterBody.testPackages.find(
+      (item) => item.id === packageBody.testPackage.id
+    )?.observation?.evidence;
+    expect(observationEvidence?.runtimeCreatedScripts).toEqual([]);
+    expect(observationEvidence?.unreviewedRuntimeScripts).toEqual([]);
 
     const reviewAfterEvidence = await exports.default.fetch(
       new Request(`https://preflight.test/v1/reviews/${created.review.id}`, {
@@ -2066,6 +2168,15 @@ describe('review API', () => {
         }
       });
       expect(launched[1]!.headers.get('e2b-traffic-access-token')).toBe('traffic-access-token');
+
+      // The per-sandbox launch secret is injected at create, presented on the
+      // /run call, and never reaches the developer-facing response.
+      const launchSecret = (launched[0]!.body as {
+        envVars: Record<string, string>;
+      }).envVars.APP_REVIEW_RUNTIME_LAUNCH_SECRET;
+      expect(launchSecret).toMatch(/^[A-Za-z0-9_-]{40,}$/);
+      expect(launched[1]!.headers.get('x-webflow-runtime-launch-secret')).toBe(launchSecret);
+      expect(JSON.stringify(body)).not.toContain(launchSecret);
       const launchedLifecycle = await env.DB.prepare(
         `SELECT sandbox_id, sandbox_started_at, sandbox_termination_status
            FROM runtime_observation_jobs
@@ -2130,9 +2241,11 @@ describe('review API', () => {
           }
         )
       );
-      expect(blockedRelaunch.status).toBe(403);
+      // Failing to terminate the previous sandbox is an infrastructure
+      // cleanup problem, not a missing approval: it surfaces as 503.
+      expect(blockedRelaunch.status).toBe(503);
       expect(await blockedRelaunch.json()).toMatchObject({
-        error: 'runtime_observation_approval_required',
+        error: 'runtime_observation_cleanup_failed',
         message: 'The previous runtime sandbox could not be terminated safely.'
       });
       expect(e2b).toHaveBeenCalledTimes(3);
@@ -2146,7 +2259,7 @@ describe('review API', () => {
           }
         )
       );
-      expect(stillBlockedRelaunch.status).toBe(403);
+      expect(stillBlockedRelaunch.status).toBe(503);
       expect(e2b).toHaveBeenCalledTimes(4);
 
       terminationShouldFail = false;
@@ -2406,8 +2519,29 @@ describe('review API', () => {
     const handoff = await handoffResponse.json<{ handoff: { url: string } }>();
     expect(handoff.handoff.url).toMatch(/^https:\/\/preflight\.test\/reviewer\/connect\?code=/);
 
-    const connectResponse = await exports.default.fetch(
+    // A GET (what link-preview fetchers and mail scanners issue) renders an
+    // interstitial and must NOT consume the one-time code or mint a session.
+    const interstitial = await exports.default.fetch(
       new Request(handoff.handoff.url, { redirect: 'manual' })
+    );
+    expect(interstitial.status).toBe(200);
+    expect(interstitial.headers.get('set-cookie')).toBeNull();
+    expect(await interstitial.text()).toContain('Enter reviewer workspace');
+    const pairingAfterGet = await env.DB.prepare(
+      'SELECT redeemed_at FROM companion_pairings ORDER BY created_at DESC LIMIT 1'
+    ).first<{ redeemed_at: string | null }>();
+    expect(pairingAfterGet?.redeemed_at).toBeNull();
+
+    // Only the explicit POST from the interstitial consumes the code.
+    const code = new URL(handoff.handoff.url).searchParams.get('code')!;
+    const connectForm = new FormData();
+    connectForm.set('code', code);
+    const connectResponse = await exports.default.fetch(
+      new Request('https://preflight.test/reviewer/connect', {
+        method: 'POST',
+        redirect: 'manual',
+        body: connectForm
+      })
     );
     expect(connectResponse.status).toBe(303);
     expect(connectResponse.headers.get('location')).toBe('/reviewer');
@@ -2846,5 +2980,693 @@ describe('review API', () => {
       approved_by_user_id: 'authorized-governance-reviewer'
     });
     expect(handedOff?.approved_at).toEqual(expect.any(String));
+  });
+
+  test('honors dev bypass tokens only when ENVIRONMENT is explicitly development', async () => {
+    for (const environment of ['production', 'staging', '', 'Development', 'dev']) {
+      const response = await worker.fetch(
+        new Request('https://preflight.test/v1/reviews', {
+          headers: {
+            authorization: 'Bearer test-token',
+            origin: 'http://localhost:1337'
+          }
+        }),
+        {
+          DB: env.DB,
+          ARTIFACTS: env.ARTIFACTS,
+          ENVIRONMENT: environment,
+          ALLOWED_ORIGINS: 'http://localhost:1337',
+          PREFLIGHT_DEV_TOKEN: 'test-token',
+          PREFLIGHT_REVIEWER_DEV_TOKEN: 'reviewer-test-token'
+        } as Env
+      );
+      expect(response.status, `ENVIRONMENT=${JSON.stringify(environment)}`).toBe(401);
+    }
+  });
+
+  test('refuses to serve at all when dev tokens are bound beside non-localhost origins', async () => {
+    const misconfigured = {
+      DB: env.DB,
+      ARTIFACTS: env.ARTIFACTS,
+      ENVIRONMENT: 'production',
+      ALLOWED_ORIGINS:
+        'chrome-extension://eiogakldgljpbbmplgckjkoglfgabblm,http://localhost:1337',
+      PREFLIGHT_DEV_TOKEN: 'test-token'
+    } as Env;
+    for (const path of ['/health', '/v1/reviews']) {
+      const response = await worker.fetch(
+        new Request(`https://preflight.test${path}`, {
+          headers: { authorization: 'Bearer test-token' }
+        }),
+        misconfigured
+      );
+      expect(response.status, path).toBe(503);
+      await expect(response.json()).resolves.toMatchObject({
+        error: 'server_misconfigured'
+      });
+    }
+
+    // Localhost-only origins remain a valid development setup.
+    const healthy = await worker.fetch(
+      new Request('https://preflight.test/health'),
+      {
+        DB: env.DB,
+        ARTIFACTS: env.ARTIFACTS,
+        ENVIRONMENT: 'development',
+        ALLOWED_ORIGINS: 'http://localhost:1337,http://127.0.0.1:5173',
+        PREFLIGHT_DEV_TOKEN: 'test-token'
+      } as Env
+    );
+    expect(healthy.status).toBe(200);
+  });
+
+  test('caps a runtime test package at eight pinned artifacts', async () => {
+    const form = new FormData();
+    form.set(
+      'bundle',
+      new File([await createBundle()], 'artifact-cap.zip', { type: 'application/zip' })
+    );
+    const createdResponse = await exports.default.fetch(
+      new Request('https://preflight.test/v1/reviews', {
+        method: 'POST',
+        headers: { authorization: 'Bearer test-token', origin: 'http://localhost:1337' },
+        body: form
+      })
+    );
+    const created = await createdResponse.json<{ review: { id: string } }>();
+    const response = await exports.default.fetch(
+      new Request(`https://preflight.test/v1/reviews/${created.review.id}/runtime-test-packages`, {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer test-token',
+          origin: 'http://localhost:1337',
+          'content-type': 'application/json'
+        },
+        body: JSON.stringify({
+          targetUrl: 'http://127.0.0.1:4173/runtime-fixture',
+          sandboxOwnershipConfirmed: true,
+          license: {
+            mode: 'installation_allowlist',
+            expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString()
+          },
+          runtimeArtifacts: Array.from({ length: 9 }, (_, index) => ({
+            url: `http://127.0.0.1:4173/runtime-v${index}.js`,
+            sha256: 'a'.repeat(64),
+            integrity: TEST_RUNTIME_INTEGRITY
+          })),
+          negativeProxyProbe: {
+            method: 'GET',
+            urlTemplate: 'http://127.0.0.1:4173/proxy?url={canaryUrl}'
+          },
+          lifecycle: { readySelector: '[data-runtime-ready]' }
+        })
+      })
+    );
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({
+      error: 'invalid_runtime_test_package',
+      message: expect.stringMatching(/between 1 and 8/i)
+    });
+  });
+
+  test('fails closed when an observation job expires during its evidence upload', async () => {
+    const form = new FormData();
+    form.set(
+      'bundle',
+      new File([await createBundle()], 'upload-race.zip', { type: 'application/zip' })
+    );
+    const createdResponse = await exports.default.fetch(
+      new Request('https://preflight.test/v1/reviews', {
+        method: 'POST',
+        headers: { authorization: 'Bearer test-token', origin: 'http://localhost:1337' },
+        body: form
+      })
+    );
+    const created = await createdResponse.json<{
+      review: { id: string; latestVersion: { id: string; result: { artifact: { sha256: string } } } };
+    }>();
+    const testPackageId = await createReadyRuntimePackage(created.review.id);
+
+    const approved = await exports.default.fetch(
+      new Request(
+        `https://preflight.test/v1/runtime-test-packages/${testPackageId}/observation-jobs`,
+        {
+          method: 'POST',
+          headers: {
+            authorization: 'Bearer coordinator-test-token',
+            'content-type': 'application/json'
+          },
+          body: JSON.stringify({ approved: true, sandboxOwnershipVerified: true })
+        }
+      )
+    );
+    expect(approved.status).toBe(201);
+    const job = (
+      await approved.json<{
+        observationJob: {
+          id: string;
+          capability: string;
+          contract: { nonce: string; target: { url: string } };
+        };
+      }>()
+    ).observationJob;
+
+    // Flip the job to running.
+    const running = await exports.default.fetch(
+      new Request(`https://preflight.test/v1/runtime-observation-jobs/${job.id}`, {
+        headers: { authorization: `Bearer ${job.capability}` }
+      })
+    );
+    expect(running.status).toBe(200);
+
+    // Simulate the cron racing the upload: the moment the claim marks the job
+    // 'uploading', an expiry sweep marks it 'expired' before the completion
+    // batch runs.
+    await env.DB.prepare(
+      `CREATE TRIGGER test_expire_during_upload
+        AFTER UPDATE OF status ON runtime_observation_jobs
+        WHEN NEW.status = 'uploading' AND NEW.id = '${job.id}'
+        BEGIN
+          UPDATE runtime_observation_jobs SET status = 'expired' WHERE id = NEW.id;
+        END`
+    ).run();
+
+    const screenshot = new Uint8Array([
+      0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x01
+    ]);
+    const screenshotSha256 = await sha256Hex(screenshot);
+    const manifest = {
+      schemaVersion: 'runtime_observation_evidence.v1',
+      observationJobId: job.id,
+      testPackageId,
+      reviewVersionId: created.review.latestVersion.id,
+      bundleSha256: created.review.latestVersion.result.artifact.sha256,
+      nonce: job.contract.nonce,
+      targetUrl: job.contract.target.url,
+      trust: 'webflow_observed',
+      executionEvidence: 'chromium_cdp_v1',
+      startedAt: new Date().toISOString(),
+      finishedAt: new Date().toISOString(),
+      redaction: {
+        applied: true,
+        headersRemoved: true,
+        cookiesRemoved: true,
+        formValuesMasked: true
+      },
+      runtimeReadyObserved: true,
+      runtimeArtifacts: [
+        {
+          url: 'http://127.0.0.1:4173/runtime-v1.js',
+          expectedSha256: 'a'.repeat(64),
+          observedSha256: 'a'.repeat(64),
+          integrity: TEST_RUNTIME_INTEGRITY,
+          domIntegrity: TEST_RUNTIME_INTEGRITY,
+          domCrossOrigin: 'anonymous',
+          loadedByPage: true,
+          trustedRuntimeInitiator: false,
+          sourceMap: { available: false }
+        }
+      ],
+      runtimeCreatedScripts: [],
+      unreviewedRuntimeScripts: [],
+      cleanup: { status: 'not_tested', residue: [] },
+      negativeProxyCanary: {
+        url: 'http://127.0.0.1:4174/webflow-runtime-canary',
+        outcome: 'blocked',
+        statusCode: 403
+      },
+      artifacts: [
+        {
+          field: 'screenshot_after_observation',
+          kind: 'screenshot_after_observation',
+          fileName: 'after-observation.png',
+          contentType: 'image/png',
+          bytes: screenshot.byteLength,
+          sha256: screenshotSha256
+        }
+      ]
+    };
+    const evidence = new FormData();
+    evidence.set('manifest', JSON.stringify(manifest));
+    evidence.set(
+      'screenshot_after_observation',
+      new File([screenshot], 'after-observation.png', { type: 'image/png' })
+    );
+
+    try {
+      const response = await exports.default.fetch(
+        new Request(`https://preflight.test/v1/runtime-observation-jobs/${job.id}/evidence`, {
+          method: 'POST',
+          headers: { authorization: `Bearer ${job.capability}` },
+          body: evidence
+        })
+      );
+      // The server never reports success for a job it no longer owns.
+      expect(response.status).toBe(410);
+      await expect(response.json()).resolves.toEqual({
+        error: 'runtime_observation_job_unavailable'
+      });
+
+      const jobRow = await env.DB.prepare(
+        `SELECT status, evidence_trust, evidence_manifest_json, consumed_at
+           FROM runtime_observation_jobs WHERE id = ?`
+      )
+        .bind(job.id)
+        .first<{
+          status: string;
+          evidence_trust: string | null;
+          evidence_manifest_json: string | null;
+          consumed_at: string | null;
+        }>();
+      expect(jobRow).toEqual({
+        status: 'expired',
+        evidence_trust: null,
+        evidence_manifest_json: null,
+        consumed_at: null
+      });
+
+      const artifactCount = await env.DB.prepare(
+        'SELECT COUNT(*) AS count FROM runtime_observation_artifacts WHERE observation_job_id = ?'
+      )
+        .bind(job.id)
+        .first<{ count: number }>();
+      expect(artifactCount?.count).toBe(0);
+
+      const completionEvents = await env.DB.prepare(
+        `SELECT COUNT(*) AS count FROM review_events
+          WHERE event_type = 'runtime_observation_completed'
+            AND payload_json LIKE '%' || ? || '%'`
+      )
+        .bind(job.id)
+        .first<{ count: number }>();
+      expect(completionEvents?.count).toBe(0);
+
+      const orphaned = await env.ARTIFACTS.list({
+        prefix: `runtime-observations/local-webflow-user/${created.review.id}/`
+      });
+      expect(orphaned.objects).toHaveLength(0);
+    } finally {
+      await env.DB.prepare('DROP TRIGGER IF EXISTS test_expire_during_upload').run();
+    }
+  });
+
+  test('gives uploading jobs a grace window before the cron expiry sweep reclaims them', async () => {
+    const form = new FormData();
+    form.set(
+      'bundle',
+      new File([await createBundle()], 'upload-grace.zip', { type: 'application/zip' })
+    );
+    const createdResponse = await exports.default.fetch(
+      new Request('https://preflight.test/v1/reviews', {
+        method: 'POST',
+        headers: { authorization: 'Bearer test-token', origin: 'http://localhost:1337' },
+        body: form
+      })
+    );
+    const created = await createdResponse.json<{ review: { id: string } }>();
+    const testPackageId = await createReadyRuntimePackage(created.review.id);
+
+    const jobId = crypto.randomUUID();
+    const now = Date.now();
+    const insertJob = (expiresAt: string) =>
+      env.DB.prepare(
+        `INSERT INTO runtime_observation_jobs
+          (id, test_package_id, status, capability_sha256, nonce, contract_json,
+           approved_by_actor, approved_at, expires_at, created_at, updated_at)
+         VALUES (?, ?, 'uploading', ?, ?, '{}', 'webflow-runtime-coordinator', ?, ?, ?, ?)`
+      )
+        .bind(
+          jobId,
+          testPackageId,
+          'c'.repeat(64),
+          crypto.randomUUID(),
+          new Date(now).toISOString(),
+          expiresAt,
+          new Date(now).toISOString(),
+          new Date(now).toISOString()
+        )
+        .run();
+
+    // Expired two minutes ago: still inside the upload grace window.
+    await insertJob(new Date(now - 2 * 60 * 1000).toISOString());
+    await reconcileRuntimeObservationJobs(env as unknown as Env);
+    let status = await env.DB.prepare(
+      'SELECT status FROM runtime_observation_jobs WHERE id = ?'
+    )
+      .bind(jobId)
+      .first<{ status: string }>();
+    expect(status?.status).toBe('uploading');
+
+    // Past the grace window: the sweep reclaims it.
+    await env.DB.prepare('UPDATE runtime_observation_jobs SET expires_at = ? WHERE id = ?')
+      .bind(new Date(now - 11 * 60 * 1000).toISOString(), jobId)
+      .run();
+    await reconcileRuntimeObservationJobs(env as unknown as Env);
+    status = await env.DB.prepare('SELECT status FROM runtime_observation_jobs WHERE id = ?')
+      .bind(jobId)
+      .first<{ status: string }>();
+    expect(status?.status).toBe('expired');
+  });
+
+  test('computes the revision sequence transactionally instead of from a stale read', async () => {
+    const form = new FormData();
+    form.set(
+      'bundle',
+      new File([await createBundle()], 'sequence-race.zip', { type: 'application/zip' })
+    );
+    const createdResponse = await exports.default.fetch(
+      new Request('https://preflight.test/v1/reviews', {
+        method: 'POST',
+        headers: { authorization: 'Bearer test-token', origin: 'http://localhost:1337' },
+        body: form
+      })
+    );
+    const created = await createdResponse.json<{ review: { id: string } }>();
+
+    // Simulate a concurrent revision that committed after this request read
+    // the latest version (which still has sequence 1).
+    await env.DB.prepare(
+      `INSERT INTO review_versions
+        (id, review_id, sequence, artifact_sha256, artifact_key, file_name,
+         compressed_bytes, policy_ruleset_version, policy_config_version,
+         review_json, created_at)
+       VALUES (?, ?, 2, ?, 'concurrent-key', 'concurrent.zip', 1, 'r', 'c', '{}', ?)`
+    )
+      .bind(crypto.randomUUID(), created.review.id, 'e'.repeat(64), new Date().toISOString())
+      .run();
+
+    const revisionForm = new FormData();
+    revisionForm.set(
+      'bundle',
+      new File([await createBundle({ injectScript: false })], 'sequence-race-v2.zip', {
+        type: 'application/zip'
+      })
+    );
+    const revisionResponse = await exports.default.fetch(
+      new Request(`https://preflight.test/v1/reviews/${created.review.id}/revisions`, {
+        method: 'POST',
+        headers: { authorization: 'Bearer test-token', origin: 'http://localhost:1337' },
+        body: revisionForm
+      })
+    );
+    // The stale read would have produced sequence 2 and violated
+    // UNIQUE(review_id, sequence); the in-batch MAX(sequence)+1 lands on 3.
+    expect(revisionResponse.status).toBe(201);
+    const revised = await revisionResponse.json<{
+      review: { latestVersion: { sequence: number } };
+    }>();
+    expect(revised.review.latestVersion.sequence).toBe(3);
+
+    const event = await env.DB.prepare(
+      `SELECT payload_json FROM review_events
+        WHERE review_id = ? AND event_type = 'revision_added'
+        ORDER BY created_at DESC LIMIT 1`
+    )
+      .bind(created.review.id)
+      .first<{ payload_json: string }>();
+    expect(JSON.parse(event!.payload_json)).toMatchObject({ sequence: 3 });
+  });
+
+  test('maps a revision uniqueness race to 409 and writes no orphan artifact bytes', async () => {
+    const form = new FormData();
+    form.set(
+      'bundle',
+      new File([await createBundle()], 'conflict-race.zip', { type: 'application/zip' })
+    );
+    const createdResponse = await exports.default.fetch(
+      new Request('https://preflight.test/v1/reviews', {
+        method: 'POST',
+        headers: { authorization: 'Bearer test-token', origin: 'http://localhost:1337' },
+        body: form
+      })
+    );
+    const created = await createdResponse.json<{
+      review: { id: string; latestVersion: { id: string } };
+    }>();
+
+    // A trigger stands in for a concurrent request: whenever this review adds
+    // a version, an identical competing row is inserted first, so the actual
+    // insert violates UNIQUE(review_id, sequence).
+    await env.DB.prepare(
+      `CREATE TRIGGER test_revision_conflict
+        BEFORE INSERT ON review_versions
+        WHEN NEW.review_id = '${created.review.id}'
+        BEGIN
+          INSERT INTO review_versions
+            (id, review_id, sequence, artifact_sha256, artifact_key, file_name,
+             compressed_bytes, policy_ruleset_version, policy_config_version,
+             review_json, created_at)
+          VALUES (NEW.id || '-race', NEW.review_id, NEW.sequence, 'f000' || substr(NEW.artifact_sha256, 5),
+                  'race-key', 'race.zip', 1, 'r', 'c', '{}', NEW.created_at);
+        END`
+    ).run();
+
+    try {
+      const bundle = await createBundle({
+        injectScript: false,
+        seed: crypto.randomUUID()
+      });
+      const bundleSha = await sha256Hex(bundle);
+      const revisionForm = new FormData();
+      revisionForm.set(
+        'bundle',
+        new File([bundle], 'conflict-race-v2.zip', { type: 'application/zip' })
+      );
+      const response = await exports.default.fetch(
+        new Request(`https://preflight.test/v1/reviews/${created.review.id}/revisions`, {
+          method: 'POST',
+          headers: { authorization: 'Bearer test-token', origin: 'http://localhost:1337' },
+          body: revisionForm
+        })
+      );
+      expect(response.status).toBe(409);
+      await expect(response.json()).resolves.toMatchObject({
+        error: 'revision_conflict'
+      });
+
+      // Bytes are written to R2 only after the batch succeeds, so the failed
+      // batch leaves no orphan object behind.
+      const orphan = await env.ARTIFACTS.head(
+        `local-webflow-user/artifacts/sha256/${bundleSha}.zip`
+      );
+      expect(orphan).toBeNull();
+
+      const latest = await env.DB.prepare(
+        'SELECT latest_version_id FROM reviews WHERE id = ?'
+      )
+        .bind(created.review.id)
+        .first<{ latest_version_id: string }>();
+      expect(latest?.latest_version_id).toBe(created.review.latestVersion.id);
+    } finally {
+      await env.DB.prepare('DROP TRIGGER IF EXISTS test_revision_conflict').run();
+    }
+  });
+
+  test('reports a conflict instead of a 500 when the coordinator issues a second active job', async () => {
+    const form = new FormData();
+    form.set(
+      'bundle',
+      new File([await createBundle()], 'coordinator-race.zip', { type: 'application/zip' })
+    );
+    const createdResponse = await exports.default.fetch(
+      new Request('https://preflight.test/v1/reviews', {
+        method: 'POST',
+        headers: { authorization: 'Bearer test-token', origin: 'http://localhost:1337' },
+        body: form
+      })
+    );
+    const created = await createdResponse.json<{ review: { id: string } }>();
+    const testPackageId = await createReadyRuntimePackage(created.review.id);
+
+    const issue = () =>
+      exports.default.fetch(
+        new Request(
+          `https://preflight.test/v1/runtime-test-packages/${testPackageId}/observation-jobs`,
+          {
+            method: 'POST',
+            headers: {
+              authorization: 'Bearer coordinator-test-token',
+              'content-type': 'application/json'
+            },
+            body: JSON.stringify({ approved: true, sandboxOwnershipVerified: true })
+          }
+        )
+      );
+
+    const first = await issue();
+    expect(first.status).toBe(201);
+
+    // Migration 0007's one-active-job partial unique index used to surface
+    // here as an uncaught constraint error (HTTP 500).
+    const second = await issue();
+    expect(second.status).toBe(403);
+    await expect(second.json()).resolves.toMatchObject({
+      error: 'runtime_observation_approval_required',
+      message: expect.stringMatching(/already active/i)
+    });
+  });
+
+  test('recognizes decimal, octal, hex, and shorthand private IPv4 hostnames', () => {
+    for (const host of [
+      '2130706433', // 127.0.0.1 decimal
+      '0x7f000001', // 127.0.0.1 hex
+      '017700000001', // 127.0.0.1 octal
+      '127.1', // shorthand
+      '0xc0.0xa8.0x1.0x1', // 192.168.1.1 hex parts
+      '10.0.0.1',
+      '192.168.4.20',
+      '172.16.0.9',
+      '169.254.1.1',
+      'localhost',
+      'printer.local',
+      '[::1]'
+    ]) {
+      expect(isPrivateOrLocalHostname(host), host).toBe(true);
+    }
+    for (const host of [
+      'api.consentpro.com',
+      '8.8.8.8',
+      '172.32.0.1',
+      '3221225985' // 192.0.2.1 decimal (public TEST-NET)
+    ]) {
+      expect(isPrivateOrLocalHostname(host), host).toBe(false);
+    }
+  });
+
+  test('caps and error-isolates the cron sandbox reconciliation batch', async () => {
+    const form = new FormData();
+    form.set(
+      'bundle',
+      new File([await createBundle()], 'cron-batch.zip', { type: 'application/zip' })
+    );
+    const createdResponse = await exports.default.fetch(
+      new Request('https://preflight.test/v1/reviews', {
+        method: 'POST',
+        headers: { authorization: 'Bearer test-token', origin: 'http://localhost:1337' },
+        body: form
+      })
+    );
+    const created = await createdResponse.json<{ review: { id: string } }>();
+    const testPackageId = await createReadyRuntimePackage(created.review.id);
+
+    const now = new Date().toISOString();
+    const contract = JSON.stringify({
+      reviewId: created.review.id,
+      reviewVersionId: 'v',
+      testPackageId
+    });
+    for (let index = 0; index < 12; index += 1) {
+      await env.DB.prepare(
+        `INSERT INTO runtime_observation_jobs
+          (id, test_package_id, status, capability_sha256, nonce, contract_json,
+           approved_by_actor, approved_at, expires_at, created_at, updated_at,
+           sandbox_id, sandbox_termination_status)
+         VALUES (?, ?, 'failed', ?, ?, ?, 'webflow-runtime-coordinator', ?, ?, ?, ?,
+                 ?, 'pending')`
+      )
+        .bind(
+          `cron-batch-job-${index}`,
+          testPackageId,
+          `${index}`.padStart(4, '0') + 'd'.repeat(60),
+          crypto.randomUUID(),
+          contract,
+          now,
+          now,
+          now,
+          now,
+          `cron-batch-sandbox-${index}`
+        )
+        .run();
+    }
+
+    // Every provider call fails: the cron must not throw, must cap the batch,
+    // and must report the failures.
+    const failingFetch = vi.fn(async () => {
+      throw new Error('provider unavailable');
+    });
+    vi.stubGlobal('fetch', failingFetch);
+    try {
+      const outcome = await reconcileRuntimeObservationJobs(env as unknown as Env);
+      expect(outcome.reconciled).toBe(0);
+      expect(outcome.failed).toBe(10);
+    } finally {
+      vi.unstubAllGlobals();
+      await env.DB.prepare(
+        "DELETE FROM runtime_observation_jobs WHERE id LIKE 'cron-batch-job-%'"
+      ).run();
+    }
+  });
+
+  test('produces actionable configuration errors for missing reviewer and canary settings', async () => {
+    const form = new FormData();
+    form.set(
+      'bundle',
+      new File([await createBundle()], 'config-errors.zip', { type: 'application/zip' })
+    );
+    const createdResponse = await exports.default.fetch(
+      new Request('https://preflight.test/v1/reviews', {
+        method: 'POST',
+        headers: { authorization: 'Bearer test-token', origin: 'http://localhost:1337' },
+        body: form
+      })
+    );
+    const created = await createdResponse.json<{
+      review: { id: string; latestVersion: { id: string } };
+    }>();
+    const testPackageId = await createReadyRuntimePackage(created.review.id);
+
+    const noReviewerEnv = {
+      DB: env.DB,
+      ARTIFACTS: env.ARTIFACTS,
+      ENVIRONMENT: 'development',
+      ALLOWED_ORIGINS: 'http://localhost:1337',
+      PREFLIGHT_DEV_TOKEN: 'test-token'
+    } as Env;
+    const handoff = await worker.fetch(
+      new Request(`https://preflight.test/v1/reviews/${created.review.id}/reviewer-handoffs`, {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer test-token',
+          origin: 'http://localhost:1337',
+          'content-type': 'application/json'
+        },
+        body: JSON.stringify({
+          reviewVersionId: created.review.latestVersion.id,
+          runtimeTestPackageId: testPackageId
+        })
+      }),
+      noReviewerEnv
+    );
+    expect(handoff.status).toBe(403);
+    await expect(handoff.json()).resolves.toMatchObject({
+      error: 'reviewer_required',
+      message: expect.stringMatching(/REVIEWER_USER_IDS/)
+    });
+
+    const noCanaryEnv = {
+      DB: env.DB,
+      ARTIFACTS: env.ARTIFACTS,
+      ENVIRONMENT: 'development',
+      ALLOWED_ORIGINS: 'http://localhost:1337',
+      PREFLIGHT_DEV_TOKEN: 'test-token',
+      E2B_API_KEY: 'e2b-test-key',
+      E2B_RUNTIME_TEMPLATE_ID:
+        'app-review-companion-runtime:f47ac10b-58cc-4372-a567-0e02b2c3d479'
+    } as Env;
+    const run = await worker.fetch(
+      new Request(
+        `https://preflight.test/v1/runtime-test-packages/${testPackageId}/observation-runs`,
+        {
+          method: 'POST',
+          headers: { authorization: 'Bearer test-token', origin: 'http://localhost:1337' }
+        }
+      ),
+      noCanaryEnv
+    );
+    expect(run.status).toBe(503);
+    await expect(run.json()).resolves.toMatchObject({
+      error: 'runtime_observation_dispatch_unavailable',
+      message: expect.stringMatching(/RUNTIME_CANARY_URL/)
+    });
   });
 });

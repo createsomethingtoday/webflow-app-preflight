@@ -200,4 +200,27 @@ describe('runScan', () => {
     expect(byPath['vendor.js.map']).toBe('SOURCE_MAP');
     expect(byPath['app.test.js']).toBe('TEST');
   });
+
+  it('forces the global flag so non-g matchers advance instead of flooding the per-file cap', () => {
+    // Regression: a matcher declared with flags 'i' (no 'g') used to re-match
+    // the same position until maxMatchesPerFile, starving later matchers.
+    const inventory = [
+      file({ path: 'src/app.js', content: 'eval(a); other(b);' })
+    ];
+    const rs = ruleset([
+      rule({
+        ruleId: 'R-NO-G',
+        matchers: [{ id: 'no-g', type: 'regex', pattern: 'eval\\(', flags: 'i', fileGlobs: ['**/*.js'] }]
+      }),
+      rule({
+        ruleId: 'R-AFTER',
+        matchers: [{ id: 'after', type: 'regex', pattern: 'other\\(', fileGlobs: ['**/*.js'] }]
+      })
+    ]);
+
+    const findings = runScan(inventory, rs, defaultConfig, noop);
+
+    expect(findings.filter((f) => f.ruleId === 'R-NO-G')).toHaveLength(1);
+    expect(findings.filter((f) => f.ruleId === 'R-AFTER')).toHaveLength(1);
+  });
 });

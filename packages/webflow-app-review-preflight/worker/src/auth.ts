@@ -33,8 +33,11 @@ export async function authenticate(
   const token = bearerToken(request);
   if (!token) return null;
 
+  // Fail closed: dev-token identities are honored ONLY when the Worker is
+  // explicitly configured as a development environment. A missing, empty, or
+  // unrecognized ENVIRONMENT value behaves like production.
   if (
-    env.ENVIRONMENT !== 'production' &&
+    env.ENVIRONMENT === 'development' &&
     env.PREFLIGHT_DEV_TOKEN &&
     token === env.PREFLIGHT_DEV_TOKEN
   ) {
@@ -42,7 +45,7 @@ export async function authenticate(
   }
 
   if (
-    env.ENVIRONMENT !== 'production' &&
+    env.ENVIRONMENT === 'development' &&
     env.PREFLIGHT_REVIEWER_DEV_TOKEN &&
     token === env.PREFLIGHT_REVIEWER_DEV_TOKEN
   ) {
@@ -86,7 +89,10 @@ export async function authenticateCompanion(
   const webflowUser = await authenticate(request, env);
   if (webflowUser) return webflowUser;
 
-  const token = bearerToken(request) ?? cookieToken(request, 'app_review_reviewer_session');
+  // Companion sessions are established exclusively through the HttpOnly
+  // reviewer session cookie. Session tokens are never issued as readable
+  // bearers, so a bearer value is never accepted as a session token.
+  const token = cookieToken(request, 'app_review_reviewer_session');
   if (!token) return null;
   const now = new Date().toISOString();
   const session = await env.DB.prepare(

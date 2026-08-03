@@ -1,4 +1,26 @@
 {
+  // PRODUCTION configuration. Deploy ONLY with `pnpm run deploy` (which pins
+  // `--config wrangler.production.jsonc`). Deploying `wrangler.jsonc`
+  // (ENVIRONMENT: "development") to production would enable dev-token auth
+  // bypass and disable HTTPS/origin/ownership enforcement.
+  //
+  // Required out-of-band configuration (Worker SECRETS, set via
+  // `wrangler secret put <NAME> --config wrangler.production.jsonc`):
+  //   - E2B_API_KEY               E2B control-plane credential
+  //   - E2B_COORDINATOR_TOKEN     coordinator service token
+  //   - WEBFLOW_CLIENT_ID / WEBFLOW_CLIENT_SECRET / WEBFLOW_TOKEN_ENCRYPTION_KEY
+  //   - PATTERN_COORDINATOR_TOKEN / GOVERNANCE_APPROVER_TOKEN
+  // Required out-of-band VARIABLES (set as secrets or dashboard vars):
+  //   - REVIEWER_USER_IDS         comma-separated Webflow user IDs. Without it
+  //                               every identity is a developer and the
+  //                               reviewer web app is unreachable.
+  //   - RUNTIME_CANARY_URL        HTTPS URL on a webflow.com / webflow.io
+  //                               origin (enforced by normalizeUrl). Without
+  //                               it every probe-mode package fails with a
+  //                               configuration error.
+  // NEVER bind PREFLIGHT_DEV_TOKEN or PREFLIGHT_REVIEWER_DEV_TOKEN here: the
+  // Worker refuses to serve when they are present alongside non-localhost
+  // ALLOWED_ORIGINS.
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "webflow-app-review-preflight",
   "account_id": "9645bd52e640b8a4f40a3a55ff1dd75a",

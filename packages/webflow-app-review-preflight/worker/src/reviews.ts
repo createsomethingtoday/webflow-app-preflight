@@ -1,5 +1,7 @@
 import {
   createBundleReview,
+  createHostedRuntimeReviewArtifact,
+  HostedRuntimeReviewInputError,
   type BundleReview
 } from '@create-something/webflow-app-review-preflight';
 import type { AuthenticatedUser, Env, StoredReview } from './types';
@@ -7,6 +9,9 @@ import type { AuthenticatedUser, Env, StoredReview } from './types';
 const MAX_BUNDLE_BYTES = 10 * 1024 * 1024;
 
 export class ReviewInputError extends Error {}
+export class RuntimeReviewInputError extends Error {}
+/** A concurrent revision won the uniqueness race; the caller should retry. */
+export class ReviewConflictError extends Error {}
 
 function safePathSegment(value: string): string {
   return value.replace(/[^a-zA-Z0-9_-]/g, '_');
@@ -154,9 +159,112 @@ export async function createReview(
   return storedReview(name, versionId, result);
 }
 
+export async function createRuntimeReview(
+  request: Request,
+  env: Env,
+  user: AuthenticatedUser
+): Promise<StoredReview> {
+  let body: unknown;
+  try {
+    const text = await request.text();
+    if (!text || text.length > 32 * 1024) throw new Error();
+    body = JSON.parse(text);
+  } catch {
+    throw new RuntimeReviewInputError('Hosted runtime review input must be valid JSON.');
+  }
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    throw new RuntimeReviewInputError('Hosted runtime review input must be an object.');
+  }
+
+  let artifact: Awaited<ReturnType<typeof createHostedRuntimeReviewArtifact>>;
+  try {
+    const value = body as Record<string, unknown>;
+    artifact = await createHostedRuntimeReviewArtifact({
+      appName: value.appName as string,
+      runtimeUrls: value.runtimeUrls as string[]
+    });
+  } catch (error) {
+    if (error instanceof HostedRuntimeReviewInputError) {
+      throw new RuntimeReviewInputError(error.message);
+    }
+    throw error;
+  }
+
+  const result = artifact.review;
+  const versionId = crypto.randomUUID();
+  const name = `${result.artifactScope.appName} runtime review`;
+  const owner = safePathSegment(user.id);
+  const artifactKey = `${owner}/artifacts/sha256/${result.artifact.sha256}.json`;
+
+  if (!(await env.ARTIFACTS.head(artifactKey))) {
+    await env.ARTIFACTS.put(artifactKey, artifact.manifest, {
+      httpMetadata: { contentType: 'application/json' },
+      customMetadata: {
+        sha256: result.artifact.sha256,
+        artifactKind: 'runtime_manifest'
+      }
+    });
+  }
+
+  await env.DB.batch([
+    env.DB.prepare(
+      `INSERT INTO reviews
+        (id, owner_user_id, site_id, name, created_at, updated_at, latest_version_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
+    ).bind(
+      result.reviewId,
+      user.id,
+      user.siteId,
+      name,
+      result.createdAt,
+      result.createdAt,
+      versionId
+    ),
+    env.DB.prepare(
+      `INSERT INTO review_versions
+        (id, review_id, sequence, artifact_sha256, artifact_key, file_name,
+         compressed_bytes, policy_ruleset_version, policy_config_version,
+         review_json, created_at)
+       VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).bind(
+      versionId,
+      result.reviewId,
+      result.artifact.sha256,
+      artifactKey,
+      result.artifact.fileName,
+      result.artifact.compressedBytes,
+      result.policySnapshot.rulesetVersion,
+      result.policySnapshot.configVersion,
+      JSON.stringify(result),
+      result.createdAt
+    ),
+    env.DB.prepare(
+      `INSERT INTO review_events
+        (id, review_id, review_version_id, actor_user_id, event_type,
+         payload_json, created_at)
+       VALUES (?, ?, ?, ?, 'runtime_review_created', ?, ?)`
+    ).bind(
+      crypto.randomUUID(),
+      result.reviewId,
+      versionId,
+      user.id,
+      JSON.stringify({
+        artifactSha256: result.artifact.sha256,
+        appType: result.artifactScope.appType,
+        runtimeArtifactCount: result.runtime.references.length
+      }),
+      result.createdAt
+    )
+  ]);
+
+  return storedReview(name, versionId, result);
+}
+
 interface LatestReviewRow {
   name: string;
   created_at: string;
+  updated_at: string;
+  version_id: string;
   sequence: number;
   review_json: string;
 }
@@ -192,7 +300,8 @@ export async function addRevision(
   deduplicated: boolean;
 } | null> {
   const currentRow = await env.DB.prepare(
-    `SELECT r.name, r.created_at, v.sequence, v.review_json
+    `SELECT r.name, r.created_at, r.updated_at, v.id AS version_id, v.sequence,
+            v.review_json
        FROM reviews r
        JOIN review_versions v ON v.id = r.latest_version_id
       WHERE r.id = ? AND r.owner_user_id = ?`
@@ -252,83 +361,126 @@ export async function addRevision(
     };
   }
 
-  const nextSequence = currentRow.sequence + 1;
   const versionId = crypto.randomUUID();
+  const eventId = crypto.randomUUID();
   const owner = safePathSegment(user.id);
   const artifactKey = `${owner}/artifacts/sha256/${result.artifact.sha256}.zip`;
 
-  const existing = await env.ARTIFACTS.head(artifactKey);
-  if (!existing) {
-    await env.ARTIFACTS.put(artifactKey, bytes, {
-      httpMetadata: { contentType: 'application/zip' },
-      customMetadata: {
-        sha256: result.artifact.sha256,
-        policyRulesetVersion: result.policySnapshot.rulesetVersion
-      }
-    });
-  }
-
-  await env.DB.batch([
-    env.DB.prepare(
-      `INSERT INTO review_versions
-        (id, review_id, sequence, artifact_sha256, artifact_key, file_name,
-         compressed_bytes, policy_ruleset_version, policy_config_version,
-         review_json, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-    ).bind(
-      versionId,
-      reviewId,
-      nextSequence,
-      result.artifact.sha256,
-      artifactKey,
-      bundle.name,
-      result.artifact.compressedBytes,
-      result.policySnapshot.rulesetVersion,
-      result.policySnapshot.configVersion,
-      JSON.stringify(result),
-      result.createdAt
-    ),
-    ...result.guidance.map((finding) =>
+  // The next sequence is computed INSIDE the transactional batch
+  // (MAX(sequence) + 1) rather than from a value read earlier, so two
+  // concurrent revisions cannot both claim the same sequence. A remaining
+  // uniqueness race (e.g. the same artifact submitted twice concurrently)
+  // is reported as a retryable conflict instead of a 500, and the artifact
+  // bytes are written to R2 only after the batch commits, so a failed batch
+  // leaves no orphan R2 object.
+  let batchResults: D1Result[];
+  try {
+    batchResults = await env.DB.batch([
       env.DB.prepare(
-        `INSERT INTO review_findings
-          (id, review_version_id, rule_id, label, title, severity, confidence,
-           finding_json, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        `INSERT INTO review_versions
+          (id, review_id, sequence, artifact_sha256, artifact_key, file_name,
+           compressed_bytes, policy_ruleset_version, policy_config_version,
+           review_json, created_at)
+         VALUES (?, ?,
+                 (SELECT COALESCE(MAX(sequence), 0) + 1
+                    FROM review_versions WHERE review_id = ?),
+                 ?, ?, ?, ?, ?, ?, ?, ?)
+         RETURNING sequence`
       ).bind(
-        `${versionId}:${finding.id}`,
         versionId,
-        finding.id,
-        finding.label,
-        finding.title,
-        finding.severity,
-        finding.confidence,
-        JSON.stringify(finding),
+        reviewId,
+        reviewId,
+        result.artifact.sha256,
+        artifactKey,
+        bundle.name,
+        result.artifact.compressedBytes,
+        result.policySnapshot.rulesetVersion,
+        result.policySnapshot.configVersion,
+        JSON.stringify(result),
+        result.createdAt
+      ),
+      ...result.guidance.map((finding) =>
+        env.DB.prepare(
+          `INSERT INTO review_findings
+            (id, review_version_id, rule_id, label, title, severity, confidence,
+             finding_json, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        ).bind(
+          `${versionId}:${finding.id}`,
+          versionId,
+          finding.id,
+          finding.label,
+          finding.title,
+          finding.severity,
+          finding.confidence,
+          JSON.stringify(finding),
+          result.createdAt
+        )
+      ),
+      env.DB.prepare(
+        `UPDATE reviews
+            SET latest_version_id = ?, updated_at = ?
+          WHERE id = ? AND owner_user_id = ?`
+      ).bind(versionId, result.createdAt, reviewId, user.id),
+      env.DB.prepare(
+        `INSERT INTO review_events
+          (id, review_id, review_version_id, actor_user_id, event_type,
+           payload_json, created_at)
+         VALUES (?, ?, ?, ?, 'revision_added',
+                 json_set(?, '$.sequence',
+                          (SELECT sequence FROM review_versions WHERE id = ?)),
+                 ?)`
+      ).bind(
+        eventId,
+        reviewId,
+        versionId,
+        user.id,
+        JSON.stringify({
+          artifactSha256: result.artifact.sha256,
+          comparison: compareResults(previous, result)
+        }),
+        versionId,
         result.createdAt
       )
-    ),
-    env.DB.prepare(
-      `UPDATE reviews
-          SET latest_version_id = ?, updated_at = ?
-        WHERE id = ? AND owner_user_id = ?`
-    ).bind(versionId, result.createdAt, reviewId, user.id),
-    env.DB.prepare(
-      `INSERT INTO review_events
-        (id, review_id, review_version_id, actor_user_id, event_type,
-         payload_json, created_at)
-       VALUES (?, ?, ?, ?, 'revision_added', ?, ?)`
-    ).bind(
-      crypto.randomUUID(),
-      reviewId,
-      versionId,
-      user.id,
-      JSON.stringify({
-        sequence: nextSequence,
-        artifactSha256: result.artifact.sha256,
-        comparison: compareResults(previous, result)
-      }),
-      result.createdAt
-    )
-  ]);
+    ]);
+  } catch (error) {
+    if (error instanceof Error && /UNIQUE constraint/i.test(error.message)) {
+      throw new ReviewConflictError(
+        'Another revision for this review landed at the same time. Retry the upload.'
+      );
+    }
+    throw error;
+  }
+
+  const nextSequence = Number(
+    (batchResults[0]?.results?.[0] as { sequence?: number } | undefined)?.sequence ??
+      currentRow.sequence + 1
+  );
+
+  try {
+    const existing = await env.ARTIFACTS.head(artifactKey);
+    if (!existing) {
+      await env.ARTIFACTS.put(artifactKey, bytes, {
+        httpMetadata: { contentType: 'application/zip' },
+        customMetadata: {
+          sha256: result.artifact.sha256,
+          policyRulesetVersion: result.policySnapshot.rulesetVersion
+        }
+      });
+    }
+  } catch (error) {
+    // Never leave a committed version row pointing at missing bytes: roll
+    // the revision back (findings cascade from the version delete).
+    await env.DB.batch([
+      env.DB.prepare('DELETE FROM review_events WHERE id = ?').bind(eventId),
+      env.DB.prepare(
+        `UPDATE reviews SET latest_version_id = ?, updated_at = ?
+          WHERE id = ? AND owner_user_id = ?`
+      ).bind(currentRow.version_id, currentRow.updated_at, reviewId, user.id),
+      env.DB.prepare('DELETE FROM review_versions WHERE id = ?').bind(versionId)
+    ]);
+    throw error;
+  }
 
   return {
     review: {
@@ -366,6 +518,7 @@ export interface ReviewSummary {
   latestSequence: number;
   readiness: BundleReview['summary']['readiness'];
   appName: string | null;
+  reviewType: 'bundle' | 'runtime_manifest';
   coverage: BundleReview['coverage'];
 }
 
@@ -400,6 +553,7 @@ export async function listReviews(
       latestSequence: row.sequence,
       readiness: result.summary.readiness,
       appName: result.artifactScope.appName,
+      reviewType: result.artifact.kind === 'runtime_manifest' ? 'runtime_manifest' : 'bundle',
       coverage: result.coverage
     };
   });

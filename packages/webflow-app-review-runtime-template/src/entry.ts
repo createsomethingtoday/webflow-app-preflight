@@ -8,9 +8,13 @@ const PORT = 3_000;
 const MAX_REQUEST_BYTES = 8_192;
 const EXPECTED_API_ORIGIN =
   'https://webflow-app-review-preflight.createsomething.workers.dev';
+// Per-sandbox launch secret injected by the Worker at sandbox create time.
+// When absent, the sandbox falls back to E2B's per-sandbox token only.
+const LAUNCH_SECRET = process.env.APP_REVIEW_RUNTIME_LAUNCH_SECRET;
 const handle = createRuntimeTemplateHandler({
   expectedApiOrigin: EXPECTED_API_ORIGIN,
-  runtime: bakedRuntimeProcessLauncher
+  runtime: bakedRuntimeProcessLauncher,
+  launchSecret: LAUNCH_SECRET
 });
 
 createServer((incoming, outgoing) => {

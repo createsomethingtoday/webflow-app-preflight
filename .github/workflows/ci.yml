@@ -45,3 +45,26 @@ jobs:
 
       - name: Build
         run: pnpm build
+
+      # `pnpm build` emits a *development* Designer Extension bundle (localhost
+      # API base, stub identity token), so the production bundle must always be
+      # rebuilt after it. Keep this step after Build.
+      - name: Build and verify production Designer Extension archive
+        run: pnpm bundle:extension
+
+      # The verifier above only inspects freshly built output. This step is what
+      # proves the bytes committed to the repository are that same reproducible
+      # production build, so a development bundle can never sit in the tree.
+      - name: Verify committed Designer Extension artifacts match the production build
+        run: |
+          artifacts=packages/webflow-app-review-preflight/extension/public
+          if ! git --no-pager diff --exit-code --stat -- "$artifacts"; then
+            echo "::error::Committed Designer Extension artifacts differ from the reproducible production build. Run 'pnpm bundle:extension' and commit $artifacts."
+            exit 1
+          fi
+          untracked="$(git ls-files --others --exclude-standard -- "$artifacts")"
+          if [ -n "$untracked" ]; then
+            echo "::error::Designer Extension production artifacts are not committed:"
+            echo "$untracked"
+            exit 1
+          fi

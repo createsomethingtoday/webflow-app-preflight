@@ -1,6 +1,6 @@
 # Webflow App Review Preflight
 
-App Review Preflight is a native Webflow Designer Extension for Marketplace developers. It turns an uploaded app bundle into deterministic, scope-aware feedback, keeps immutable revisions, and supports separately approved production-runtime evidence.
+App Review Preflight is a native Webflow Designer Extension for Marketplace developers. It turns an uploaded app bundle into deterministic, scope-aware feedback, or starts directly from an immutable hosted-runtime manifest for Data Client apps that do not ship a bundle. Both paths support separately approved production-runtime evidence.
 
 Operators should use the [App Review Preflight Operator Runbook](./OPERATOR_RUNBOOK.md) for the three-run validation loop, state decisions, failure routing, and evidence receipts.
 
@@ -22,7 +22,7 @@ The reviewer web app is the reason this is a Hybrid App. A separate browser exte
 
 Reviewer reruns must preserve the original review-version ID, bundle SHA-256, published target, installation ID, complete pinned runtime set, ready selector, and negative proxy probe. A replay creates a new immutable observation linked to that package; it never overwrites an earlier result. If any required binding is stale or missing, the rerun stays blocked until a new package is prepared.
 
-When a developer uploads a revision, the Designer Extension pre-fills the new Runtime Test Package from the most recent package for that review: the dedicated test site, installation ID, every runtime pin, selector, and proxy probe. The form marks those values as prior test input and asks the developer to review them. A prior package or Webflow observation never transfers to the new bundle; the new version starts unprepared and receives its own immutable evidence only after another Webflow-controlled run.
+When a developer uploads a revision, the Designer Extension pre-fills the new Runtime Test Package from the most recent package for that review: the dedicated test URL, every runtime pin, selector, and proxy probe. The installation ID always comes from the Webflow site currently authenticated in Designer, so a prior package cannot silently bind a revision to another site. The form marks reused values as prior test input and asks the developer to review them. A prior package or Webflow observation never transfers to the new bundle; the new version starts unprepared and receives its own immutable evidence only after another Webflow-controlled run.
 
 ## Package boundaries
 
@@ -33,7 +33,7 @@ When a developer uploads a revision, the Designer Extension pre-fills the new Ru
 - `../webflow-app-review-runtime-template/`: immutable E2B template with the runner, pinned Playwright, Chromium, and OS dependencies baked at build time.
 - `migrations/`: dedicated Preflight D1 schema.
 
-Raw partner bundles remain in private, owner-scoped R2 keys. They do not enter App Governance. Cross-app pattern candidates contain rule IDs, counts, dates, and generic guidance only; producing a governance handoff requires a separate authorized human approval and still performs no external write.
+Raw partner bundles and canonical hosted-runtime manifests remain in private, owner-scoped R2 keys. They do not enter App Governance. Cross-app pattern candidates contain rule IDs, counts, dates, and generic guidance only; producing a governance handoff requires a separate authorized human approval and still performs no external write.
 
 ## Governance precision requirements
 
@@ -45,10 +45,10 @@ The reviewer surface must keep bundle/source visibility, source-map gaps, iframe
 
 ## Review flow
 
-1. The extension gets a short-lived Webflow ID token and uploads the zip to the Worker.
-2. The Worker hashes and stores the original bytes, runs deterministic rules, persists the policy snapshot, and returns Designer Extension and production-runtime coverage separately.
+1. The extension gets a short-lived Webflow ID token. A bundle review uploads the exact zip; a Data Client review sends the app name and every exact public HTTPS runtime URL used by the same execution scenario without manufacturing a placeholder bundle. One or two files is typical, while providers that require more can declare them in order.
+2. For a bundle, the Worker hashes and stores the original bytes and runs deterministic rules. For a Data Client, it creates and stores a canonical hosted-runtime manifest whose SHA-256 is bound to the review version. Both paths return artifact and production-runtime coverage separately.
 3. Revisions create immutable versions and return resolved, remaining, and new rule IDs.
-4. A developer prepares a version-bound Runtime Test Package in the Designer Extension. A reviewer may inspect or replay the same package from the reviewer web app. The package records the dedicated published target, installation allowlist, one to eight runtime files with individual SHA-256/SRI pins, ready selector, and negative proxy probe as test input—not evidence. Every file in one package must execute in the same scenario; mutually exclusive variants use separate packages.
+4. A developer prepares a version-bound Runtime Test Package in the Designer Extension. Hosted-runtime reviews prefill all declared URLs; bundle reviews prefill any discovered references. A reviewer may inspect or replay the same package from the reviewer web app. The package records the dedicated published target, installation allowlist, one to eight runtime files with individual SHA-256/SRI pins, ready selector, and negative proxy probe as test input—not evidence. Every file in one package must execute in the same scenario; mutually exclusive variants use separate packages.
 5. The developer can request a fresh run for their own ready package from the Designer Extension. The Worker verifies ownership and package validity, creates the exact immutable E2B template build through E2B's control plane, and sends the one-time runner capability only to that sandbox's restricted `/run` route. Neither the Designer Extension nor the developer browser receives the capability or E2B credential.
 6. Developers read the result in the Designer Extension; reviewers read the same immutable predicates, blockers, and artifact receipts in the web app. Their role changes access and authorization, not the security result.
 
@@ -150,7 +150,9 @@ webflow-app-review-runtime --api-base "$apiBaseUrl" --job "$observationJobId"
 - Evidence intake is limited to 128 KB of manifest data, 10 MB total artifacts, a fixed file/type allowlist, per-file limits, strict SHA-256 validation, and secret-shaped metadata rejection before R2 writes.
 - The runner records no headers, cookies, response/request bodies, form values, or storage values. Query values and console personal/secret-shaped text are redacted, and form controls are masked in screenshots.
 - Production sandbox and canary URLs must be HTTPS and on Webflow-controlled origins. Development HTTP/private targets are accepted only when the Worker itself runs outside production.
-- Mutable runtime delivery, hash/SRI mismatch, undeclared runtime-created scripts, unreviewed child scripts, source-map gaps, and proxy exposure remain evidence-backed blockers or manual-review inputs. A dynamically inserted file is treated as declared only when its URL is in the package and its own load, hash, and SRI checks pass. Cleanup is recorded only for legacy compatibility and is not scored. Observation does not downgrade security findings.
+- Mutable runtime delivery, hash/SRI mismatch, undeclared runtime-created scripts, unreviewed child scripts, source-map gaps, and proxy exposure remain evidence-backed blockers or manual-review inputs. A dynamically inserted file is treated as declared only when its URL is in the package, the observation itself proves it was runtime-created (not loaded by the page document, initiated by another pinned runtime), and its executed bytes match its pinned SHA-256; the partner-supplied load mode never substitutes a weaker check for a page-loaded script. A "no proxy surface" declaration is unverified test input: it always leaves a mandatory manual-review blocker on the proxy check and can never produce an automated pass. Cleanup is recorded only for legacy compatibility and is not scored. Observation does not downgrade security findings.
+- Development bypass tokens (`PREFLIGHT_DEV_TOKEN`, `PREFLIGHT_REVIEWER_DEV_TOKEN`) work only when `ENVIRONMENT` is exactly `development`; any other value fails closed as production. The Worker refuses to serve at all if those tokens are bound while `ALLOWED_ORIGINS` contains a non-localhost origin.
+- Companion write paths (`/v1/companion-pairings/redeem`, companion run creation/replay/completion, and mission evidence) are retired in every environment; historical companion runs stay readable. Reviewer handoff links render an interstitial on GET and consume the one-time code only on an explicit POST, minting the session exclusively as an HttpOnly cookie — no readable bearer is ever issued.
 
 ## Verification
 
@@ -172,5 +174,24 @@ pnpm --filter @create-something/webflow-app-review-runtime-runner build
 ## Deployment and rollback
 
 This package is additive. Production promotion requires creating a dedicated D1 database and private R2 bucket, replacing the placeholder D1 ID, configuring approved origins and server-only secrets, deploying the Worker, and installing the bundled extension. None of those actions are part of local verification.
+
+### Production deploy checklist (Worker)
+
+Always deploy the production configuration explicitly — a bare `wrangler deploy` in `worker/` would ship the development config (`wrangler.jsonc`, `ENVIRONMENT: "development"`), which enables dev-token auth bypass and disables HTTPS/origin/site-ownership enforcement:
+
+```bash
+cd packages/webflow-app-review-preflight/worker
+pnpm exec wrangler d1 migrations apply webflow-app-review-preflight --remote --config wrangler.production.jsonc
+pnpm run deploy   # pinned to --config wrangler.production.jsonc ("run" is required: bare `pnpm deploy` is a pnpm built-in)
+```
+
+Before the first deploy (and after any rotation), set the out-of-band configuration:
+
+1. **Secrets** (`wrangler secret put <NAME> --config wrangler.production.jsonc`): `E2B_API_KEY`, `E2B_COORDINATOR_TOKEN`, `WEBFLOW_CLIENT_ID`, `WEBFLOW_CLIENT_SECRET`, `WEBFLOW_TOKEN_ENCRYPTION_KEY`, `PATTERN_COORDINATOR_TOKEN`, `GOVERNANCE_APPROVER_TOKEN`.
+2. **`REVIEWER_USER_IDS`** — comma-separated Webflow user IDs (secret or dashboard variable). Without it every identity is classified as a developer, `/v1/reviews/:id/reviewer-handoffs` returns 403 with an explicit "No reviewers are configured" message, and the reviewer web app is unreachable.
+3. **`RUNTIME_CANARY_URL`** — an HTTPS URL on a Webflow-controlled origin (`webflow.com` / `webflow.io`; enforced by URL validation). Without it every probe-mode runtime package fails with a 503 configuration error naming this variable.
+4. **Never** bind `PREFLIGHT_DEV_TOKEN` or `PREFLIGHT_REVIEWER_DEV_TOKEN` in production: the Worker refuses to serve while they are present alongside non-localhost `ALLOWED_ORIGINS`.
+
+Rollback uses Cloudflare's Worker version rollback; D1 migrations are forward-only (see `migrations/README.md`).
 
 Rollback is removal-first: disable the Designer Extension, stop observation-job issuance, stop routing traffic to the Worker, and retain the dedicated D1/R2 evidence under the owning retention policy. Revoke outstanding jobs or let their 15-minute capabilities expire; do not delete evidence outside the approved retention process. Because no existing governance schema or review endpoint is replaced, rollback does not require reverting another production system.

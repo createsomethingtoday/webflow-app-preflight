@@ -24,9 +24,8 @@ At the end, you will know whether the published site ran the reviewed runtime an
 Have these items ready:
 
 - the exact zip bundle you plan to submit
-- a dedicated Webflow test site with the app installed
+- a dedicated Webflow test site with the app installed and open in Designer
 - the published `webflow.io` URL for that site
-- the Webflow site or installation ID
 - the exact URL for each production runtime file that runs in the test
 - the SHA-256 for each runtime file
 - the matching SRI value for each file; the app calculates it from a valid SHA-256
@@ -80,7 +79,7 @@ Enter each field carefully:
 | Field                           | What to enter                                              | What it proves                                           |
 | ------------------------------- | ---------------------------------------------------------- | -------------------------------------------------------- |
 | Published Webflow test URL      | The dedicated site's published `https://...webflow.io` URL | The browser tested a real published Webflow site         |
-| Webflow installation or site ID | The ID for that dedicated test site                        | The runtime license belongs to the named installation    |
+| Webflow installation or site ID | No entry; Preflight binds the current Designer site        | The runtime package cannot target another installation   |
 | Immutable runtime URL           | The exact URL for the first production JavaScript file     | The review points to a specific runtime file             |
 | SHA-256                         | The lowercase SHA-256 for that file's bytes                | The executed file matches the reviewed file              |
 | Script integrity (SRI)          | The `sha256-...` integrity value for those same bytes      | The page pins that script in the browser                 |
@@ -142,7 +141,7 @@ If that command prints no header, adding `integrity` will make the browser block
 
 For a ready selector, prefer one clear marker such as `[data-runtime-ready]`. The runtime must add that marker only after it is ready for review.
 
-If the app has a proxy or fetch-through endpoint, choose **Yes** and use its real URL template. The template must contain `{canaryUrl}` where the test URL belongs. Do not replace the placeholder yourself. If the app has no such surface, choose **No**. This records a developer declaration as **not applicable**; it does not pretend that Webflow observed a blocked request.
+If the app has a proxy or fetch-through endpoint, choose **Yes** and use its real URL template. The template must contain `{canaryUrl}` where the test URL belongs. Do not replace the placeholder yourself. If the app has no such surface, choose **No**. This records a developer declaration as **not applicable**; it does not pretend that Webflow observed a blocked request. Because the declaration is unverified test input, the automated result keeps a mandatory manual-review blocker for the proxy check: only a Webflow reviewer can confirm the app truly has no proxy surface and clear it. A no-proxy declaration never produces an automated **Security passed** on its own.
 
 ### When to create a new package
 
@@ -151,7 +150,7 @@ Create a new package when any of these values changes:
 - bundle SHA-256
 - review-version ID
 - published test site
-- site or installation ID
+- authenticated Designer site
 - any runtime file URL
 - any runtime file SHA-256 or SRI
 - which runtime files execute together
@@ -192,10 +191,11 @@ A reviewer uses a separate identity and a server-owned workspace.
 2. Open the same review and Runtime Test Package.
 3. Select **Create reviewer workspace**.
 4. Select **Open reviewer workspace**.
-5. Compare the package details with the two developer runs.
-6. Select **Run independent replay**.
-7. Select **Refresh status** until the replay finishes.
-8. Record the reviewer observation job ID and result.
+5. On the confirmation page, select **Enter reviewer workspace**. The one-time link is consumed only by this explicit step, so a link preview or scanner cannot burn it; your session is a short-lived HttpOnly cookie.
+6. Compare the package details with the two developer runs.
+7. Select **Run independent replay**.
+8. Select **Refresh status** until the replay finishes.
+9. Record the reviewer observation job ID and result.
 
 The reviewer replay must use the same package ID, review-version ID, and bundle SHA-256. It creates a third job and does not replace either developer run.
 
@@ -231,7 +231,7 @@ Open **Runtime file results** to find the exact file that failed. Each row repor
 | **Proxy canary blocked**       | Expected result; the proxy refused the canary destination                 |
 | **Proxy canary exposed**       | Security blocker; the proxy allowed the canary destination                |
 | **Proxy canary inconclusive**  | The check failed to reach a clear result; investigate before continuing   |
-| **Proxy check not applicable** | The developer declared no proxy surface; a reviewer can verify that claim |
+| **Proxy check not applicable** | The developer declared no proxy surface; the result stays blocked on a manual-review item until a reviewer verifies that claim |
 
 ### Evidence artifacts
 

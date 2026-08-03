@@ -4,6 +4,10 @@ import { join } from 'node:path';
 import { runRuntimeObservation } from '../dist/index.js';
 import { runtimeSource } from '../fixtures/runtime-definition.mjs';
 
+// This local integration fixture targets loopback (127.0.0.1). Loopback/private
+// hosts are rejected by the runner unless explicitly opted in.
+process.env.RUNTIME_ALLOW_PRIVATE_HOSTS = '1';
+
 const apiBaseUrl = process.env.PREFLIGHT_API_BASE ?? 'http://127.0.0.1:8787';
 const bundlePath = process.env.PREFLIGHT_BUNDLE_PATH;
 const outputDir = process.env.RUNTIME_EVIDENCE_OUTPUT;
