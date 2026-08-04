@@ -162,6 +162,79 @@ describe('createBundleReview', () => {
     expect(review.scanCoverage?.manualReviewRequired).toBe(false);
   });
 
+  test('flags a minified bundle with no source maps as not traceable to source', async () => {
+    const review = await createBundleReview({
+      bundle: await createSingleExecutableFixture('app.min.js'),
+      fileName: 'loader-app.zip'
+    });
+
+    expect(review.sourceMapSummary).toBeDefined();
+    expect(review.sourceMapSummary?.status).toBe('missing');
+    expect(review.sourceMapSummary?.artifactProvided).toBe(false);
+    expect(review.sourceMapSummary?.missingGeneratedFiles).toContain('public/app.min.js');
+
+    const finding = review.guidance.find((item) => item.id === 'SRC-MAP-CORRESPONDENCE');
+    expect(finding).toBeDefined();
+    expect(finding?.label).toBe('Required update');
+    expect(
+      finding?.evidence.some((evidence) => evidence.filePath === 'public/app.min.js')
+    ).toBe(true);
+    expect(review.summary.readiness).toBe('changes_required');
+  });
+
+  test('accepts a minified bundle whose source map matches the generated file', async () => {
+    const zip = new JSZip();
+    zip.file(
+      'webflow.json',
+      JSON.stringify({ name: 'Mapped App', apiVersion: '2', publicDir: 'public' })
+    );
+    zip.file('public/app.min.js', 'export const ok=true;//# sourceMappingURL=app.min.js.map');
+    zip.file(
+      'public/app.min.js.map',
+      JSON.stringify({ version: 3, file: 'app.min.js', sources: ['../src/app.ts'], mappings: '' })
+    );
+
+    const review = await createBundleReview({
+      bundle: await zip.generateAsync({ type: 'arraybuffer' }),
+      fileName: 'mapped-app.zip'
+    });
+
+    expect(review.sourceMapSummary?.status).toBe('matched');
+    expect(review.sourceMapSummary?.artifactProvided).toBe(true);
+    expect(review.guidance.find((item) => item.id === 'SRC-MAP-CORRESPONDENCE')).toBeUndefined();
+  });
+
+  test('flags unparseable source maps instead of treating them as coverage', async () => {
+    const zip = new JSZip();
+    zip.file(
+      'webflow.json',
+      JSON.stringify({ name: 'Broken Map App', apiVersion: '2', publicDir: 'public' })
+    );
+    zip.file('public/app.min.js', 'export const ok=true;//# sourceMappingURL=app.min.js.map');
+    zip.file('public/app.min.js.map', 'not-json');
+
+    const review = await createBundleReview({
+      bundle: await zip.generateAsync({ type: 'arraybuffer' }),
+      fileName: 'broken-map-app.zip'
+    });
+
+    expect(review.sourceMapSummary?.status).toBe('invalid');
+    const finding = review.guidance.find((item) => item.id === 'SRC-MAP-CORRESPONDENCE');
+    expect(finding).toBeDefined();
+    expect(finding?.evidence[0]?.filePath).toBe('public/app.min.js.map');
+  });
+
+  test('does not demand source maps from a plain-source bundle', async () => {
+    const review = await createBundleReview({
+      bundle: await createDesignerExtensionFixture(),
+      fileName: 'consent-pro.zip'
+    });
+
+    expect(review.sourceMapSummary).toBeDefined();
+    expect(['not_provided', 'not_required']).toContain(review.sourceMapSummary?.status);
+    expect(review.guidance.find((item) => item.id === 'SRC-MAP-CORRESPONDENCE')).toBeUndefined();
+  });
+
   test('keeps a useful bounded excerpt from a large minified source line', () => {
     const prefix = 'const a=1;'.repeat(20_000);
     const trigger = 'document.createElement("script")';

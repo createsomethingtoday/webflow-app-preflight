@@ -1,4 +1,8 @@
-import type { Confidence, Severity } from '@create-something/bundle-scanner-core';
+import type {
+  Confidence,
+  Severity,
+  SourceMapSummary
+} from '@create-something/bundle-scanner-core';
 
 export type ArtifactSurface =
   | 'designer_extension'
@@ -98,6 +102,14 @@ export interface BundleReview {
    * not cover; unscanned executable files require manual review.
    */
   scanCoverage?: ScanCoverage;
+  /**
+   * Source-map correspondence for the scanned bundle (bundle reviews only;
+   * absent for hosted-runtime manifests). A `missing`, `partial`,
+   * `mismatch`, or `invalid` status means minified or generated executable
+   * files cannot be traced to readable source — surfaced as a Required
+   * update, mirroring the Marketplace reviewable-source standard.
+   */
+  sourceMapSummary?: SourceMapSummary;
   officialDecision: null;
 }
 
