@@ -126,9 +126,10 @@ describe('review API', () => {
       noRuntimeCreatedScripts: false,
       noUnreviewedRuntimeScripts: false,
       negativeProxyBlocked: false,
-      proxyPolicySatisfied: false
+      proxyPolicySatisfied: false,
+      runtimeSourceMapAvailable: false
     });
-    expect(result.blockers).toHaveLength(7);
+    expect(result.blockers).toHaveLength(8);
   });
 
   test('requires every file in a runtime set to load and match its own pins', () => {
@@ -155,13 +156,15 @@ describe('review API', () => {
           url: runtimeArtifacts[0].url,
           observedSha256: runtimeArtifacts[0].sha256,
           loadedByPage: true,
-          domIntegrity: runtimeArtifacts[0].integrity
+          domIntegrity: runtimeArtifacts[0].integrity,
+          sourceMap: { available: true, url: `${runtimeArtifacts[0].url}.map` }
         },
         {
           url: runtimeArtifacts[1].url,
           observedSha256: 'c'.repeat(64),
           loadedByPage: true,
-          domIntegrity: runtimeArtifacts[1].integrity
+          domIntegrity: runtimeArtifacts[1].integrity,
+          sourceMap: { available: true, url: `${runtimeArtifacts[1].url}.map` }
         }
       ],
       runtimeCreatedScripts: [],
@@ -215,7 +218,8 @@ describe('review API', () => {
             observedSha256: runtimeArtifacts[0].sha256,
             loadedByPage: true,
             domIntegrity: runtimeArtifacts[0].integrity,
-            trustedRuntimeInitiator: false
+            trustedRuntimeInitiator: false,
+            sourceMap: { available: true, url: `${runtimeArtifacts[0].url}.map` }
           },
           {
             // A genuine child is NOT loaded by the page document; it is
@@ -224,7 +228,8 @@ describe('review API', () => {
             observedSha256: runtimeArtifacts[1].sha256,
             loadedByPage: false,
             domIntegrity: null,
-            trustedRuntimeInitiator: true
+            trustedRuntimeInitiator: true,
+            sourceMap: { available: true, url: `${runtimeArtifacts[1].url}.map` }
           }
         ],
         runtimeCreatedScripts: [],
@@ -258,6 +263,115 @@ describe('review API', () => {
     });
     expect(result.blockers).toHaveLength(1);
     expect(result.blockers[0]).toMatch(/manually confirm/i);
+  });
+
+  test('holds a byte-perfect runtime with no reachable source map behind manual review', () => {
+    const runtimeArtifacts = [
+      {
+        url: 'https://api.consentpro.com/v2/cdn/runtime.js',
+        sha256: 'a'.repeat(64),
+        integrity: 'sha256-runtime'
+      }
+    ];
+    const contract = {
+      target: { url: 'https://consent-pro-test.webflow.io/', host: 'consent-pro-test.webflow.io' },
+      runtimeArtifacts,
+      negativeProxyProbe: {
+        mode: 'probe',
+        method: 'GET',
+        urlTemplate: 'https://api.consentpro.com/v2/proxy?url={canaryUrl}'
+      }
+    } as any;
+    // Every byte-level predicate passes: the pinned runtime loaded from the
+    // document, matched its SHA-256, and carried its pinned SRI.
+    const observation = {
+      url: runtimeArtifacts[0].url,
+      observedSha256: runtimeArtifacts[0].sha256,
+      loadedByPage: true,
+      domIntegrity: runtimeArtifacts[0].integrity
+    };
+    const manifest = {
+      runtimeReadyObserved: true,
+      runtimeCreatedScripts: [],
+      unreviewedRuntimeScripts: [],
+      negativeProxyCanary: { outcome: 'blocked' }
+    };
+
+    const unmapped = evaluateRuntimeSecurity(
+      { ...manifest, runtimeArtifacts: [{ ...observation, sourceMap: { available: false } }] },
+      contract
+    );
+
+    // Pinning proves WHICH bytes ran, not that they are readable.
+    expect(unmapped.predicates.runtimeHashMatched).toBe(true);
+    expect(unmapped.predicates.runtimeIntegrityMatched).toBe(true);
+    expect(unmapped.predicates.runtimeSourceMapAvailable).toBe(false);
+    expect(unmapped.status).toBe('blocked');
+    expect(unmapped.blockers).toHaveLength(1);
+    expect(unmapped.blockers[0]).toMatch(/readable source/i);
+    expect(unmapped.blockers[0]).toMatch(/manually confirm/i);
+
+    const mapped = evaluateRuntimeSecurity(
+      {
+        ...manifest,
+        runtimeArtifacts: [
+          {
+            ...observation,
+            sourceMap: { available: true, url: `${runtimeArtifacts[0].url}.map` }
+          }
+        ]
+      },
+      contract
+    );
+    expect(mapped.predicates.runtimeSourceMapAvailable).toBe(true);
+    expect(mapped.status).toBe('passed');
+    expect(mapped.blockers).toEqual([]);
+  });
+
+  test('requires a source map for every pinned file in a runtime set', () => {
+    const runtimeArtifacts = [
+      {
+        url: 'https://api.consentpro.com/v2/cdn/runtime.js',
+        sha256: 'a'.repeat(64),
+        integrity: 'sha256-runtime'
+      },
+      {
+        url: 'https://api.consentpro.com/v2/cdn/preferences.js',
+        sha256: 'b'.repeat(64),
+        integrity: 'sha256-preferences'
+      }
+    ];
+    const result = evaluateRuntimeSecurity(
+      {
+        runtimeReadyObserved: true,
+        runtimeArtifacts: runtimeArtifacts.map((pin, index) => ({
+          url: pin.url,
+          observedSha256: pin.sha256,
+          loadedByPage: true,
+          domIntegrity: pin.integrity,
+          // Only the first file is traceable to source.
+          sourceMap: index === 0 ? { available: true, url: `${pin.url}.map` } : { available: false }
+        })),
+        runtimeCreatedScripts: [],
+        unreviewedRuntimeScripts: [],
+        negativeProxyCanary: { outcome: 'blocked' }
+      },
+      {
+        target: {
+          url: 'https://consent-pro-test.webflow.io/',
+          host: 'consent-pro-test.webflow.io'
+        },
+        runtimeArtifacts,
+        negativeProxyProbe: {
+          mode: 'probe',
+          method: 'GET',
+          urlTemplate: 'https://api.consentpro.com/v2/proxy?url={canaryUrl}'
+        }
+      } as any
+    );
+
+    expect(result.predicates.runtimeSourceMapAvailable).toBe(false);
+    expect(result.status).toBe('blocked');
   });
 
   test('does not honor a runtime_child declaration for a script the page actually loaded', () => {
@@ -1608,7 +1722,7 @@ describe('review API', () => {
           domCrossOrigin: 'anonymous',
           loadedByPage: true,
           trustedRuntimeInitiator: false,
-          sourceMap: { available: false }
+          sourceMap: { available: true, url: 'http://127.0.0.1:4173/runtime-v1.js.map' }
         },
         {
           url: 'http://127.0.0.1:4173/runtime-v2.js',
@@ -1619,7 +1733,7 @@ describe('review API', () => {
           domCrossOrigin: 'anonymous',
           loadedByPage: true,
           trustedRuntimeInitiator: false,
-          sourceMap: { available: false }
+          sourceMap: { available: true, url: 'http://127.0.0.1:4173/runtime-v2.js.map' }
         }
       ],
       runtimeCreatedScripts: [],
@@ -1978,7 +2092,8 @@ describe('review API', () => {
           noRuntimeCreatedScripts: true,
           noUnreviewedRuntimeScripts: true,
           negativeProxyBlocked: true,
-          proxyPolicySatisfied: true
+          proxyPolicySatisfied: true,
+          runtimeSourceMapAvailable: true
         },
         blockers: []
       }
@@ -2024,14 +2139,18 @@ describe('review API', () => {
         loadMode: 'document',
         loadedByPage: true,
         hashMatched: true,
-        integrityMatched: true
+        integrityMatched: true,
+        sourceMapAvailable: true,
+        sourceMapUrl: 'http://127.0.0.1:4173/runtime-v1.js.map'
       },
       {
         url: 'http://127.0.0.1:4173/runtime-v2.js',
         loadMode: 'document',
         loadedByPage: true,
         hashMatched: true,
-        integrityMatched: true
+        integrityMatched: true,
+        sourceMapAvailable: true,
+        sourceMapUrl: 'http://127.0.0.1:4173/runtime-v2.js.map'
       }
     ]);
     const observationEvidence = packagesAfterBody.testPackages.find(

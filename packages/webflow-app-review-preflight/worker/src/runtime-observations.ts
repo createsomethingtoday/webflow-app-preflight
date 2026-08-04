@@ -666,6 +666,9 @@ export async function listRuntimeTestPackages(
         // only when the observation proves the file was runtime-created.
         const observedAsChild =
           observed?.loadedByPage === false && observed?.trustedRuntimeInitiator === true;
+        const observedSourceMap = observed?.sourceMap as
+          | { available?: unknown; url?: unknown }
+          | undefined;
         return {
           url: pin.url,
           loadMode: pin.loadMode ?? 'document',
@@ -675,7 +678,11 @@ export async function listRuntimeTestPackages(
             (pin.loadMode ?? 'document') === 'runtime_child'
               ? observedAsChild &&
                 (observed?.domIntegrity === null || observed?.domIntegrity === pin.integrity)
-              : observed?.domIntegrity === pin.integrity
+              : observed?.domIntegrity === pin.integrity,
+          sourceMapAvailable: observedSourceMap?.available === true,
+          ...(typeof observedSourceMap?.url === 'string'
+            ? { sourceMapUrl: observedSourceMap.url }
+            : {})
         };
       });
       const artifactRows =
@@ -1121,7 +1128,22 @@ export function evaluateRuntimeSecurity(
     // proxy predicate on its own: it is an unverified claim, not evidence.
     // It always yields a mandatory manual-review blocker below; only a real
     // blocked canary probe satisfies the predicate automatically.
-    proxyPolicySatisfied: noProxyDeclared ? false : canary.outcome === 'blocked'
+    proxyPolicySatisfied: noProxyDeclared ? false : canary.outcome === 'blocked',
+    // Byte-level pinning proves WHICH executable ran; it does not make that
+    // executable readable. A served runtime with no reachable source map
+    // cannot be traced to source, so the reviewed artifact and the executing
+    // artifact cannot be compared line for line. Reachability here is
+    // observed by the server-owned browser, so it is evidence rather than a
+    // claim — but its absence is not automatically a violation, since a
+    // partner may supply readable source privately. Like a no-proxy
+    // declaration, it therefore yields a mandatory manual-review blocker.
+    runtimeSourceMapAvailable: contract.runtimeArtifacts.every((pin) =>
+      observations.some(
+        (item) =>
+          item.url === pin.url &&
+          (item.sourceMap as { available?: unknown } | undefined)?.available === true
+      )
+    )
   };
   const blockers = [
     !predicates.publishedTarget ? 'Use a real published Webflow test-site URL.' : null,
@@ -1147,6 +1169,9 @@ export function evaluateRuntimeSecurity(
       ? noProxyDeclared
         ? 'The package declares no proxy surface. That declaration is unverified: a Webflow reviewer must manually confirm the app exposes no proxy or fetch-through endpoint before this check can pass.'
         : 'The negative proxy canary was not blocked.'
+      : null,
+    !predicates.runtimeSourceMapAvailable
+      ? 'A pinned runtime exposed no reachable source map, so the executed bytes cannot be traced to readable source. A Webflow reviewer must manually confirm readable source matching the served runtime was supplied before this check can pass.'
       : null
   ].filter((item): item is string => item !== null);
   return {

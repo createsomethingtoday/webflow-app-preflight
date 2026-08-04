@@ -515,13 +515,15 @@ describe('App Review Preflight extension', () => {
               url: 'https://api.consentpro.com/v2/cdn/runtime-v1.js',
               loadedByPage: true,
               hashMatched: true,
-              integrityMatched: true
+              integrityMatched: true,
+              sourceMapAvailable: true
             },
             {
               url: 'https://api.consentpro.com/v2/cdn/preferences-v1.js',
               loadedByPage: true,
               hashMatched: false,
-              integrityMatched: true
+              integrityMatched: true,
+              sourceMapAvailable: false
             }
           ],
           cleanupStatus: 'not_tested' as const,
@@ -1099,13 +1101,15 @@ describe('App Review Preflight extension', () => {
               url: 'https://api.consentpro.com/v2/cdn/runtime/immutable.js',
               loadedByPage: true,
               hashMatched: true,
-              integrityMatched: true
+              integrityMatched: true,
+              sourceMapAvailable: true
             },
             {
               url: 'https://api.consentpro.com/v2/cdn/preferences/immutable.js',
               loadedByPage: true,
               hashMatched: true,
-              integrityMatched: true
+              integrityMatched: true,
+              sourceMapAvailable: true
             }
           ],
           cleanupStatus: 'not_tested' as const,

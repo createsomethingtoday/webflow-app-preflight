@@ -178,6 +178,14 @@ function runtimeIssues(testPackage: RuntimeTestPackageView): RuntimeIssue[] {
       nextMove: 'Check the proxy declaration or endpoint, prepare a corrected test package, and run it again.'
     });
   }
+  if (evidence.securityPredicates.runtimeSourceMapAvailable === false) {
+    issues.push({
+      title: 'Runtime is not traceable to source',
+      detail: 'A pinned runtime served no reachable source map, so the executed code cannot be read alongside the bytes that ran.',
+      nextMove: 'Publish a source map next to each runtime file, or supply readable source matching the served runtime for a Webflow reviewer to confirm manually.',
+      urls: failedFiles((file) => !file.sourceMapAvailable)
+    });
+  }
   return issues;
 }
 
@@ -749,6 +757,11 @@ function RuntimeObservationCard({
                               : runtimeFile.integrityMatched
                                 ? 'SRI matched'
                                 : 'SRI mismatch'}
+                          </span>
+                          <span className={runtimeFile.sourceMapAvailable ? 'pass' : 'fail'}>
+                            {runtimeFile.sourceMapAvailable
+                              ? 'Source map reachable'
+                              : 'No source map'}
                           </span>
                         </div>
                       </li>

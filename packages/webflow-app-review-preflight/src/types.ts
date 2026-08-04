@@ -251,6 +251,12 @@ export interface RuntimeObservationSummary {
       noUnreviewedRuntimeScripts: boolean;
       negativeProxyBlocked: boolean;
       proxyPolicySatisfied?: boolean;
+      /**
+       * Every pinned runtime exposed a reachable source map, so the served
+       * executable can be traced to readable source. Optional: evidence
+       * recorded before this predicate existed omits it.
+       */
+      runtimeSourceMapAvailable?: boolean;
     };
     blockers: string[];
     runtimeCreatedScripts?: string[];
@@ -261,6 +267,8 @@ export interface RuntimeObservationSummary {
       loadedByPage: boolean;
       hashMatched: boolean;
       integrityMatched: boolean;
+      sourceMapAvailable: boolean;
+      sourceMapUrl?: string;
     }>;
     cleanupStatus: 'clean' | 'residue_detected' | 'not_tested';
     cleanupResidue: string[];

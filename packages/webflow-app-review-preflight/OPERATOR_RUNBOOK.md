@@ -222,7 +222,7 @@ The app checks each fact separately:
 
 A blocked result is useful evidence. It means the browser ran, but the app did not meet one or more runtime rules.
 
-Open **Runtime file results** to find the exact file that failed. Each row reports **Loaded** and **Hash matched**. A page-loaded file reports **SRI matched**; a child file reports whether its pinned parent was verified. The runtime-file count tells you how many declared files were checked; the evidence-artifact count includes screenshots and sanitized logs, so it is usually larger.
+Open **Runtime file results** to find the exact file that failed. Each row reports **Loaded**, **Hash matched**, and whether a **source map** was reachable for the served bytes. A page-loaded file reports **SRI matched**; a child file reports whether its pinned parent was verified. A file with no reachable source map blocks on manual review even when its bytes match, because pinned bytes are not readable bytes. The runtime-file count tells you how many declared files were checked; the evidence-artifact count includes screenshots and sanitized logs, so it is usually larger.
 
 ### Proxy canary
 
