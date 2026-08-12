@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, test, vi } from 'vitest';
 import { App } from './App';
-import type { PreflightApi, StoredReview } from './types';
+import type { PreflightApi, StoredReview, SubmissionReceipt } from './types';
 
 afterEach(() => {
   cleanup();
@@ -19,11 +19,19 @@ const api: PreflightApi = {
   createReview: async () => Promise.reject(new Error('not used')),
   createRuntimeReview: async () => Promise.reject(new Error('not used')),
   addRevision: async () => Promise.reject(new Error('not used')),
+  reissueSubmissionReceipt: async () => Promise.reject(new Error('not used')),
   listRuntimeTestPackages: async () => [],
   createRuntimeTestPackage: async () => Promise.reject(new Error('not used')),
   requestRuntimeObservationRun: async () => Promise.reject(new Error('not used')),
   createReviewerHandoff: async () => Promise.reject(new Error('not used'))
 };
+
+function sampleSubmissionReceipt(): SubmissionReceipt {
+  return {
+    code: `wfpre_${'a'.repeat(32)}`,
+    createdAt: '2026-07-15T23:00:00.000Z'
+  };
+}
 
 function websiteSpeedyRuntimeReview(): StoredReview {
   const review = consentProReview();
@@ -184,7 +192,10 @@ function consentProReview(sequence = 1): StoredReview {
 describe('App Review Preflight extension', () => {
   test('starts a Data Client production-runtime review without requiring a bundle', async () => {
     const created = websiteSpeedyRuntimeReview();
-    const createRuntimeReview = vi.fn(async () => created);
+    const createRuntimeReview = vi.fn(async () => ({
+      review: created,
+      submissionReceipt: sampleSubmissionReceipt()
+    }));
     const runtimeApi: PreflightApi = {
       ...api,
       createRuntimeReview
@@ -270,7 +281,7 @@ describe('App Review Preflight extension', () => {
     render(<App api={api} />);
 
     expect(await screen.findByRole('heading', { name: 'Start a preflight' })).toBeVisible();
-    expect(screen.getByRole('heading', { name: 'Review a submitted bundle' })).toBeVisible();
+    expect(screen.getByRole('heading', { name: 'Upload your app bundle' })).toBeVisible();
     expect(screen.getByRole('heading', { name: 'Review production scripts' })).toBeVisible();
     expect(
       screen.queryByRole('heading', { name: 'App Review Preflight' })
@@ -279,24 +290,29 @@ describe('App Review Preflight extension', () => {
       screen.queryByText('Clear fixes before Marketplace review')
     ).not.toBeInTheDocument();
     expect(screen.getByText(/Choose what the app ships/i)).toBeVisible();
-    expect(screen.getByText('Choose ZIP bundle')).toBeVisible();
+    expect(screen.getByText('Choose bundle')).toBeVisible();
+    expect(screen.getByText('Choose source maps (.zip or .map)')).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Run preflight' })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Enter script URLs' })).toBeVisible();
     expect(screen.queryByText('Share')).not.toBeInTheDocument();
   });
 
   test('turns an uploaded bundle into plain-language, scope-aware feedback', async () => {
     const created = consentProReview();
+    const receipt = sampleSubmissionReceipt();
     const uploadApi: PreflightApi = {
       ...api,
       listReviews: async () => [],
-      createReview: vi.fn(async () => created)
+      createReview: vi.fn(async () => ({ review: created, submissionReceipt: receipt }))
     };
     const { container } = render(<App api={uploadApi} />);
     const file = new File(['zip-bytes'], 'consent-pro.zip', { type: 'application/zip' });
+    const maps = new File(['map-bytes'], 'consent-pro-maps.zip', { type: 'application/zip' });
 
-    fireEvent.change(container.querySelector('input[type="file"]')!, {
-      target: { files: [file] }
-    });
+    const [bundleInput, sourceMapInput] = container.querySelectorAll('input[type="file"]');
+    fireEvent.change(bundleInput!, { target: { files: [file] } });
+    fireEvent.change(sourceMapInput!, { target: { files: [maps] } });
+    fireEvent.click(screen.getByRole('button', { name: 'Run preflight' }));
 
     expect(await screen.findByRole('heading', { name: 'Consent Pro by Finsweet' })).toBeVisible();
     expect(screen.getByText('Designer Extension reviewed')).toBeVisible();
@@ -304,9 +320,10 @@ describe('App Review Preflight extension', () => {
     expect(screen.getByText('Saved')).toBeVisible();
     expect(screen.getByText('Security blockers')).toBeVisible();
     expect(screen.getByText('Runtime-created scripts')).toBeVisible();
-    expect(screen.getByText('Upload revision')).toBeVisible();
+    expect(screen.getByText('Upload a revised bundle')).toBeVisible();
+    expect(screen.getByText(receipt.code)).toBeVisible();
     expect(screen.queryByText('Share')).not.toBeInTheDocument();
-    expect(uploadApi.createReview).toHaveBeenCalledWith(file);
+    expect(uploadApi.createReview).toHaveBeenCalledWith(file, { sourceMaps: maps });
   });
 
   test('gives reviewers a one-time handoff into the server-owned workspace', async () => {
@@ -397,7 +414,8 @@ describe('App Review Preflight extension', () => {
           remaining: ['SEC-MUTABLE-DELIVERY'],
           added: []
         },
-        deduplicated: false
+        deduplicated: false,
+        submissionReceipt: sampleSubmissionReceipt()
       });
     const revisionApi: PreflightApi = {
       ...api,
@@ -418,18 +436,20 @@ describe('App Review Preflight extension', () => {
     const { container } = render(<App api={revisionApi} />);
 
     fireEvent.click(await screen.findByRole('button', { name: /Consent Pro preflight/i }));
-    expect(await screen.findByText('Upload revision')).toBeVisible();
+    expect(await screen.findByText('Upload a revised bundle')).toBeVisible();
 
     const revisionInput = container.querySelector('input[type="file"]')!;
     fireEvent.change(revisionInput, {
       target: { files: [new File(['bad'], 'broken.zip', { type: 'application/zip' })] }
     });
+    fireEvent.click(screen.getByRole('button', { name: 'Run preflight again' }));
     expect(await screen.findByRole('alert')).toHaveTextContent('The bundle could not be read.');
-    expect(screen.getByText('Upload revision')).toBeVisible();
+    expect(screen.getByText('Upload a revised bundle')).toBeVisible();
 
     fireEvent.change(revisionInput, {
       target: { files: [new File(['fixed'], 'consent-pro-v2.zip', { type: 'application/zip' })] }
     });
+    fireEvent.click(screen.getByRole('button', { name: 'Run preflight again' }));
 
     await waitFor(() => expect(addRevision).toHaveBeenCalledTimes(2));
     expect(await screen.findByText('Resolved')).toBeVisible();

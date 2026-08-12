@@ -68,6 +68,16 @@ export interface BundleReview {
     sha256: string;
     compressedBytes: number;
     fileCount: number;
+    /**
+     * Present when a private source-map artifact was uploaded with the
+     * bundle. The SHA-256 lets a reviewer confirm the submission form's
+     * artifact is byte-identical to the one this review validated.
+     */
+    sourceMaps?: {
+      fileName: string;
+      sha256: string;
+      mapFileCount: number;
+    };
   };
   artifactScope: {
     primary: ArtifactSurface;
@@ -121,6 +131,16 @@ export interface CreateHostedRuntimeReviewInput {
 export interface CreateBundleReviewInput {
   bundle: ArrayBuffer;
   fileName: string;
+  /**
+   * Private source-map artifact uploaded alongside the bundle — the same
+   * artifact the developer attaches to the official submission form. A
+   * single `.map` file or a `.zip` of maps. Reconciled against the bundle's
+   * generated executables together with any maps found inside the zip.
+   */
+  sourceMapArtifact?: {
+    fileName: string;
+    bytes: ArrayBuffer;
+  };
 }
 
 export type RuntimeEvidenceTrust =

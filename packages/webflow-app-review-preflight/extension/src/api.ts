@@ -8,6 +8,8 @@ import type {
   PreflightIdentity,
   ReviewerHandoff,
   CreateHostedRuntimeReviewInput,
+  CreatedReview,
+  SubmissionReceipt,
 } from "./types";
 import { PREFLIGHT_API_BASE } from "./config";
 import { developmentApiBase, developmentIdToken } from "./development-runtime";
@@ -92,33 +94,49 @@ export function createPreflightApi(): PreflightApi {
       const body = await request<{ review: StoredReview }>(`/v1/reviews/${id}`);
       return body.review;
     },
-    async createReview(file: File, name?: string): Promise<StoredReview> {
+    async createReview(
+      file: File,
+      options?: { name?: string; sourceMaps?: File },
+    ): Promise<CreatedReview> {
       const form = new FormData();
       form.set("bundle", file);
-      if (name) form.set("name", name);
-      const body = await request<{ review: StoredReview }>("/v1/reviews", {
+      if (options?.name) form.set("name", options.name);
+      if (options?.sourceMaps) form.set("sourceMaps", options.sourceMaps);
+      return request<CreatedReview>("/v1/reviews", {
         method: "POST",
         body: form,
       });
-      return body.review;
     },
     async createRuntimeReview(
       input: CreateHostedRuntimeReviewInput,
-    ): Promise<StoredReview> {
-      const body = await request<{ review: StoredReview }>("/v1/runtime-reviews", {
+    ): Promise<CreatedReview> {
+      return request<CreatedReview>("/v1/runtime-reviews", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(input),
       });
-      return body.review;
     },
-    async addRevision(reviewId: string, file: File): Promise<RevisionResult> {
+    async addRevision(
+      reviewId: string,
+      file: File,
+      sourceMaps?: File,
+    ): Promise<RevisionResult> {
       const form = new FormData();
       form.set("bundle", file);
+      if (sourceMaps) form.set("sourceMaps", sourceMaps);
       return request<RevisionResult>(`/v1/reviews/${reviewId}/revisions`, {
         method: "POST",
         body: form,
       });
+    },
+    async reissueSubmissionReceipt(
+      reviewId: string,
+    ): Promise<SubmissionReceipt> {
+      const body = await request<{ submissionReceipt: SubmissionReceipt }>(
+        `/v1/reviews/${reviewId}/submission-receipts`,
+        { method: "POST" },
+      );
+      return body.submissionReceipt;
     },
     async listRuntimeTestPackages(
       reviewId: string,

@@ -9,7 +9,8 @@ import type {
   RuntimeTestPackageInput,
   RuntimeTestPackageView,
   ReviewerHandoff,
-  StoredReview
+  StoredReview,
+  SubmissionReceipt
 } from './types';
 
 const SELECTED_REVIEW_KEY = 'app-review-preflight.selected-review';
@@ -189,39 +190,163 @@ function runtimeIssues(testPackage: RuntimeTestPackageView): RuntimeIssue[] {
   return issues;
 }
 
+function ArtifactFileField({
+  id,
+  label,
+  buttonLabel,
+  accept,
+  file,
+  disabled,
+  onChange
+}: {
+  id: string;
+  label: string;
+  buttonLabel: string;
+  accept: string;
+  file: File | null;
+  disabled: boolean;
+  onChange: (file: File | null) => void;
+}) {
+  return (
+    <div className="artifact-field">
+      <label className="artifact-field-label" htmlFor={id}>{label}</label>
+      <div className="artifact-field-control">
+        <label
+          className={`button button-secondary artifact-field-button${disabled ? ' is-disabled' : ''}`}
+          htmlFor={id}
+        >
+          {file ? file.name : buttonLabel}
+        </label>
+        <input
+          id={id}
+          className="visually-hidden"
+          type="file"
+          accept={accept}
+          disabled={disabled}
+          onChange={(event) => {
+            onChange(event.currentTarget.files?.[0] ?? null);
+            event.currentTarget.value = '';
+          }}
+        />
+      </div>
+    </div>
+  );
+}
+
 function UploadCard({
   busy,
-  onFile
+  onRun
 }: {
   busy: boolean;
-  onFile: (file: File) => void;
+  onRun: (bundle: File, sourceMaps: File | null) => void;
 }) {
   const id = useId();
+  const [bundle, setBundle] = useState<File | null>(null);
+  const [sourceMaps, setSourceMaps] = useState<File | null>(null);
   return (
     <section className="upload-card entry-card" aria-labelledby={`${id}-title`}>
       <div className="upload-icon" aria-hidden="true">↑</div>
       <span className="eyebrow">ZIP bundle</span>
-      <h2 id={`${id}-title`}>Review a submitted bundle</h2>
+      <h2 id={`${id}-title`}>Upload your app bundle</h2>
       <p>
-        Choose the exact ZIP you plan to submit. Preflight will scan it and show what
-        to fix or verify next.
+        Use the same private artifacts you will attach to the official submission
+        form. Preflight validates them together and creates a receipt for
+        reconciliation.
       </p>
-      <label className="button button-primary" htmlFor={id}>
-        {busy ? 'Scanning bundle…' : 'Choose ZIP bundle'}
-      </label>
-      <input
-        id={id}
-        className="visually-hidden"
-        type="file"
+      <ArtifactFileField
+        id={`${id}-bundle`}
+        label="App bundle"
+        buttonLabel="Choose bundle"
         accept=".zip,application/zip"
+        file={bundle}
         disabled={busy}
-        onChange={(event) => {
-          const file = event.currentTarget.files?.[0];
-          if (file) onFile(file);
-          event.currentTarget.value = '';
-        }}
+        onChange={setBundle}
       />
-      <span className="upload-note">Up to 10 MB · saved automatically</span>
+      <ArtifactFileField
+        id={`${id}-maps`}
+        label="Source maps for review"
+        buttonLabel="Choose source maps (.zip or .map)"
+        accept=".map,.zip,application/json,application/zip"
+        file={sourceMaps}
+        disabled={busy}
+        onChange={setSourceMaps}
+      />
+      <p className="artifact-field-note">
+        Upload the same private source-map ZIP (or one .map file) you will submit
+        through the official form. Required when the bundle is minified or
+        generated. It is never published.
+      </p>
+      <button
+        className="button button-primary"
+        disabled={busy || !bundle}
+        onClick={() => {
+          if (bundle) onRun(bundle, sourceMaps);
+        }}
+      >
+        {busy ? 'Running preflight…' : 'Run preflight'}
+      </button>
+      <span className="upload-note">Private artifacts up to 10 MB each · saved automatically</span>
+    </section>
+  );
+}
+
+function copyToClipboard(value: string): void {
+  void navigator.clipboard?.writeText(value).catch(() => {
+    // Copy is a convenience; the code stays visible for manual selection.
+  });
+}
+
+function SubmissionReceiptCard({
+  receipt,
+  busy,
+  onReissue
+}: {
+  receipt: SubmissionReceipt | null;
+  busy: boolean;
+  onReissue: () => void;
+}) {
+  const [copied, setCopied] = useState(false);
+  useEffect(() => {
+    if (!copied) return;
+    const timer = setTimeout(() => setCopied(false), 2000);
+    return () => clearTimeout(timer);
+  }, [copied]);
+  return (
+    <section className="revision-card submission-receipt-card">
+      <div>
+        <span className="eyebrow">Submission receipt</span>
+        <h2>Reconcile this run with your submission</h2>
+        <p>
+          Paste this receipt into the Marketplace submission form. It lets the
+          review team confirm the form&apos;s artifacts are the exact ones this
+          preflight validated. It references this run only — it is not an
+          approval.
+        </p>
+      </div>
+      {receipt ? (
+        <div className="submission-receipt-row">
+          <code className="submission-receipt-code">{receipt.code}</code>
+          <button
+            className="button button-secondary"
+            type="button"
+            onClick={() => {
+              copyToClipboard(receipt.code);
+              setCopied(true);
+            }}
+          >
+            {copied ? 'Copied' : 'Copy receipt'}
+          </button>
+        </div>
+      ) : (
+        <button
+          className="button button-secondary"
+          type="button"
+          disabled={busy}
+          onClick={onReissue}
+        >
+          {busy ? 'Issuing…' : 'Issue a submission receipt'}
+        </button>
+      )}
     </section>
   );
 }
@@ -1246,6 +1371,8 @@ function ReviewDetail({
   busy,
   runtimeError,
   authenticatedSiteId,
+  submissionReceipt,
+  onReissueReceipt,
   onRevision,
   onPrepareRuntimePackage,
   onRunRuntimeObservation,
@@ -1261,7 +1388,9 @@ function ReviewDetail({
   busy: boolean;
   runtimeError: string | null;
   authenticatedSiteId: string | null;
-  onRevision: (file: File) => void;
+  submissionReceipt: SubmissionReceipt | null;
+  onReissueReceipt: () => void;
+  onRevision: (file: File, sourceMaps: File | null) => void;
   onPrepareRuntimePackage: (input: RuntimeTestPackageInput) => void;
   onRunRuntimeObservation: (testPackageId: string) => void;
   onRefreshRuntimePackages: () => void;
@@ -1273,6 +1402,8 @@ function ReviewDetail({
   const result = review.latestVersion.result;
   const runtimeOnly = result.artifact.kind === 'runtime_manifest';
   const revisionId = useId();
+  const [revisionBundle, setRevisionBundle] = useState<File | null>(null);
+  const [revisionSourceMaps, setRevisionSourceMaps] = useState<File | null>(null);
   const blockerText = result.summary.securityBlockers === 1 ? 'blocker' : 'blockers';
   const readinessMessage = runtimeOnly
     ? 'Script list saved. Set up a Webflow test to observe the published runtime.'
@@ -1298,6 +1429,12 @@ function ReviewDetail({
 
       {comparison ? <Comparison comparison={comparison} /> : null}
       <Coverage review={review} testPackages={runtimeTestPackages} />
+
+      <SubmissionReceiptCard
+        receipt={submissionReceipt}
+        busy={busy}
+        onReissue={onReissueReceipt}
+      />
 
       {!runtimeOnly ? <section className="summary-grid" aria-label="Finding summary">
         <div><strong>{result.summary.securityBlockers}</strong><span>Security blockers</span></div>
@@ -1364,27 +1501,42 @@ function ReviewDetail({
         </section>
       ) : null}
 
-      {!runtimeOnly ? <section className="revision-card">
+      {!runtimeOnly ? <section className="revision-card revision-upload-card">
         <div>
           <span className="eyebrow">Next move</span>
           <h2>Upload a revised bundle</h2>
           <p>We will compare it with this checkpoint and show exactly what changed.</p>
         </div>
-        <label className="button button-primary" htmlFor={revisionId}>
-          {busy ? 'Comparing…' : 'Upload revision'}
-        </label>
-        <input
-          id={revisionId}
-          className="visually-hidden"
-          type="file"
+        <ArtifactFileField
+          id={`${revisionId}-bundle`}
+          label="App bundle"
+          buttonLabel="Choose bundle"
           accept=".zip,application/zip"
+          file={revisionBundle}
           disabled={busy}
-          onChange={(event) => {
-            const file = event.currentTarget.files?.[0];
-            if (file) onRevision(file);
-            event.currentTarget.value = '';
-          }}
+          onChange={setRevisionBundle}
         />
+        <ArtifactFileField
+          id={`${revisionId}-maps`}
+          label="Source maps for review"
+          buttonLabel="Choose source maps (.zip or .map)"
+          accept=".map,.zip,application/json,application/zip"
+          file={revisionSourceMaps}
+          disabled={busy}
+          onChange={setRevisionSourceMaps}
+        />
+        <button
+          className="button button-primary"
+          disabled={busy || !revisionBundle}
+          onClick={() => {
+            if (!revisionBundle) return;
+            onRevision(revisionBundle, revisionSourceMaps);
+            setRevisionBundle(null);
+            setRevisionSourceMaps(null);
+          }}
+        >
+          {busy ? 'Comparing…' : 'Run preflight again'}
+        </button>
       </section> : null}
     </main>
   );
@@ -1400,6 +1552,7 @@ export function App({ api }: { api: PreflightApi }) {
   const [runtimeError, setRuntimeError] = useState<string | null>(null);
   const [identity, setIdentity] = useState<PreflightIdentity | null>(null);
   const [reviewerHandoff, setReviewerHandoff] = useState<ReviewerHandoff | null>(null);
+  const [submissionReceipt, setSubmissionReceipt] = useState<SubmissionReceipt | null>(null);
 
   const refreshHistory = async () => {
     const items = await api.listReviews();
@@ -1471,18 +1624,24 @@ export function App({ api }: { api: PreflightApi }) {
           authenticatedSiteId={identity?.siteId ?? null}
           reviewerMode={identity?.companionRole === 'reviewer'}
           reviewerHandoff={reviewerHandoff}
+          submissionReceipt={submissionReceipt}
+          onReissueReceipt={() => run(async () => {
+            setSubmissionReceipt(await api.reissueSubmissionReceipt(review.id));
+          })}
           onBack={() => {
             setReview(null);
             setComparison(null);
             setRuntimeTestPackages([]);
             setReviewerHandoff(null);
+            setSubmissionReceipt(null);
             rememberReview(null);
           }}
-          onRevision={(file) => run(async () => {
-            const revised = await api.addRevision(review.id, file);
+          onRevision={(file, sourceMaps) => run(async () => {
+            const revised = await api.addRevision(review.id, file, sourceMaps ?? undefined);
             setReview(revised.review);
             setComparison(revised.comparison);
             setReviewerHandoff(null);
+            setSubmissionReceipt(revised.submissionReceipt);
             await refreshRuntimePackages(review.id);
             await refreshHistory();
           })}
@@ -1533,13 +1692,17 @@ export function App({ api }: { api: PreflightApi }) {
           <div className="start-options">
             <UploadCard
               busy={busy}
-              onFile={(file) => run(async () => {
-                const created = await api.createReview(file);
-                setReview(created);
+              onRun={(bundle, sourceMaps) => run(async () => {
+                const created = await api.createReview(
+                  bundle,
+                  sourceMaps ? { sourceMaps } : undefined
+                );
+                setReview(created.review);
                 setComparison(null);
                 setRuntimeTestPackages([]);
                 setReviewerHandoff(null);
-                rememberReview(created.id);
+                setSubmissionReceipt(created.submissionReceipt);
+                rememberReview(created.review.id);
                 await refreshHistory();
               })}
             />
@@ -1547,11 +1710,12 @@ export function App({ api }: { api: PreflightApi }) {
               busy={busy}
               onStart={(input) => run(async () => {
                 const created = await api.createRuntimeReview(input);
-                setReview(created);
+                setReview(created.review);
                 setComparison(null);
                 setRuntimeTestPackages([]);
                 setReviewerHandoff(null);
-                rememberReview(created.id);
+                setSubmissionReceipt(created.submissionReceipt);
+                rememberReview(created.review.id);
                 await refreshHistory();
               })}
             />
@@ -1567,6 +1731,7 @@ export function App({ api }: { api: PreflightApi }) {
               setReview(selectedReview);
               setComparison(null);
               setReviewerHandoff(null);
+              setSubmissionReceipt(null);
               rememberReview(id);
             })}
           />

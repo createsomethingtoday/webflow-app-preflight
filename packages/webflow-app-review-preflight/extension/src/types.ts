@@ -40,10 +40,21 @@ export interface ReviewComparison {
   added: string[];
 }
 
+export interface SubmissionReceipt {
+  code: string;
+  createdAt: string;
+}
+
+export interface CreatedReview {
+  review: StoredReview;
+  submissionReceipt: SubmissionReceipt;
+}
+
 export interface RevisionResult {
   review: StoredReview;
   comparison: ReviewComparison;
   deduplicated: boolean;
+  submissionReceipt: SubmissionReceipt;
 }
 
 export interface PreflightIdentity {
@@ -61,9 +72,13 @@ export interface PreflightApi {
   getIdentity(): Promise<PreflightIdentity>;
   listReviews(): Promise<ReviewSummary[]>;
   getReview(id: string): Promise<StoredReview>;
-  createReview(file: File, name?: string): Promise<StoredReview>;
-  createRuntimeReview(input: CreateHostedRuntimeReviewInput): Promise<StoredReview>;
-  addRevision(reviewId: string, file: File): Promise<RevisionResult>;
+  createReview(
+    file: File,
+    options?: { name?: string; sourceMaps?: File }
+  ): Promise<CreatedReview>;
+  createRuntimeReview(input: CreateHostedRuntimeReviewInput): Promise<CreatedReview>;
+  addRevision(reviewId: string, file: File, sourceMaps?: File): Promise<RevisionResult>;
+  reissueSubmissionReceipt(reviewId: string): Promise<SubmissionReceipt>;
   listRuntimeTestPackages(reviewId: string): Promise<RuntimeTestPackageView[]>;
   createRuntimeTestPackage(
     reviewId: string,

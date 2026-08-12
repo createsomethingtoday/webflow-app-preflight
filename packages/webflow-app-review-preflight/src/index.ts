@@ -1,4 +1,4 @@
-export { createBundleReview } from './create-review';
+export { createBundleReview, SourceMapArtifactError } from './create-review';
 export {
   createHostedRuntimeReview,
   createHostedRuntimeReviewArtifact,

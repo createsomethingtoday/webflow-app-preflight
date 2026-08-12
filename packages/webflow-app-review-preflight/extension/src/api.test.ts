@@ -16,6 +16,10 @@ describe('Preflight API', () => {
         review: {
           id: 'runtime-review-1',
           name: 'Website Speedy runtime review'
+        },
+        submissionReceipt: {
+          code: `wfpre_${'a'.repeat(32)}`,
+          createdAt: '2026-07-15T23:00:00.000Z'
         }
       })
     );
@@ -26,7 +30,8 @@ describe('Preflight API', () => {
     };
 
     await expect(createPreflightApi().createRuntimeReview(input)).resolves.toMatchObject({
-      id: 'runtime-review-1'
+      review: { id: 'runtime-review-1' },
+      submissionReceipt: { code: `wfpre_${'a'.repeat(32)}` }
     });
     expect(fetchMock).toHaveBeenCalledWith(
       expect.stringMatching(/\/v1\/runtime-reviews$/),

@@ -35,6 +35,10 @@ import {
   recordRuntimeObservationEvidence,
   RuntimeTestPackageError
 } from './runtime-observations';
+import {
+  reissueSubmissionReceipt,
+  verifySubmissionReceipt
+} from './submission-receipts';
 import type { Env } from './types';
 import { getCompanionRun } from './companion-runs';
 import {
@@ -140,6 +144,24 @@ async function handle(request: Request, env: Env): Promise<Response> {
   }
   if (url.pathname === '/health' && request.method === 'GET') {
     return json({ ok: true, service: 'webflow-app-review-preflight' }, 200, origin);
+  }
+  // Unauthenticated by design: the receipt code is the secret, and the
+  // caller is the submission form's server tracing a developer-supplied
+  // code back to the preflight run that produced it. The response carries
+  // reconciliation metadata only — never findings or artifact contents.
+  if (url.pathname === '/v1/submission-receipts/verify' && request.method === 'POST') {
+    let code: unknown;
+    try {
+      const text = await request.text();
+      if (!text || text.length > 4 * 1024) throw new Error();
+      code = (JSON.parse(text) as { code?: unknown }).code;
+    } catch {
+      return json({ valid: false, error: 'invalid_request' }, 400, origin);
+    }
+    const receipt = await verifySubmissionReceipt(env, code);
+    return receipt
+      ? json({ valid: true, receipt }, 200, origin)
+      : json({ valid: false }, 404, origin);
   }
   if (url.pathname === '/v1/oauth/webflow/start' && request.method === 'GET') {
     return startWebflowOAuth(env);
@@ -471,10 +493,10 @@ async function handle(request: Request, env: Env): Promise<Response> {
     }
 
     if (url.pathname === '/v1/reviews' && request.method === 'POST') {
-      return json({ review: await createReview(request, env, user) }, 201, origin);
+      return json(await createReview(request, env, user), 201, origin);
     }
     if (url.pathname === '/v1/runtime-reviews' && request.method === 'POST') {
-      return json({ review: await createRuntimeReview(request, env, user) }, 201, origin);
+      return json(await createRuntimeReview(request, env, user), 201, origin);
     }
     if (url.pathname === '/v1/reviews' && request.method === 'GET') {
       return json(
@@ -508,6 +530,20 @@ async function handle(request: Request, env: Env): Promise<Response> {
       );
       return revision
         ? json(revision, revision.deduplicated ? 200 : 201, origin)
+        : json({ error: 'review_not_found' }, 404, origin);
+    }
+
+    const receiptMatch = url.pathname.match(
+      /^\/v1\/reviews\/([^/]+)\/submission-receipts$/
+    );
+    if (receiptMatch && request.method === 'POST') {
+      const submissionReceipt = await reissueSubmissionReceipt(
+        decodeURIComponent(receiptMatch[1]!),
+        env,
+        user
+      );
+      return submissionReceipt
+        ? json({ submissionReceipt }, 201, origin)
         : json({ error: 'review_not_found' }, 404, origin);
     }
 

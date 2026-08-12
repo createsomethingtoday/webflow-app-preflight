@@ -880,6 +880,165 @@ describe('review API', () => {
     expect(new Uint8Array(await object!.arrayBuffer())).toEqual(bundle);
   });
 
+  test('stamps a preflight run with a submission receipt the form can trace', async () => {
+    const zip = new JSZip();
+    zip.file(
+      'webflow.json',
+      JSON.stringify({ name: 'Mapped App', apiVersion: '2', publicDir: 'dist' })
+    );
+    zip.file('dist/main.js', 'export const ok=true;//# sourceMappingURL=main.js.map');
+    const bundle = await zip.generateAsync({ type: 'uint8array' });
+
+    const mapZip = new JSZip();
+    mapZip.file(
+      'main.js.map',
+      JSON.stringify({ version: 3, file: 'main.js', sources: ['../src/main.ts'], mappings: '' })
+    );
+    const maps = await mapZip.generateAsync({ type: 'uint8array' });
+
+    const form = new FormData();
+    form.set('bundle', new File([bundle], 'mapped-app.zip', { type: 'application/zip' }));
+    form.set('sourceMaps', new File([maps], 'mapped-app-maps.zip', { type: 'application/zip' }));
+
+    const createResponse = await exports.default.fetch(
+      new Request('https://preflight.test/v1/reviews', {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer test-token',
+          origin: 'http://localhost:1337'
+        },
+        body: form
+      })
+    );
+
+    expect(createResponse.status).toBe(201);
+    const created = await createResponse.json<{
+      review: {
+        id: string;
+        latestVersion: {
+          id: string;
+          result: {
+            artifact: {
+              sha256: string;
+              sourceMaps?: { fileName: string; sha256: string; mapFileCount: number };
+            };
+            sourceMapSummary?: { status: string };
+            summary: { readiness: string };
+          };
+        };
+      };
+      submissionReceipt: { code: string; createdAt: string };
+    }>();
+
+    expect(created.submissionReceipt.code).toMatch(/^wfpre_[a-f0-9]{32}$/);
+    expect(created.review.latestVersion.result.sourceMapSummary?.status).toBe('matched');
+    expect(created.review.latestVersion.result.artifact.sourceMaps?.fileName).toBe(
+      'mapped-app-maps.zip'
+    );
+    expect(created.review.latestVersion.result.artifact.sourceMaps?.mapFileCount).toBe(1);
+
+    // The private source-map artifact is durable and referenced by the version row.
+    const versionRow = await env.DB.prepare(
+      'SELECT source_map_sha256, source_map_key, source_map_file_name FROM review_versions WHERE id = ?'
+    )
+      .bind(created.review.latestVersion.id)
+      .first<{
+        source_map_sha256: string | null;
+        source_map_key: string | null;
+        source_map_file_name: string | null;
+      }>();
+    expect(versionRow?.source_map_sha256).toBe(
+      created.review.latestVersion.result.artifact.sourceMaps?.sha256
+    );
+    expect(versionRow?.source_map_file_name).toBe('mapped-app-maps.zip');
+    const storedMaps = await env.ARTIFACTS.get(versionRow!.source_map_key!);
+    expect(storedMaps).not.toBeNull();
+    expect(new Uint8Array(await storedMaps!.arrayBuffer())).toEqual(maps);
+
+    // The submission form traces the receipt without authentication; the
+    // code itself is the secret and only reconciliation metadata comes back.
+    const verifyResponse = await exports.default.fetch(
+      new Request('https://preflight.test/v1/submission-receipts/verify', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ code: created.submissionReceipt.code })
+      })
+    );
+    expect(verifyResponse.status).toBe(200);
+    const verified = await verifyResponse.json<{
+      valid: boolean;
+      receipt: {
+        reviewId: string;
+        bundleSha256: string;
+        sourceMapArtifactSha256: string | null;
+        readiness: string;
+        sourceMapStatus: string;
+        runtimeSecurityStatus: string;
+      };
+    }>();
+    expect(verified.valid).toBe(true);
+    expect(verified.receipt.reviewId).toBe(created.review.id);
+    expect(verified.receipt.bundleSha256).toBe(
+      created.review.latestVersion.result.artifact.sha256
+    );
+    expect(verified.receipt.sourceMapArtifactSha256).toBe(
+      created.review.latestVersion.result.artifact.sourceMaps?.sha256
+    );
+    expect(verified.receipt.sourceMapStatus).toBe('matched');
+    expect(verified.receipt.runtimeSecurityStatus).toBe('none');
+
+    // Unknown or malformed codes resolve identically: not found, no probing.
+    const unknownResponse = await exports.default.fetch(
+      new Request('https://preflight.test/v1/submission-receipts/verify', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ code: `wfpre_${'f'.repeat(32)}` })
+      })
+    );
+    expect(unknownResponse.status).toBe(404);
+    expect(await unknownResponse.json()).toEqual({ valid: false });
+
+    // The owner can issue a fresh receipt for the latest version at any time.
+    const reissueResponse = await exports.default.fetch(
+      new Request(`https://preflight.test/v1/reviews/${created.review.id}/submission-receipts`, {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer test-token',
+          origin: 'http://localhost:1337'
+        }
+      })
+    );
+    expect(reissueResponse.status).toBe(201);
+    const reissued = await reissueResponse.json<{
+      submissionReceipt: { code: string };
+    }>();
+    expect(reissued.submissionReceipt.code).toMatch(/^wfpre_[a-f0-9]{32}$/);
+    expect(reissued.submissionReceipt.code).not.toBe(created.submissionReceipt.code);
+  });
+
+  test('rejects a source-map upload that is not a .map file or .zip archive', async () => {
+    const bundle = await createBundle();
+    const form = new FormData();
+    form.set('bundle', new File([bundle], 'consent-pro.zip', { type: 'application/zip' }));
+    form.set('sourceMaps', new File(['{}'], 'maps.json', { type: 'application/json' }));
+
+    const response = await exports.default.fetch(
+      new Request('https://preflight.test/v1/reviews', {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer test-token',
+          origin: 'http://localhost:1337'
+        },
+        body: form
+      })
+    );
+
+    expect(response.status).toBe(400);
+    const body = await response.json<{ error: string; message: string }>();
+    expect(body.error).toBe('invalid_bundle');
+    expect(body.message).toContain('.map file or a .zip');
+  });
+
   test('creates a durable Data Client review from hosted runtime URLs without a bundle', async () => {
     const runtimeUrls = [
       'https://webflow-websitespeedy13.b-cdn.net/speedyscripts/ecmrx_1234/ecmrx_1234_1.js',

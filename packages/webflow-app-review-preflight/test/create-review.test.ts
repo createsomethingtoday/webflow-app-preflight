@@ -3,7 +3,8 @@ import { describe, expect, test } from 'vitest';
 import {
   createBundleReview,
   createHostedRuntimeReviewArtifact,
-  HostedRuntimeReviewInputError
+  HostedRuntimeReviewInputError,
+  SourceMapArtifactError
 } from '../src/index';
 import { boundedEvidenceSnippet } from '../src/create-review';
 
@@ -202,6 +203,81 @@ describe('createBundleReview', () => {
     expect(review.sourceMapSummary?.status).toBe('matched');
     expect(review.sourceMapSummary?.artifactProvided).toBe(true);
     expect(review.guidance.find((item) => item.id === 'SRC-MAP-CORRESPONDENCE')).toBeUndefined();
+  });
+
+  test('reconciles a privately uploaded source-map artifact against the bundle', async () => {
+    const zip = new JSZip();
+    zip.file(
+      'webflow.json',
+      JSON.stringify({ name: 'Mapped App', apiVersion: '2', publicDir: 'public' })
+    );
+    zip.file('public/app.min.js', 'export const ok=true;//# sourceMappingURL=app.min.js.map');
+
+    const mapZip = new JSZip();
+    mapZip.file(
+      'app.min.js.map',
+      JSON.stringify({ version: 3, file: 'app.min.js', sources: ['../src/app.ts'], mappings: '' })
+    );
+
+    const review = await createBundleReview({
+      bundle: await zip.generateAsync({ type: 'arraybuffer' }),
+      fileName: 'mapped-app.zip',
+      sourceMapArtifact: {
+        fileName: 'mapped-app-maps.zip',
+        bytes: await mapZip.generateAsync({ type: 'arraybuffer' })
+      }
+    });
+
+    expect(review.sourceMapSummary?.status).toBe('matched');
+    expect(review.guidance.find((item) => item.id === 'SRC-MAP-CORRESPONDENCE')).toBeUndefined();
+    expect(review.artifact.sourceMaps?.fileName).toBe('mapped-app-maps.zip');
+    expect(review.artifact.sourceMaps?.sha256).toMatch(/^[a-f0-9]{64}$/);
+    expect(review.artifact.sourceMaps?.mapFileCount).toBe(1);
+  });
+
+  test('accepts a single .map file as the source-map artifact', async () => {
+    const zip = new JSZip();
+    zip.file(
+      'webflow.json',
+      JSON.stringify({ name: 'Mapped App', apiVersion: '2', publicDir: 'public' })
+    );
+    zip.file('public/app.min.js', 'export const ok=true;//# sourceMappingURL=app.min.js.map');
+
+    const review = await createBundleReview({
+      bundle: await zip.generateAsync({ type: 'arraybuffer' }),
+      fileName: 'mapped-app.zip',
+      sourceMapArtifact: {
+        fileName: 'app.min.js.map',
+        bytes: new TextEncoder().encode(
+          JSON.stringify({ version: 3, file: 'app.min.js', sources: ['../src/app.ts'], mappings: '' })
+        ).buffer as ArrayBuffer
+      }
+    });
+
+    expect(review.sourceMapSummary?.status).toBe('matched');
+  });
+
+  test('rejects a source-map artifact that contains no maps', async () => {
+    const zip = new JSZip();
+    zip.file(
+      'webflow.json',
+      JSON.stringify({ name: 'Mapped App', apiVersion: '2', publicDir: 'public' })
+    );
+    zip.file('public/app.min.js', 'export const ok=true;');
+
+    const emptyArtifact = new JSZip();
+    emptyArtifact.file('README.txt', 'no maps here');
+
+    await expect(
+      createBundleReview({
+        bundle: await zip.generateAsync({ type: 'arraybuffer' }),
+        fileName: 'mapped-app.zip',
+        sourceMapArtifact: {
+          fileName: 'not-maps.zip',
+          bytes: await emptyArtifact.generateAsync({ type: 'arraybuffer' })
+        }
+      })
+    ).rejects.toThrow(SourceMapArtifactError);
   });
 
   test('flags unparseable source maps instead of treating them as coverage', async () => {

@@ -10,7 +10,8 @@ import {
   type FindingGroup,
   type ScanConfig,
   type Severity,
-  type SourceMapSummary
+  type SourceMapSummary,
+  type UnzippedFile
 } from '@create-something/bundle-scanner-core';
 import { discoverRuntimeReferences } from './runtime-references';
 import type {
@@ -98,6 +99,53 @@ function toHex(bytes: ArrayBuffer): string {
 
 async function sha256(bundle: ArrayBuffer): Promise<string> {
   return toHex(await crypto.subtle.digest('SHA-256', bundle));
+}
+
+/** The uploaded source-map artifact cannot be used as review input. */
+export class SourceMapArtifactError extends Error {}
+
+/**
+ * Expand the privately uploaded source-map artifact into individual map
+ * files. A `.map` file is used as-is; a `.zip` is unpacked and only its
+ * `.map` entries are kept. An artifact that yields no usable map is an
+ * input error, not a silent "missing" — the developer believes they
+ * supplied maps, so tell them why the upload did not count.
+ */
+async function extractSourceMapArtifact(artifact: {
+  fileName: string;
+  bytes: ArrayBuffer;
+}): Promise<UnzippedFile[]> {
+  const lowerName = artifact.fileName.toLowerCase();
+  if (artifact.bytes.byteLength === 0) {
+    throw new SourceMapArtifactError('The source-map upload is empty.');
+  }
+  if (lowerName.endsWith('.map')) {
+    return [{ path: artifact.fileName, data: new Uint8Array(artifact.bytes) }];
+  }
+  if (!lowerName.endsWith('.zip')) {
+    throw new SourceMapArtifactError(
+      'Upload source maps as a single .map file or a .zip archive of .map files.'
+    );
+  }
+  let entries: UnzippedFile[];
+  try {
+    ({ files: entries } = await processZipBuffer(
+      artifact.bytes,
+      PREFLIGHT_CONFIG,
+      () => undefined
+    ));
+  } catch {
+    throw new SourceMapArtifactError(
+      'We could not read the source-map zip. Re-export the archive and try again.'
+    );
+  }
+  const maps = entries.filter((file) => file.path.toLowerCase().endsWith('.map'));
+  if (maps.length === 0) {
+    throw new SourceMapArtifactError(
+      'The source-map zip contains no .map files. Include the version-3 maps produced by the build that generated this bundle.'
+    );
+  }
+  return maps;
 }
 
 function findManifest(inventory: FileEntry[]): {
@@ -255,15 +303,21 @@ export async function createBundleReview(
     )
     .map((file) => file.path)
     .sort();
-  // Source maps travel inside the uploaded bundle (adjacent .map files).
-  // Reconciling them against the generated executables is what makes a
-  // minified bundle reviewable — served bytes must trace to readable source.
+  // Source maps arrive two ways: inside the uploaded bundle (adjacent .map
+  // files) and as a private artifact uploaded next to it — the same one the
+  // developer attaches to the official submission form. Reconciling them
+  // against the generated executables is what makes a minified bundle
+  // reviewable — served bytes must trace to readable source.
   const bundledSourceMaps = unzipped.filter((file) =>
     file.path.toLowerCase().endsWith('.map')
   );
+  const externalSourceMaps = input.sourceMapArtifact
+    ? await extractSourceMapArtifact(input.sourceMapArtifact)
+    : [];
+  const sourceMapFiles = [...bundledSourceMaps, ...externalSourceMaps];
   const sourceMapSummary = analyzeSourceMaps(
     inventory,
-    bundledSourceMaps.length > 0 ? bundledSourceMaps : undefined
+    sourceMapFiles.length > 0 ? sourceMapFiles : undefined
   );
   const report = generateReport(findings, defaultRuleset, PREFLIGHT_CONFIG, {
     fileCount: inventory.length,
@@ -289,7 +343,16 @@ export async function createBundleReview(
       fileName: input.fileName,
       sha256: await sha256(input.bundle),
       compressedBytes: input.bundle.byteLength,
-      fileCount: inventory.length
+      fileCount: inventory.length,
+      ...(input.sourceMapArtifact
+        ? {
+            sourceMaps: {
+              fileName: input.sourceMapArtifact.fileName,
+              sha256: await sha256(input.sourceMapArtifact.bytes),
+              mapFileCount: externalSourceMaps.length
+            }
+          }
+        : {})
     },
     artifactScope,
     coverage: [
