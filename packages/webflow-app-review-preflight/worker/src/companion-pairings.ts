@@ -68,7 +68,7 @@ export async function createCompanionPairing(
        JOIN runtime_test_packages p ON p.review_version_id = rv.id
       WHERE rv.review_id = ? AND rv.id = ?
         AND p.id = ? AND p.status = 'ready' AND p.license_expires_at > ?
-        AND (? = 'reviewer' OR r.owner_user_id = ?)`
+        AND (? = 'reviewer' OR (r.owner_user_id = ? AND r.site_id IS ?))`
   )
     .bind(
       reviewId,
@@ -76,7 +76,8 @@ export async function createCompanionPairing(
       input.runtimeTestPackageId,
       new Date().toISOString(),
       actorRole,
-      user.id
+      user.id,
+      user.siteId
     )
     .first<{ owner_user_id: string; runtime_test_package_id: string }>();
   if (!version) return null;

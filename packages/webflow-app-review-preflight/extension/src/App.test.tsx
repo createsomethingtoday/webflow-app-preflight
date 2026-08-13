@@ -1,6 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, test, vi } from 'vitest';
 import { App } from './App';
+import { PreflightAuthenticationError } from './api';
 import type { PreflightApi, StoredReview, SubmissionReceipt } from './types';
 
 afterEach(() => {
@@ -1034,7 +1035,7 @@ describe('App Review Preflight extension', () => {
     expect(screen.queryByRole('heading', { name: 'Runtime file 10' })).not.toBeInTheDocument();
   });
 
-  test('reopens the selected saved run after the extension reloads', async () => {
+  test('does not reopen a previously selected run after the extension reloads', async () => {
     const review = consentProReview(2);
     localStorage.setItem('app-review-preflight.selected-review', review.id);
     const getReview = vi.fn(async () => review);
@@ -1056,9 +1057,25 @@ describe('App Review Preflight extension', () => {
 
     render(<App api={persistedApi} />);
 
-    expect(await screen.findByText('Revision 2')).toBeVisible();
-    expect(screen.getByRole('heading', { name: 'Consent Pro by Finsweet' })).toBeVisible();
-    expect(getReview).toHaveBeenCalledWith(review.id);
+    expect(await screen.findByRole('heading', { name: 'Start a preflight' })).toBeVisible();
+    expect(screen.queryByText('Revision 2')).not.toBeInTheDocument();
+    expect(getReview).not.toHaveBeenCalled();
+  });
+
+  test('shows a reconnect recovery when the Worker rejects the Webflow authorization', async () => {
+    const reconnectingApi: PreflightApi = {
+      ...api,
+      listReviews: async () => Promise.reject(new PreflightAuthenticationError())
+    };
+
+    render(<App api={reconnectingApi} reconnectUrl="https://preflight.test/v1/oauth/webflow/start" />);
+
+    expect(await screen.findByRole('heading', { name: 'Reconnect Webflow to continue' })).toBeVisible();
+    expect(screen.getByRole('link', { name: 'Reconnect Webflow' })).toHaveAttribute(
+      'href',
+      'https://preflight.test/v1/oauth/webflow/start'
+    );
+    expect(screen.getByText(/did not upload files or create a receipt/i)).toBeVisible();
   });
 
   test('prefills a new revision from the previous package without inheriting its evidence', async () => {

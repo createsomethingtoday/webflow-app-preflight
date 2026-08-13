@@ -146,9 +146,9 @@ export async function approveRuntimeJob(
     `SELECT r.id AS review_id, v.id AS version_id, v.review_json
        FROM reviews r
        JOIN review_versions v ON v.id = r.latest_version_id
-      WHERE r.id = ? AND r.owner_user_id = ?`
+      WHERE r.id = ? AND r.owner_user_id = ? AND r.site_id IS ?`
   )
-    .bind(reviewId, user.id)
+    .bind(reviewId, user.id, user.siteId)
     .first<ReviewVersionRow>();
   if (!row) return null;
 

@@ -418,9 +418,9 @@ export async function addRevision(
             v.review_json
        FROM reviews r
        JOIN review_versions v ON v.id = r.latest_version_id
-      WHERE r.id = ? AND r.owner_user_id = ?`
+      WHERE r.id = ? AND r.owner_user_id = ? AND r.site_id IS ?`
   )
-    .bind(reviewId, user.id)
+    .bind(reviewId, user.id, user.siteId)
     .first<LatestReviewRow>();
 
   if (!currentRow) return null;
@@ -552,8 +552,8 @@ export async function addRevision(
       env.DB.prepare(
         `UPDATE reviews
             SET latest_version_id = ?, updated_at = ?
-          WHERE id = ? AND owner_user_id = ?`
-      ).bind(versionId, result.createdAt, reviewId, user.id),
+          WHERE id = ? AND owner_user_id = ? AND site_id IS ?`
+      ).bind(versionId, result.createdAt, reviewId, user.id, user.siteId),
       env.DB.prepare(
         `INSERT INTO review_events
           (id, review_id, review_version_id, actor_user_id, event_type,
@@ -610,8 +610,8 @@ export async function addRevision(
       env.DB.prepare('DELETE FROM review_events WHERE id = ?').bind(eventId),
       env.DB.prepare(
         `UPDATE reviews SET latest_version_id = ?, updated_at = ?
-          WHERE id = ? AND owner_user_id = ?`
-      ).bind(currentRow.version_id, currentRow.updated_at, reviewId, user.id),
+          WHERE id = ? AND owner_user_id = ? AND site_id IS ?`
+      ).bind(currentRow.version_id, currentRow.updated_at, reviewId, user.id, user.siteId),
       env.DB.prepare('DELETE FROM review_versions WHERE id = ?').bind(versionId)
     ]);
     throw error;
@@ -674,11 +674,11 @@ export async function listReviews(
     `SELECT r.id, r.name, r.updated_at, v.sequence, v.review_json
        FROM reviews r
        JOIN review_versions v ON v.id = r.latest_version_id
-      WHERE (? = 1 OR r.owner_user_id = ?)
+      WHERE (? = 1 OR (r.owner_user_id = ? AND r.site_id IS ?))
       ORDER BY r.updated_at DESC
       LIMIT 50`
   )
-    .bind(options.includeAll ? 1 : 0, user.id)
+    .bind(options.includeAll ? 1 : 0, user.id, user.siteId)
     .all<{
       id: string;
       name: string;
@@ -714,9 +714,9 @@ export async function getReview(
             v.review_json
        FROM reviews r
        JOIN review_versions v ON v.id = r.latest_version_id
-      WHERE r.id = ? AND (? = 1 OR r.owner_user_id = ?)`
+      WHERE r.id = ? AND (? = 1 OR (r.owner_user_id = ? AND r.site_id IS ?))`
   )
-    .bind(reviewId, options.includeAll ? 1 : 0, user.id)
+    .bind(reviewId, options.includeAll ? 1 : 0, user.id, user.siteId)
     .first<StoredReviewRow>();
 
   if (!row) return null;

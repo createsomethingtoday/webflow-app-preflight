@@ -51,6 +51,10 @@ import {
   webflowOAuthCompletePage
 } from './webflow-oauth';
 import {
+  latestWebflowAuthorizationReadiness,
+  recordWebflowAuthorizationReadiness
+} from './webflow-authorization';
+import {
   connectReviewerWorkspace,
   replayReviewerRuntimePackage,
   reviewerWorkspace
@@ -143,7 +147,20 @@ async function handle(request: Request, env: Env): Promise<Response> {
     );
   }
   if (url.pathname === '/health' && request.method === 'GET') {
-    return json({ ok: true, service: 'webflow-app-review-preflight' }, 200, origin);
+    const authorization = await latestWebflowAuthorizationReadiness(env);
+    const ready = authorization.state === 'ready' || authorization.state === 'unknown';
+    return json(
+      {
+        ok: ready,
+        service: 'webflow-app-review-preflight',
+        webflowAuthorization: {
+          state: authorization.state,
+          checkedAt: authorization.checkedAt
+        }
+      },
+      ready ? 200 : 503,
+      origin
+    );
   }
   // Unauthenticated by design: the receipt code is the secret, and the
   // caller is the submission form's server tracing a developer-supplied
@@ -650,6 +667,18 @@ export default {
     env: Env,
     ctx: ExecutionContext
   ): void {
-    ctx.waitUntil(reconcileRuntimeObservationJobs(env));
+    ctx.waitUntil(
+      Promise.all([
+        reconcileRuntimeObservationJobs(env),
+        recordWebflowAuthorizationReadiness(env)
+      ]).then(([, authorization]) => {
+        if (authorization.state !== 'ready') {
+          console.error('Webflow authorization readiness check failed', {
+            state: authorization.state,
+            statusCode: authorization.statusCode
+          });
+        }
+      })
+    );
   }
 };

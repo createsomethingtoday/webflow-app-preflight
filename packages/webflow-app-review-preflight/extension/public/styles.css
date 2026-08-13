@@ -252,6 +252,11 @@ h3 { font-size: 12px; line-height: 1.3; font-weight: 600; }
 .readiness-dot.needs_verification { background: var(--color-warning); }
 .privacy-note { margin: var(--space-5) auto 0; max-width: 360px; color: var(--color-text3); font-size: 10px; text-align: center; }
 .error-banner { margin: var(--space-3) var(--space-4) 0; padding: var(--space-3); border: 1px solid #60333a; border-radius: var(--radius-md); background: var(--color-error-bg); color: #ffc6ca; }
+.connection-recovery { margin: var(--space-3) var(--space-4) 0; padding: var(--space-4); border: 1px solid #5d4f25; border-radius: var(--radius-md); background: var(--color-warning-bg); }
+.connection-recovery h2 { margin: var(--space-1) 0; font-size: 18px; }
+.connection-recovery p { margin: 0; color: var(--color-text2); }
+.connection-recovery-actions { display: flex; flex-wrap: wrap; gap: var(--space-2); margin-top: var(--space-3); }
+.connection-recovery-actions .button { text-decoration: none; }
 .back-button { padding: 0; border: 0; background: transparent; color: var(--color-text2); cursor: pointer; }
 .review-header { position: relative; padding: var(--space-5) 0; }
 .review-header h2 { margin: var(--space-1) 0; font-size: 22px; }

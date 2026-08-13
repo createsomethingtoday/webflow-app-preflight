@@ -18,6 +18,13 @@ interface WebflowRuntime {
   getIdToken?: () => Promise<string>;
 }
 
+export class PreflightAuthenticationError extends Error {
+  constructor() {
+    super('Preflight could not verify its secure Webflow connection. Reconnect Webflow, then retry.');
+    this.name = 'PreflightAuthenticationError';
+  }
+}
+
 function apiBase(): string {
   if (PREFLIGHT_API_BASE) return PREFLIGHT_API_BASE;
   const fallback = developmentApiBase(location.hostname);
@@ -37,6 +44,10 @@ async function idToken(): Promise<string> {
   throw new Error(
     "Open App Review Preflight from Webflow Designer to continue.",
   );
+}
+
+export function webflowReconnectUrl(): string {
+  return `${apiBase()}/v1/oauth/webflow/start`;
 }
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
@@ -72,6 +83,9 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
         body.message ??
           "This test package has expired. Prepare a fresh package, then run the test again.",
       );
+    }
+    if (response.status === 401 && body.error === "unauthorized") {
+      throw new PreflightAuthenticationError();
     }
     throw new Error(
       body.message ?? "The preflight service could not complete that step.",

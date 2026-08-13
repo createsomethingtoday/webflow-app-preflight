@@ -489,9 +489,9 @@ export async function createRuntimeTestPackage(
     `SELECT r.id AS review_id, v.id AS version_id, v.artifact_sha256
        FROM reviews r
        JOIN review_versions v ON v.id = r.latest_version_id
-      WHERE r.id = ? AND r.owner_user_id = ?`
+      WHERE r.id = ? AND r.owner_user_id = ? AND r.site_id IS ?`
   )
-    .bind(reviewId, user.id)
+    .bind(reviewId, user.id, user.siteId)
     .first<ReviewVersionRow>();
   if (!row) return null;
 
@@ -577,9 +577,9 @@ export async function listRuntimeTestPackages(
   options: { includeAll?: boolean } = {}
 ): Promise<RuntimeTestPackageView[] | null> {
   const owned = await env.DB.prepare(
-    'SELECT id FROM reviews WHERE id = ? AND (? = 1 OR owner_user_id = ?)'
+    'SELECT id FROM reviews WHERE id = ? AND (? = 1 OR (owner_user_id = ? AND site_id IS ?))'
   )
-    .bind(reviewId, options.includeAll ? 1 : 0, user.id)
+    .bind(reviewId, options.includeAll ? 1 : 0, user.id, user.siteId)
     .first<{ id: string }>();
   if (!owned) return null;
 
@@ -1931,9 +1931,13 @@ export async function requestRuntimeObservationRun(
   } = {}
 ): Promise<RequestedRuntimeObservationJob | { notFound: true }> {
   const owned = await env.DB.prepare(
-    'SELECT id FROM runtime_test_packages WHERE id = ? AND (? = 1 OR owner_user_id = ?)'
+    `SELECT p.id
+       FROM runtime_test_packages p
+       JOIN review_versions v ON v.id = p.review_version_id
+       JOIN reviews r ON r.id = v.review_id
+      WHERE p.id = ? AND (? = 1 OR (p.owner_user_id = ? AND r.site_id IS ?))`
   )
-    .bind(testPackageId, options.includeAll ? 1 : 0, user.id)
+    .bind(testPackageId, options.includeAll ? 1 : 0, user.id, user.siteId)
     .first<{ id: string }>();
   if (!owned) return { notFound: true };
 

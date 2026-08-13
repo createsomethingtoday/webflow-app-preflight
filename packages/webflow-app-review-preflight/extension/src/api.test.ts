@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test, vi } from 'vitest';
-import { createPreflightApi } from './api';
+import { createPreflightApi, PreflightAuthenticationError } from './api';
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -69,6 +69,20 @@ describe('Preflight API', () => {
 
     await expect(createPreflightApi().listReviews()).rejects.toThrow(
       'Preflight could not reach the review service. Check your connection, then try again.'
+    );
+  });
+
+  test('identifies a Worker authorization failure as a reconnectable Webflow connection', async () => {
+    (globalThis as typeof globalThis & { webflow?: { getIdToken: () => Promise<string> } }).webflow = {
+      getIdToken: async () => 'designer-id-token'
+    };
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(JSON.stringify({ error: 'unauthorized' }), { status: 401 }))
+    );
+
+    await expect(createPreflightApi().listReviews()).rejects.toBeInstanceOf(
+      PreflightAuthenticationError
     );
   });
 });

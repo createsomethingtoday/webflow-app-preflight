@@ -12,25 +12,7 @@ import type {
   StoredReview,
   SubmissionReceipt
 } from './types';
-
-const SELECTED_REVIEW_KEY = 'app-review-preflight.selected-review';
-
-function rememberedReviewId(): string | null {
-  try {
-    return localStorage.getItem(SELECTED_REVIEW_KEY);
-  } catch {
-    return null;
-  }
-}
-
-function rememberReview(id: string | null): void {
-  try {
-    if (id) localStorage.setItem(SELECTED_REVIEW_KEY, id);
-    else localStorage.removeItem(SELECTED_REVIEW_KEY);
-  } catch {
-    // Durable review history still lives in D1 when iframe storage is unavailable.
-  }
-}
+import { PreflightAuthenticationError } from './api';
 
 function statusLabel(item: ReviewGuidance): string {
   if (item.label === 'Security blocker') return 'Blocker';
@@ -1542,7 +1524,13 @@ function ReviewDetail({
   );
 }
 
-export function App({ api }: { api: PreflightApi }) {
+export function App({
+  api,
+  reconnectUrl
+}: {
+  api: PreflightApi;
+  reconnectUrl?: string;
+}) {
   const [history, setHistory] = useState<ReviewSummary[]>([]);
   const [review, setReview] = useState<StoredReview | null>(null);
   const [comparison, setComparison] = useState<ReviewComparison | null>(null);
@@ -1553,6 +1541,7 @@ export function App({ api }: { api: PreflightApi }) {
   const [identity, setIdentity] = useState<PreflightIdentity | null>(null);
   const [reviewerHandoff, setReviewerHandoff] = useState<ReviewerHandoff | null>(null);
   const [submissionReceipt, setSubmissionReceipt] = useState<SubmissionReceipt | null>(null);
+  const [connectionNeedsReauth, setConnectionNeedsReauth] = useState(false);
 
   const refreshHistory = async () => {
     const items = await api.listReviews();
@@ -1566,32 +1555,28 @@ export function App({ api }: { api: PreflightApi }) {
     return items;
   };
 
+  const reportError = (
+    cause: unknown,
+    fallback: string,
+    onError: (message: string) => void = setError
+  ) => {
+    if (cause instanceof PreflightAuthenticationError) {
+      setConnectionNeedsReauth(true);
+    }
+    onError(cause instanceof Error ? cause.message : fallback);
+  };
+
   useEffect(() => {
     (async () => {
-      const items = await refreshHistory();
-      const selectedId = rememberedReviewId();
-      if (!selectedId) return;
-      if (!items.some((item) => item.id === selectedId)) {
-        rememberReview(null);
-        return;
-      }
-      try {
-        const [selectedReview] = await Promise.all([
-          api.getReview(selectedId),
-          refreshRuntimePackages(selectedId)
-        ]);
-        setReview(selectedReview);
-      } catch {
-        rememberReview(null);
-      }
+      await refreshHistory();
     })().catch((cause: unknown) => {
-      setError(cause instanceof Error ? cause.message : 'Saved runs are unavailable.');
+      reportError(cause, 'Saved runs are unavailable.');
     });
   }, []);
 
   useEffect(() => {
     api.getIdentity().then(setIdentity).catch((cause: unknown) => {
-      setError(cause instanceof Error ? cause.message : 'Webflow identity is unavailable.');
+      reportError(cause, 'Webflow identity is unavailable.');
     });
   }, []);
 
@@ -1601,18 +1586,47 @@ export function App({ api }: { api: PreflightApi }) {
   ) => {
     setBusy(true);
     setError(null);
+    setConnectionNeedsReauth(false);
     try {
       await action();
     } catch (cause) {
-      onError(cause instanceof Error ? cause.message : 'That step could not be completed.');
+      reportError(cause, 'That step could not be completed.', onError);
     } finally {
       setBusy(false);
     }
   };
 
+  const retryConnection = () => run(async () => {
+    const [items, currentIdentity] = await Promise.all([
+      api.listReviews(),
+      api.getIdentity()
+    ]);
+    setHistory(items);
+    setIdentity(currentIdentity);
+  });
+
   return (
     <div className="app-shell">
       {error ? <div className="error-banner" role="alert">{error}</div> : null}
+      {connectionNeedsReauth ? (
+        <section className="connection-recovery" aria-labelledby="connection-recovery-title">
+          <span className="eyebrow">Secure connection required</span>
+          <h2 id="connection-recovery-title">Reconnect Webflow to continue</h2>
+          <p>
+            Preflight could not confirm its server-side Webflow authorization. This attempt did not upload files or create a receipt.
+          </p>
+          <div className="connection-recovery-actions">
+            {reconnectUrl ? (
+              <a className="button button-primary" href={reconnectUrl} target="_blank" rel="noreferrer">
+                Reconnect Webflow
+              </a>
+            ) : null}
+            <button className="button button-secondary" disabled={busy} onClick={() => void retryConnection()}>
+              {busy ? 'Checking connection…' : 'Retry connection'}
+            </button>
+          </div>
+        </section>
+      ) : null}
 
       {review ? (
         <ReviewDetail
@@ -1634,7 +1648,6 @@ export function App({ api }: { api: PreflightApi }) {
             setRuntimeTestPackages([]);
             setReviewerHandoff(null);
             setSubmissionReceipt(null);
-            rememberReview(null);
           }}
           onRevision={(file, sourceMaps) => run(async () => {
             const revised = await api.addRevision(review.id, file, sourceMaps ?? undefined);
@@ -1702,7 +1715,6 @@ export function App({ api }: { api: PreflightApi }) {
                 setRuntimeTestPackages([]);
                 setReviewerHandoff(null);
                 setSubmissionReceipt(created.submissionReceipt);
-                rememberReview(created.review.id);
                 await refreshHistory();
               })}
             />
@@ -1715,7 +1727,6 @@ export function App({ api }: { api: PreflightApi }) {
                 setRuntimeTestPackages([]);
                 setReviewerHandoff(null);
                 setSubmissionReceipt(created.submissionReceipt);
-                rememberReview(created.review.id);
                 await refreshHistory();
               })}
             />
@@ -1732,7 +1743,6 @@ export function App({ api }: { api: PreflightApi }) {
               setComparison(null);
               setReviewerHandoff(null);
               setSubmissionReceipt(null);
-              rememberReview(id);
             })}
           />
           <p className="privacy-note">

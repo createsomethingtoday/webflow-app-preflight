@@ -89,9 +89,9 @@ export async function reissueSubmissionReceipt(
   user: AuthenticatedUser
 ): Promise<SubmissionReceipt | null> {
   const row = await env.DB.prepare(
-    `SELECT latest_version_id FROM reviews WHERE id = ? AND owner_user_id = ?`
+    `SELECT latest_version_id FROM reviews WHERE id = ? AND owner_user_id = ? AND site_id IS ?`
   )
-    .bind(reviewId, user.id)
+    .bind(reviewId, user.id, user.siteId)
     .first<{ latest_version_id: string }>();
   if (!row) return null;
   return issueSubmissionReceipt(env, {

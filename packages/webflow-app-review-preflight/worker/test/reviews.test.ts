@@ -5,6 +5,7 @@ import {
   evaluateRuntimeSecurity,
   reconcileRuntimeObservationJobs
 } from '../src/runtime-observations';
+import { recordWebflowAuthorizationReadiness } from '../src/webflow-authorization';
 import { isPrivateOrLocalHostname } from '../src/net';
 import worker from '../src/index';
 import type { Env } from '../src/types';
@@ -878,6 +879,39 @@ describe('review API', () => {
     const object = await env.ARTIFACTS.get(row!.artifact_key);
     expect(object).not.toBeNull();
     expect(new Uint8Array(await object!.arrayBuffer())).toEqual(bundle);
+  });
+
+  test('keeps review history bound to the active Webflow site', async () => {
+    const form = new FormData();
+    form.set('bundle', new File([await createBundle()], 'other-site.zip', { type: 'application/zip' }));
+    const createdResponse = await exports.default.fetch(
+      new Request('https://preflight.test/v1/reviews', {
+        method: 'POST',
+        headers: { authorization: 'Bearer test-token', origin: 'http://localhost:1337' },
+        body: form
+      })
+    );
+    const created = await createdResponse.json<{ review: { id: string } }>();
+    await env.DB.prepare('UPDATE reviews SET site_id = ? WHERE id = ?')
+      .bind('a-different-webflow-site', created.review.id)
+      .run();
+
+    const [history, review] = await Promise.all([
+      exports.default.fetch(
+        new Request('https://preflight.test/v1/reviews', {
+          headers: { authorization: 'Bearer test-token', origin: 'http://localhost:1337' }
+        })
+      ),
+      exports.default.fetch(
+        new Request(`https://preflight.test/v1/reviews/${created.review.id}`, {
+          headers: { authorization: 'Bearer test-token', origin: 'http://localhost:1337' }
+        })
+      )
+    ]);
+
+    const historyBody = await history.json<{ reviews: Array<{ id: string }> }>();
+    expect(historyBody.reviews.map((item) => item.id)).not.toContain(created.review.id);
+    expect(review.status).toBe(404);
   });
 
   test('stamps a preflight run with a submission receipt the form can trace', async () => {
@@ -3316,6 +3350,40 @@ describe('review API', () => {
       } as Env
     );
     expect(healthy.status).toBe(200);
+  });
+
+  test('publishes reconnect-required authorization readiness without exposing credentials', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(null, { status: 401 }))
+    );
+    const readinessEnv = {
+      ...env,
+      ENVIRONMENT: 'production',
+      ALLOWED_ORIGINS: 'https://6a57b0fa70db1b7a0cd666ac.webflow-ext.com',
+      PREFLIGHT_DEV_TOKEN: undefined,
+      PREFLIGHT_REVIEWER_DEV_TOKEN: undefined,
+      WEBFLOW_APP_ACCESS_TOKEN: 'revoked-token'
+    } as Env;
+
+    await expect(recordWebflowAuthorizationReadiness(readinessEnv)).resolves.toEqual({
+      state: 'reconnect_required',
+      statusCode: 401
+    });
+
+    const health = await worker.fetch(
+      new Request('https://preflight.test/health'),
+      readinessEnv
+    );
+    expect(health.status).toBe(503);
+    await expect(health.json()).resolves.toEqual({
+      ok: false,
+      service: 'webflow-app-review-preflight',
+      webflowAuthorization: {
+        state: 'reconnect_required',
+        checkedAt: expect.any(String)
+      }
+    });
   });
 
   test('caps a runtime test package at eight pinned artifacts', async () => {
