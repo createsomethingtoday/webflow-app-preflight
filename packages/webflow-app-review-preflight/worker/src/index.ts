@@ -147,7 +147,15 @@ async function handle(request: Request, env: Env): Promise<Response> {
     );
   }
   if (url.pathname === '/health' && request.method === 'GET') {
-    const authorization = await latestWebflowAuthorizationReadiness(env);
+    let authorization = await latestWebflowAuthorizationReadiness(env);
+    // The scheduled probe is the steady-state signal. On a new deployment,
+    // however, there is no receipt until the first cron dispatch. Bootstrap
+    // that one record here so an uptime check sees a revoked authorization
+    // immediately instead of treating the Worker as ready for up to 5 minutes.
+    if (authorization.state === 'unknown' && env.ENVIRONMENT === 'production') {
+      await recordWebflowAuthorizationReadiness(env);
+      authorization = await latestWebflowAuthorizationReadiness(env);
+    }
     const ready = authorization.state === 'ready' || authorization.state === 'unknown';
     return json(
       {
