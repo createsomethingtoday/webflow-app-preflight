@@ -3386,6 +3386,32 @@ describe('review API', () => {
     });
   });
 
+  test('probes production authorization on the first health check before cron records a receipt', async () => {
+    await env.DB.prepare('DELETE FROM webflow_authorization_health').run();
+    const authorizationFetch = vi.fn(async () => new Response(null, { status: 401 }));
+    vi.stubGlobal('fetch', authorizationFetch);
+    const readinessEnv = {
+      ...env,
+      ENVIRONMENT: 'production',
+      ALLOWED_ORIGINS: 'https://6a57b0fa70db1b7a0cd666ac.webflow-ext.com',
+      PREFLIGHT_DEV_TOKEN: undefined,
+      PREFLIGHT_REVIEWER_DEV_TOKEN: undefined,
+      WEBFLOW_APP_ACCESS_TOKEN: 'revoked-token'
+    } as Env;
+
+    for (const attempt of [1, 2]) {
+      const health = await worker.fetch(
+        new Request('https://preflight.test/health'),
+        readinessEnv
+      );
+      expect(health.status, `attempt ${attempt}`).toBe(503);
+      await expect(health.json()).resolves.toMatchObject({
+        webflowAuthorization: { state: 'reconnect_required', checkedAt: expect.any(String) }
+      });
+    }
+    expect(authorizationFetch).toHaveBeenCalledTimes(1);
+  });
+
   test('caps a runtime test package at eight pinned artifacts', async () => {
     const form = new FormData();
     form.set(
