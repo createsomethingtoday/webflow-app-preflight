@@ -1,4 +1,5 @@
 import {
+  analyzeSourceMaps,
   buildInventory,
   defaultConfig,
   defaultRuleset,
@@ -8,7 +9,9 @@ import {
   type FileEntry,
   type FindingGroup,
   type ScanConfig,
-  type Severity
+  type Severity,
+  type SourceMapSummary,
+  type UnzippedFile
 } from '@create-something/bundle-scanner-core';
 import { discoverRuntimeReferences } from './runtime-references';
 import type {
@@ -27,11 +30,37 @@ const PREFLIGHT_CONFIG: ScanConfig = {
       maxTotalUnzippedBytes: 50 * 1024 * 1024,
       maxFiles: 2000
     },
-    hardExcludeGlobs: defaultConfig.globalScanConfig.hardExcludeGlobs.filter(
-      (glob) => glob !== '**/dist/**' && glob !== '**/build/**'
-    )
+    // App-bundle review deliberately narrows the shipped default exclusions.
+    // The uploaded bundle IS the production artifact: minified output
+    // (**/*.min.js), vendored code (**/vendor/**, **/third_party/**), and
+    // built output (**/dist/**, **/build/**) execute on customer sites
+    // exactly as uploaded, so excluding them would let a partner hide
+    // blockers behind a filename ("if it is in your bundle, you own it").
+    // Only paths that are never part of the shipped artifact stay excluded.
+    hardExcludeGlobs: [
+      '**/node_modules/**',
+      '**/.git/**',
+      '**/__MACOSX/**',
+      '**/.DS_Store'
+    ]
   }
 };
+
+/**
+ * Extensions whose content can execute (or embed executable code) on a
+ * customer site. Any such file the scanner did not decode is surfaced as a
+ * manual-review input rather than silently passing.
+ */
+const EXECUTABLE_EXTENSIONS = new Set([
+  '.js',
+  '.mjs',
+  '.cjs',
+  '.ts',
+  '.jsx',
+  '.tsx',
+  '.html',
+  '.wasm'
+]);
 
 const NEXT_MOVES: Record<string, string> = {
   'SEC-SCRIPT-INJECTION':
@@ -72,6 +101,53 @@ async function sha256(bundle: ArrayBuffer): Promise<string> {
   return toHex(await crypto.subtle.digest('SHA-256', bundle));
 }
 
+/** The uploaded source-map artifact cannot be used as review input. */
+export class SourceMapArtifactError extends Error {}
+
+/**
+ * Expand the privately uploaded source-map artifact into individual map
+ * files. A `.map` file is used as-is; a `.zip` is unpacked and only its
+ * `.map` entries are kept. An artifact that yields no usable map is an
+ * input error, not a silent "missing" — the developer believes they
+ * supplied maps, so tell them why the upload did not count.
+ */
+async function extractSourceMapArtifact(artifact: {
+  fileName: string;
+  bytes: ArrayBuffer;
+}): Promise<UnzippedFile[]> {
+  const lowerName = artifact.fileName.toLowerCase();
+  if (artifact.bytes.byteLength === 0) {
+    throw new SourceMapArtifactError('The source-map upload is empty.');
+  }
+  if (lowerName.endsWith('.map')) {
+    return [{ path: artifact.fileName, data: new Uint8Array(artifact.bytes) }];
+  }
+  if (!lowerName.endsWith('.zip')) {
+    throw new SourceMapArtifactError(
+      'Upload source maps as a single .map file or a .zip archive of .map files.'
+    );
+  }
+  let entries: UnzippedFile[];
+  try {
+    ({ files: entries } = await processZipBuffer(
+      artifact.bytes,
+      PREFLIGHT_CONFIG,
+      () => undefined
+    ));
+  } catch {
+    throw new SourceMapArtifactError(
+      'We could not read the source-map zip. Re-export the archive and try again.'
+    );
+  }
+  const maps = entries.filter((file) => file.path.toLowerCase().endsWith('.map'));
+  if (maps.length === 0) {
+    throw new SourceMapArtifactError(
+      'The source-map zip contains no .map files. Include the version-3 maps produced by the build that generated this bundle.'
+    );
+  }
+  return maps;
+}
+
 function findManifest(inventory: FileEntry[]): {
   primary: ArtifactSurface;
   appName: string | null;
@@ -109,6 +185,70 @@ function guidanceLabel(severity: Severity): ReviewGuidance['label'] {
   return 'Suggested update';
 }
 
+function compareGuidance(left: ReviewGuidance, right: ReviewGuidance): number {
+  const order: Record<ReviewGuidance['label'], number> = {
+    'Security blocker': 0,
+    'Required update': 1,
+    'Suggested update': 2
+  };
+  return order[left.label] - order[right.label] || left.title.localeCompare(right.title);
+}
+
+const SOURCE_MAP_GUIDANCE_EVIDENCE_LIMIT = 3;
+
+/**
+ * Statuses where minified/generated executable files cannot be traced back
+ * to readable source. Mirrors the Marketplace reviewable-source standard:
+ * a bundle whose executable output has no matching version-3 source map is
+ * not sufficiently reviewable.
+ */
+const UNREVIEWABLE_SOURCE_MAP_STATUSES: ReadonlySet<SourceMapSummary['status']> = new Set([
+  'missing',
+  'partial',
+  'mismatch',
+  'invalid'
+]);
+
+function sourceMapGuidance(summary: SourceMapSummary): ReviewGuidance | null {
+  if (!UNREVIEWABLE_SOURCE_MAP_STATUSES.has(summary.status)) return null;
+
+  const explanationByStatus: Record<string, string> = {
+    missing:
+      'The bundle contains minified or generated executable files, but no source maps were provided for them. Without a matching source map, the code that ships to customers cannot be traced back to readable source.',
+    partial:
+      'Some minified or generated executable files have matching source maps, but others do not. Every executable production file must be traceable to readable source.',
+    mismatch:
+      'Source maps were provided, but none of them correspond to the generated executable files in this bundle. The maps must be produced by the exact build that produced the submitted bundle.',
+    invalid:
+      'The provided source map files could not be parsed as version-3 source maps, so the generated executable files cannot be traced back to readable source.'
+  };
+
+  const evidence =
+    summary.status === 'invalid'
+      ? summary.invalidSourceMaps
+          .slice(0, SOURCE_MAP_GUIDANCE_EVIDENCE_LIMIT)
+          .map((map) => ({ filePath: map.path, line: 1, snippet: map.error }))
+      : summary.missingGeneratedFiles
+          .slice(0, SOURCE_MAP_GUIDANCE_EVIDENCE_LIMIT)
+          .map((path) => ({
+            filePath: path,
+            line: 1,
+            snippet: 'No matching version-3 source map was found for this generated file.'
+          }));
+
+  return {
+    id: 'SRC-MAP-CORRESPONDENCE',
+    label: 'Required update',
+    title: 'Generated code is not traceable to readable source',
+    explanation: explanationByStatus[summary.status] ?? explanationByStatus.missing,
+    nextMove:
+      'Ship a complete version-3 source map for every minified or generated production file (adjacent .map file or sourceMappingURL), generated by the exact build that produced this bundle.',
+    severity: 'HIGH',
+    confidence: 'HIGH',
+    evidence
+  } satisfies ReviewGuidance;
+}
+
 function toGuidance(groups: Record<string, FindingGroup>): ReviewGuidance[] {
   return Object.values(groups)
     .map((group) => {
@@ -136,31 +276,61 @@ function toGuidance(groups: Record<string, FindingGroup>): ReviewGuidance[] {
         }))
       } satisfies ReviewGuidance;
     })
-    .sort((left, right) => {
-      const order: Record<ReviewGuidance['label'], number> = {
-        'Security blocker': 0,
-        'Required update': 1,
-        'Suggested update': 2
-      };
-      return order[left.label] - order[right.label] || left.title.localeCompare(right.title);
-    });
+    .sort(compareGuidance);
 }
 
 export async function createBundleReview(
   input: CreateBundleReviewInput
 ): Promise<BundleReview> {
-  const unzipped = await processZipBuffer(input.bundle, PREFLIGHT_CONFIG, () => undefined);
+  const { files: unzipped, skippedUnsafePaths } = await processZipBuffer(
+    input.bundle,
+    PREFLIGHT_CONFIG,
+    () => undefined
+  );
   const inventory = buildInventory(unzipped, PREFLIGHT_CONFIG);
   const findings = runScan(inventory, defaultRuleset, PREFLIGHT_CONFIG, () => undefined);
+  const scannedFileCount = inventory.filter(
+    (file) => file.isTextCandidate && !file.isIgnored
+  ).length;
+  const skippedFileCount = inventory.length - scannedFileCount;
+  // Executable-looking files whose content the scanner never decoded
+  // (excluded paths, undecodable text, or binary formats like .wasm).
+  // Zero findings in these files means "not scanned", never "clean".
+  const skippedExecutablePaths = inventory
+    .filter(
+      (file) =>
+        EXECUTABLE_EXTENSIONS.has(file.ext) && !(file.isTextCandidate && !file.isIgnored)
+    )
+    .map((file) => file.path)
+    .sort();
+  // Source maps arrive two ways: inside the uploaded bundle (adjacent .map
+  // files) and as a private artifact uploaded next to it — the same one the
+  // developer attaches to the official submission form. Reconciling them
+  // against the generated executables is what makes a minified bundle
+  // reviewable — served bytes must trace to readable source.
+  const bundledSourceMaps = unzipped.filter((file) =>
+    file.path.toLowerCase().endsWith('.map')
+  );
+  const externalSourceMaps = input.sourceMapArtifact
+    ? await extractSourceMapArtifact(input.sourceMapArtifact)
+    : [];
+  const sourceMapFiles = [...bundledSourceMaps, ...externalSourceMaps];
+  const sourceMapSummary = analyzeSourceMaps(
+    inventory,
+    sourceMapFiles.length > 0 ? sourceMapFiles : undefined
+  );
   const report = generateReport(findings, defaultRuleset, PREFLIGHT_CONFIG, {
     fileCount: inventory.length,
     totalBytes: inventory.reduce((total, file) => total + file.sizeBytes, 0),
-    textFilesScanned: inventory.filter((file) => file.isTextCandidate && !file.isIgnored).length,
-    skippedFileCount: inventory.filter((file) => file.isIgnored).length
+    textFilesScanned: scannedFileCount,
+    skippedFileCount,
+    sourceMapSummary
   });
   const artifactScope = findManifest(inventory);
   const runtimeReferences = discoverRuntimeReferences(inventory);
-  const guidance = toGuidance(report.findings);
+  const sourceMapFinding = sourceMapGuidance(sourceMapSummary);
+  const guidance = [...toGuidance(report.findings), ...(sourceMapFinding ? [sourceMapFinding] : [])]
+    .sort(compareGuidance);
   const securityBlockers = guidance.filter((item) => item.label === 'Security blocker').length;
   const requiredUpdates = guidance.filter((item) => item.label === 'Required update').length;
   const suggestedUpdates = guidance.filter((item) => item.label === 'Suggested update').length;
@@ -173,7 +343,16 @@ export async function createBundleReview(
       fileName: input.fileName,
       sha256: await sha256(input.bundle),
       compressedBytes: input.bundle.byteLength,
-      fileCount: inventory.length
+      fileCount: inventory.length,
+      ...(input.sourceMapArtifact
+        ? {
+            sourceMaps: {
+              fileName: input.sourceMapArtifact.fileName,
+              sha256: await sha256(input.sourceMapArtifact.bytes),
+              mapFileCount: externalSourceMaps.length
+            }
+          }
+        : {})
     },
     artifactScope,
     coverage: [
@@ -220,6 +399,16 @@ export async function createBundleReview(
       scanReportVersion: report.scanReportVersion,
       scanRunId: report.runId
     },
+    scanCoverage: {
+      fileCount: inventory.length,
+      scannedFileCount,
+      skippedFileCount,
+      skippedExecutablePaths,
+      unsafeEntryPaths: [...skippedUnsafePaths].sort(),
+      manualReviewRequired:
+        skippedExecutablePaths.length > 0 || skippedUnsafePaths.length > 0
+    },
+    sourceMapSummary,
     officialDecision: null
   };
 }

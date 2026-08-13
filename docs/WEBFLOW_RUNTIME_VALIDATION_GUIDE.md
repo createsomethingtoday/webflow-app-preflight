@@ -207,6 +207,9 @@ For every declared file, check:
 - **Hash matched** - the observed bytes matched that file's SHA-256
 - **SRI matched** - a page-loaded file carried the expected DOM SRI
 - **Pinned parent verified** - a child file was initiated by another pinned runtime
+- **Source map reachable** - the served file published a `sourceMappingURL` the service could retrieve
+
+A hash pin proves *which* bytes ran. It does not make those bytes readable. **No source map** therefore returns a blocker even when every other predicate passes: the executed code cannot be read next to the reviewed source. This is a manual-review blocker rather than a violation, because readable source may have been supplied privately. Publish a source map beside each runtime file, or supply matching readable source and let a reviewer confirm it.
 
 ### Proxy result
 

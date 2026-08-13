@@ -12,12 +12,6 @@ This package provides the deterministic rule engine for scanning Webflow App bun
 pnpm add @create-something/bundle-scanner-core
 ```
 
-For AI-powered analysis, also install:
-
-```bash
-pnpm add @google/genai
-```
-
 ## Usage
 
 ### Basic Scanning
@@ -34,8 +28,9 @@ import {
 } from '@create-something/bundle-scanner-core';
 
 async function scanBundle(file: File) {
-  // 1. Extract ZIP
-  const files = await processZipFile(file, defaultConfig, console.log);
+  // 1. Extract ZIP (skippedUnsafePaths lists entries rejected by the
+  //    zip-slip/absolute-path guard — surface them to reviewers)
+  const { files, skippedUnsafePaths } = await processZipFile(file, defaultConfig, console.log);
 
   // 2. Build inventory
   const inventory = buildInventory(files, defaultConfig);
@@ -91,19 +86,6 @@ const customRuleset: Ruleset = {
 };
 ```
 
-### AI Analysis
-
-```typescript
-import { analyzeReportWithAi } from '@create-something/bundle-scanner-core';
-
-// Requires GOOGLE_API_KEY environment variable
-const aiAnalysis = await analyzeReportWithAi(report);
-
-console.log(aiAnalysis.missedRisks);
-console.log(aiAnalysis.suggestedRuleAdditions);
-console.log(aiAnalysis.reviewStatusRecommendation);
-```
-
 ## API Reference
 
 ### Scanner Functions
@@ -125,11 +107,9 @@ console.log(aiAnalysis.reviewStatusRecommendation);
 
 ### Utility Functions
 
-| Function                         | Description                                  |
-| -------------------------------- | -------------------------------------------- |
-| `generateRejectionEmail(report)` | Generates rejection email draft              |
-| `analyzeReportWithAi(report)`    | AI-powered analysis (requires @google/genai) |
-| `matchesAnyGlob(path, patterns)` | Glob pattern matching                        |
+| Function                         | Description           |
+| -------------------------------- | --------------------- |
+| `matchesAnyGlob(path, patterns)` | Glob pattern matching |
 
 ## Types
 
@@ -149,11 +129,10 @@ import type {
 
 ## Security Features
 
-- **ZIP Slip Protection**: Path normalization and traversal detection
-- **Decompression Bomb Defense**: Configurable max size limits
+- **ZIP Slip Protection**: Path normalization and segment-based traversal detection; skipped entries are returned to the caller for reviewer visibility
+- **Decompression Bomb Defense**: Per-entry declared-size checks before decompression plus configurable per-entry and cumulative limits
 - **File Count Limits**: Prevents DoS via excessive files
 - **Secret Redaction**: Masks sensitive data in finding snippets
-- **AI Data Capping**: Limits data sent to external AI services
 
 ## License
 

@@ -7,9 +7,12 @@ import { allowedOrigin, json, options } from './http';
 import {
   addRevision,
   createReview,
+  createRuntimeReview,
   getReview,
   listReviews,
-  ReviewInputError
+  ReviewConflictError,
+  ReviewInputError,
+  RuntimeReviewInputError
 } from './reviews';
 import { approveRuntimeJob, RuntimeApprovalError } from './runtime-jobs';
 import { recordRuntimeEvidence, RuntimeEvidenceError } from './runtime-evidence';
@@ -26,25 +29,21 @@ import {
   requestRuntimeObservationRun,
   reconcileRuntimeObservationJobs,
   RuntimeObservationApprovalError,
+  RuntimeObservationCleanupError,
   RuntimeObservationDispatchError,
   RuntimeObservationEvidenceError,
   recordRuntimeObservationEvidence,
   RuntimeTestPackageError
 } from './runtime-observations';
-import type { Env } from './types';
 import {
-  CompanionRunInputError,
-  CompanionTrustEscalationError,
-  completeCompanionRun,
-  createCompanionRunForReview,
-  getCompanionRun,
-  replayCompanionRun,
-  recordCompanionMissionEvidence
-} from './companion-runs';
+  reissueSubmissionReceipt,
+  verifySubmissionReceipt
+} from './submission-receipts';
+import type { Env } from './types';
+import { getCompanionRun } from './companion-runs';
 import {
   CompanionPairingInputError,
-  createCompanionPairing,
-  redeemCompanionPairing
+  createCompanionPairing
 } from './companion-pairings';
 import {
   completeWebflowOAuth,
@@ -52,24 +51,78 @@ import {
   webflowOAuthCompletePage
 } from './webflow-oauth';
 import {
+  latestWebflowAuthorizationReadiness,
+  recordWebflowAuthorizationReadiness
+} from './webflow-authorization';
+import {
   connectReviewerWorkspace,
   replayReviewerRuntimePackage,
   reviewerWorkspace
 } from './reviewer-web';
 
-function isRetiredLegacyMutation(pathname: string, method: string): boolean {
+// Companion WRITE paths are retired in EVERY environment: a browser-supplied
+// manifest can never earn trusted evidence, so no environment may accept it.
+const RETIRED_COMPANION_WRITE_ROUTES = [
+  /^\/v1\/companion-pairings\/redeem$/,
+  /^\/v1\/reviews\/[^/]+\/companion-runs$/,
+  /^\/v1\/companion-runs\/[^/]+\/(?:complete|replay)$/,
+  /^\/v1\/companion-runs\/[^/]+\/missions\/[^/]+$/
+];
+
+// Legacy runtime mutations stay available only in an explicitly declared
+// development environment; anything else behaves as production.
+const LEGACY_RUNTIME_MUTATION_ROUTES = [
+  /^\/v1\/runtime-jobs\/[^/]+\/evidence$/,
+  /^\/v1\/runtime-test-packages\/[^/]+\/observation-jobs$/,
+  /^\/v1\/reviews\/[^/]+\/runtime-jobs$/
+];
+
+function isRetiredMutation(pathname: string, method: string, env: Env): boolean {
   if (method !== 'POST') return false;
-  return [
-    /^\/v1\/runtime-jobs\/[^/]+\/evidence$/,
-    /^\/v1\/runtime-test-packages\/[^/]+\/observation-jobs$/,
-    /^\/v1\/reviews\/[^/]+\/runtime-jobs$/,
-    /^\/v1\/reviews\/[^/]+\/companion-runs$/,
-    /^\/v1\/companion-runs\/[^/]+\/(?:complete|replay)$/,
-    /^\/v1\/companion-runs\/[^/]+\/missions\/[^/]+$/
-  ].some((pattern) => pattern.test(pathname));
+  if (RETIRED_COMPANION_WRITE_ROUTES.some((pattern) => pattern.test(pathname))) {
+    return true;
+  }
+  return (
+    env.ENVIRONMENT !== 'development' &&
+    LEGACY_RUNTIME_MUTATION_ROUTES.some((pattern) => pattern.test(pathname))
+  );
+}
+
+function isLocalOnlyOrigin(origin: string): boolean {
+  try {
+    const url = new URL(origin);
+    return ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Dev bypass tokens grant full identities without Webflow verification. If
+ * they are bound while any non-localhost origin is allowed, the deployment is
+ * unsafe and the Worker refuses to serve anything.
+ */
+function devTokenMisconfiguration(env: Env): boolean {
+  if (!env.PREFLIGHT_DEV_TOKEN && !env.PREFLIGHT_REVIEWER_DEV_TOKEN) return false;
+  return (env.ALLOWED_ORIGINS ?? '')
+    .split(',')
+    .map((value) => value.trim())
+    .filter(Boolean)
+    .some((origin) => !isLocalOnlyOrigin(origin));
 }
 
 async function handle(request: Request, env: Env): Promise<Response> {
+  if (devTokenMisconfiguration(env)) {
+    return json(
+      {
+        error: 'server_misconfigured',
+        message:
+          'Development bypass tokens are bound while non-localhost origins are allowed. Remove PREFLIGHT_DEV_TOKEN and PREFLIGHT_REVIEWER_DEV_TOKEN from this deployment.'
+      },
+      503
+    );
+  }
+
   const url = new URL(request.url);
   const requestOrigin = request.headers.get('origin');
   const origin = allowedOrigin(request, env);
@@ -83,10 +136,7 @@ async function handle(request: Request, env: Env): Promise<Response> {
       ? options(origin)
       : json({ error: 'origin_required' }, 403);
   }
-  if (
-    env.ENVIRONMENT === 'production' &&
-    isRetiredLegacyMutation(url.pathname, request.method)
-  ) {
+  if (isRetiredMutation(url.pathname, request.method, env)) {
     return json(
       {
         error: 'legacy_runtime_mutation_retired',
@@ -97,7 +147,38 @@ async function handle(request: Request, env: Env): Promise<Response> {
     );
   }
   if (url.pathname === '/health' && request.method === 'GET') {
-    return json({ ok: true, service: 'webflow-app-review-preflight' }, 200, origin);
+    const authorization = await latestWebflowAuthorizationReadiness(env);
+    const ready = authorization.state === 'ready' || authorization.state === 'unknown';
+    return json(
+      {
+        ok: ready,
+        service: 'webflow-app-review-preflight',
+        webflowAuthorization: {
+          state: authorization.state,
+          checkedAt: authorization.checkedAt
+        }
+      },
+      ready ? 200 : 503,
+      origin
+    );
+  }
+  // Unauthenticated by design: the receipt code is the secret, and the
+  // caller is the submission form's server tracing a developer-supplied
+  // code back to the preflight run that produced it. The response carries
+  // reconciliation metadata only — never findings or artifact contents.
+  if (url.pathname === '/v1/submission-receipts/verify' && request.method === 'POST') {
+    let code: unknown;
+    try {
+      const text = await request.text();
+      if (!text || text.length > 4 * 1024) throw new Error();
+      code = (JSON.parse(text) as { code?: unknown }).code;
+    } catch {
+      return json({ valid: false, error: 'invalid_request' }, 400, origin);
+    }
+    const receipt = await verifySubmissionReceipt(env, code);
+    return receipt
+      ? json({ valid: true, receipt }, 200, origin)
+      : json({ valid: false }, 404, origin);
   }
   if (url.pathname === '/v1/oauth/webflow/start' && request.method === 'GET') {
     return startWebflowOAuth(env);
@@ -109,7 +190,10 @@ async function handle(request: Request, env: Env): Promise<Response> {
     return webflowOAuthCompletePage();
   }
 
-  if (url.pathname === '/reviewer/connect' && request.method === 'GET') {
+  if (
+    url.pathname === '/reviewer/connect' &&
+    (request.method === 'GET' || request.method === 'POST')
+  ) {
     try {
       return await connectReviewerWorkspace(request, env);
     } catch (error) {
@@ -152,21 +236,10 @@ async function handle(request: Request, env: Env): Promise<Response> {
           origin
         );
       }
-      throw error;
-    }
-  }
-
-  if (url.pathname === '/v1/companion-pairings/redeem' && request.method === 'POST') {
-    try {
-      const session = await redeemCompanionPairing(request, env);
-      return session
-        ? json({ session }, 200, origin)
-        : json({ error: 'companion_pairing_unavailable' }, 409, origin);
-    } catch (error) {
-      if (error instanceof CompanionPairingInputError) {
+      if (error instanceof RuntimeObservationCleanupError) {
         return json(
-          { error: 'invalid_companion_pairing', message: error.message },
-          400,
+          { error: 'runtime_observation_cleanup_failed', message: error.message },
+          503,
           origin
         );
       }
@@ -209,7 +282,16 @@ async function handle(request: Request, env: Env): Promise<Response> {
     const reviewer = await authenticate(request, env);
     if (!reviewer) return json({ error: 'unauthorized' }, 401, origin);
     if (companionRoleForUser(reviewer, env) !== 'reviewer') {
-      return json({ error: 'reviewer_required' }, 403, origin);
+      return json(
+        {
+          error: 'reviewer_required',
+          message: (env.REVIEWER_USER_IDS ?? '').trim()
+            ? 'Your Webflow identity is not on the reviewer allowlist.'
+            : 'No reviewers are configured. Set the REVIEWER_USER_IDS Worker variable to a comma-separated list of Webflow user IDs.'
+        },
+        403,
+        origin
+      );
     }
     try {
       const pairing = await createCompanionPairing(
@@ -379,9 +461,7 @@ async function handle(request: Request, env: Env): Promise<Response> {
     }
   }
 
-  const isCompanionRequest =
-    /^\/v1\/companion-runs\//.test(url.pathname) ||
-    /^\/v1\/reviews\/[^/]+\/companion-runs$/.test(url.pathname);
+  const isCompanionRequest = /^\/v1\/companion-runs\//.test(url.pathname);
   const user = isCompanionRequest
     ? await authenticateCompanion(request, env)
     : await authenticate(request, env);
@@ -417,34 +497,6 @@ async function handle(request: Request, env: Env): Promise<Response> {
         : json({ observationJob }, observationJob.deduplicated ? 200 : 201, origin);
     }
 
-    const companionCompleteMatch = url.pathname.match(
-      /^\/v1\/companion-runs\/([^/]+)\/complete$/
-    );
-    if (companionCompleteMatch && request.method === 'POST') {
-      const run = await completeCompanionRun(
-        decodeURIComponent(companionCompleteMatch[1]!),
-        env,
-        user
-      );
-      return run
-        ? json({ run }, 200, origin)
-        : json({ error: 'companion_run_not_found' }, 404, origin);
-    }
-
-    const companionReplayMatch = url.pathname.match(
-      /^\/v1\/companion-runs\/([^/]+)\/replay$/
-    );
-    if (companionReplayMatch && request.method === 'POST') {
-      const run = await replayCompanionRun(
-        decodeURIComponent(companionReplayMatch[1]!),
-        env,
-        user
-      );
-      return run
-        ? json({ run }, 201, origin)
-        : json({ error: 'companion_run_not_found' }, 404, origin);
-    }
-
     const companionRunGetMatch = url.pathname.match(/^\/v1\/companion-runs\/([^/]+)$/);
     if (companionRunGetMatch && request.method === 'GET') {
       const run = await getCompanionRun(
@@ -457,39 +509,11 @@ async function handle(request: Request, env: Env): Promise<Response> {
         : json({ error: 'companion_run_not_found' }, 404, origin);
     }
 
-    const companionRunMatch = url.pathname.match(
-      /^\/v1\/reviews\/([^/]+)\/companion-runs$/
-    );
-    if (companionRunMatch && request.method === 'POST') {
-      const run = await createCompanionRunForReview(
-        decodeURIComponent(companionRunMatch[1]!),
-        request,
-        env,
-        user
-      );
-      return run
-        ? json({ run }, 201, origin)
-        : json({ error: 'review_version_not_found' }, 404, origin);
-    }
-
-    const companionMissionMatch = url.pathname.match(
-      /^\/v1\/companion-runs\/([^/]+)\/missions\/([^/]+)$/
-    );
-    if (companionMissionMatch && request.method === 'POST') {
-      const run = await recordCompanionMissionEvidence(
-        decodeURIComponent(companionMissionMatch[1]!),
-        decodeURIComponent(companionMissionMatch[2]!),
-        request,
-        env,
-        user
-      );
-      return run
-        ? json({ run }, 200, origin)
-        : json({ error: 'companion_run_not_found' }, 404, origin);
-    }
-
     if (url.pathname === '/v1/reviews' && request.method === 'POST') {
-      return json({ review: await createReview(request, env, user) }, 201, origin);
+      return json(await createReview(request, env, user), 201, origin);
+    }
+    if (url.pathname === '/v1/runtime-reviews' && request.method === 'POST') {
+      return json(await createRuntimeReview(request, env, user), 201, origin);
     }
     if (url.pathname === '/v1/reviews' && request.method === 'GET') {
       return json(
@@ -523,6 +547,20 @@ async function handle(request: Request, env: Env): Promise<Response> {
       );
       return revision
         ? json(revision, revision.deduplicated ? 200 : 201, origin)
+        : json({ error: 'review_not_found' }, 404, origin);
+    }
+
+    const receiptMatch = url.pathname.match(
+      /^\/v1\/reviews\/([^/]+)\/submission-receipts$/
+    );
+    if (receiptMatch && request.method === 'POST') {
+      const submissionReceipt = await reissueSubmissionReceipt(
+        decodeURIComponent(receiptMatch[1]!),
+        env,
+        user
+      );
+      return submissionReceipt
+        ? json({ submissionReceipt }, 201, origin)
         : json({ error: 'review_not_found' }, 404, origin);
     }
 
@@ -569,22 +607,14 @@ async function handle(request: Request, env: Env): Promise<Response> {
 
     return json({ error: 'not_found' }, 404, origin);
   } catch (error) {
-    if (error instanceof CompanionTrustEscalationError) {
-      return json(
-        { error: 'companion_trust_escalation', message: error.message },
-        403,
-        origin
-      );
-    }
-    if (error instanceof CompanionRunInputError) {
-      return json(
-        { error: 'invalid_companion_run', message: error.message },
-        400,
-        origin
-      );
-    }
     if (error instanceof ReviewInputError) {
       return json({ error: 'invalid_bundle', message: error.message }, 400, origin);
+    }
+    if (error instanceof ReviewConflictError) {
+      return json({ error: 'revision_conflict', message: error.message }, 409, origin);
+    }
+    if (error instanceof RuntimeReviewInputError) {
+      return json({ error: 'invalid_runtime_review', message: error.message }, 400, origin);
     }
     if (error instanceof RuntimeApprovalError) {
       return json(
@@ -604,6 +634,15 @@ async function handle(request: Request, env: Env): Promise<Response> {
       return json(
         { error: 'runtime_observation_approval_required', message: error.message },
         403,
+        origin
+      );
+    }
+    if (error instanceof RuntimeObservationCleanupError) {
+      // Infrastructure cleanup failure, not a missing approval: surface it as
+      // a temporary service failure so operators investigate the sandbox.
+      return json(
+        { error: 'runtime_observation_cleanup_failed', message: error.message },
+        503,
         origin
       );
     }
@@ -628,6 +667,18 @@ export default {
     env: Env,
     ctx: ExecutionContext
   ): void {
-    ctx.waitUntil(reconcileRuntimeObservationJobs(env));
+    ctx.waitUntil(
+      Promise.all([
+        reconcileRuntimeObservationJobs(env),
+        recordWebflowAuthorizationReadiness(env)
+      ]).then(([, authorization]) => {
+        if (authorization.state !== 'ready') {
+          console.error('Webflow authorization readiness check failed', {
+            state: authorization.state,
+            statusCode: authorization.statusCode
+          });
+        }
+      })
+    );
   }
 };

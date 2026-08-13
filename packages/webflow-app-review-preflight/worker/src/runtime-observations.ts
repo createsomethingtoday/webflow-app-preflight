@@ -8,6 +8,7 @@ import type {
   RuntimeTestPackageView
 } from '@create-something/webflow-app-review-preflight';
 import { serviceTokenAuthorized } from './service-auth';
+import { isPrivateOrLocalHostname } from './net';
 import type { AuthenticatedUser, Env } from './types';
 import {
   E2BRuntimeLaunchError,
@@ -18,14 +19,23 @@ import {
 
 const MAX_INPUT_BYTES = 32 * 1024;
 const MAX_RUNTIME_ARTIFACTS = 8;
+// Target host + at most eight artifact hosts. The E2B egress allowlist is
+// derived from this list, so it is capped independently of artifact count.
+const MAX_ALLOWED_HOSTS = MAX_RUNTIME_ARTIFACTS + 1;
 const MAX_PACKAGE_LIFETIME_MS = 24 * 60 * 60 * 1000;
 const JOB_LIFETIME_MS = 15 * 60 * 1000;
+// A job whose 15-minute budget elapses while its evidence upload is being
+// validated gets this additional grace before the expiry sweeps reclaim it.
+const UPLOAD_GRACE_MS = 10 * 60 * 1000;
+// How many unterminated sandboxes one cron invocation will reconcile.
+const RECONCILE_BATCH_LIMIT = 10;
+const RECONCILE_CONCURRENCY = 5;
 const HEX_SHA256 = /^[a-f0-9]{64}$/;
 const INSTALLATION_ID = /^[a-zA-Z0-9:_-]{3,128}$/;
 const MAX_EVIDENCE_BYTES = 10 * 1024 * 1024;
 const MAX_EVIDENCE_ARTIFACTS = 12;
 const FORBIDDEN_EVIDENCE_KEY =
-  /^(?:authorization|cookie|set-cookie|password|secret|token|credentials?|requestHeaders|responseHeaders|requestBody|responseBody|formValues?)$/i;
+  /^(?:auth|authorization|bearer|cookie|set-cookie|password|secret|token|access[_-]?token|refresh[_-]?token|id[_-]?token|api[_-]?key|apikey|session[_-]?id|sessionid|client[_-]?secret|private[_-]?key|credentials?|requestHeaders|responseHeaders|requestBody|responseBody|formValues?)$/i;
 const FORBIDDEN_EVIDENCE_VALUE =
   /(?:Bearer\s+[A-Za-z0-9._~+/=-]{8,}|-----BEGIN [^-]*PRIVATE KEY-----|\bsk-[A-Za-z0-9_-]{12,})/i;
 
@@ -61,6 +71,8 @@ const ARTIFACT_POLICY: Record<
 export class RuntimeTestPackageError extends Error {}
 export class RuntimeObservationApprovalError extends Error {}
 export class RuntimeObservationEvidenceError extends Error {}
+/** Infrastructure cleanup failed (e.g. a sandbox could not be terminated). */
+export class RuntimeObservationCleanupError extends Error {}
 export class RuntimeObservationDispatchError extends Error {
   constructor(
     message: string,
@@ -112,25 +124,6 @@ type RuntimeSecurityPredicates = NonNullable<
   RuntimeObservationSummary['evidence']
 >['securityPredicates'];
 
-function isPrivateIpv4(hostname: string): boolean {
-  const parts = hostname.split('.').map(Number);
-  if (
-    parts.length !== 4 ||
-    parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)
-  ) {
-    return false;
-  }
-  const [a, b] = parts;
-  return (
-    a === 0 ||
-    a === 10 ||
-    a === 127 ||
-    (a === 169 && b === 254) ||
-    (a === 172 && b! >= 16 && b! <= 31) ||
-    (a === 192 && b === 168)
-  );
-}
-
 function normalizeUrl(value: unknown, env: Env, kind: 'sandbox' | 'runtime' | 'canary'): URL {
   if (typeof value !== 'string' || value.length === 0 || value.length > 2048) {
     throw new RuntimeTestPackageError(`${kind} URL is missing or too long.`);
@@ -160,16 +153,13 @@ function normalizeUrl(value: unknown, env: Env, kind: 'sandbox' | 'runtime' | 'c
     );
   }
 
-  if (env.ENVIRONMENT === 'production') {
+  // Only an explicit development environment relaxes these checks; a missing
+  // or unrecognized ENVIRONMENT value fails closed as production.
+  if (env.ENVIRONMENT !== 'development') {
     if (url.protocol !== 'https:') {
       throw new RuntimeTestPackageError(`${kind} URL must use HTTPS in production.`);
     }
-    if (
-      host === 'localhost' ||
-      host.endsWith('.local') ||
-      host.includes(':') ||
-      isPrivateIpv4(host)
-    ) {
+    if (isPrivateOrLocalHostname(host)) {
       throw new RuntimeTestPackageError(`${kind} URL must be publicly routable.`);
     }
     if (
@@ -237,7 +227,9 @@ async function verifyPublishedWebflowSiteOwnership(
   siteId: string,
   env: Env
 ): Promise<void> {
-  if (env.ENVIRONMENT !== 'production') return;
+  // Ownership verification is skipped only in an explicit development
+  // environment; every other ENVIRONMENT value verifies (fail closed).
+  if (env.ENVIRONMENT === 'development') return;
   let response: Response;
   try {
     response = await fetch(targetUrl, {
@@ -497,19 +489,24 @@ export async function createRuntimeTestPackage(
     `SELECT r.id AS review_id, v.id AS version_id, v.artifact_sha256
        FROM reviews r
        JOIN review_versions v ON v.id = r.latest_version_id
-      WHERE r.id = ? AND r.owner_user_id = ?`
+      WHERE r.id = ? AND r.owner_user_id = ? AND r.site_id IS ?`
   )
-    .bind(reviewId, user.id)
+    .bind(reviewId, user.id, user.siteId)
     .first<ReviewVersionRow>();
   if (!row) return null;
 
   const now = new Date();
-  const input = parsePackageInput(await readJson(request), env, now.getTime());
-  if (!user.siteId || input.sandboxInstallationId !== user.siteId) {
+  if (!user.siteId) {
     throw new RuntimeTestPackageError(
-      'The sandbox installation must match the authenticated Webflow site.'
+      'Open App Review Preflight from the dedicated Webflow test site before preparing a runtime package.'
     );
   }
+  const body = await readJson(request);
+  const input = parsePackageInput(
+    { ...body, sandboxInstallationId: user.siteId },
+    env,
+    now.getTime()
+  );
   const target = new URL(input.targetUrl);
   await verifyPublishedWebflowSiteOwnership(target.toString(), user.siteId, env);
   const id = crypto.randomUUID();
@@ -580,9 +577,9 @@ export async function listRuntimeTestPackages(
   options: { includeAll?: boolean } = {}
 ): Promise<RuntimeTestPackageView[] | null> {
   const owned = await env.DB.prepare(
-    'SELECT id FROM reviews WHERE id = ? AND (? = 1 OR owner_user_id = ?)'
+    'SELECT id FROM reviews WHERE id = ? AND (? = 1 OR (owner_user_id = ? AND site_id IS ?))'
   )
-    .bind(reviewId, options.includeAll ? 1 : 0, user.id)
+    .bind(reviewId, options.includeAll ? 1 : 0, user.id, user.siteId)
     .first<{ id: string }>();
   if (!owned) return null;
 
@@ -628,9 +625,13 @@ export async function listRuntimeTestPackages(
     const expired = Date.parse(testPackage.license.expiresAt) <= Date.now();
     let observation: RuntimeObservationSummary | null = null;
     if (row.job_id && row.job_status && row.approved_at && row.expires_at) {
+      // 'uploading' keeps the upload grace window before it displays as
+      // expired, matching the cron reclamation policy.
+      const displayExpiryCutoff =
+        row.job_status === 'uploading' ? Date.now() - UPLOAD_GRACE_MS : Date.now();
       const effectiveJobStatus =
         ['approved', 'running', 'uploading'].includes(row.job_status) &&
-        Date.parse(row.expires_at) <= Date.now()
+        Date.parse(row.expires_at) <= displayExpiryCutoff
           ? 'expired'
           : row.job_status;
       const manifest = row.evidence_manifest_json
@@ -638,6 +639,8 @@ export async function listRuntimeTestPackages(
           cleanup?: { status?: unknown; residue?: unknown };
           negativeProxyCanary?: { outcome?: unknown };
           runtimeArtifacts?: unknown;
+          runtimeCreatedScripts?: unknown;
+          unreviewedRuntimeScripts?: unknown;
           securityEvaluation?: {
             status?: unknown;
             predicates?: unknown;
@@ -659,6 +662,13 @@ export async function listRuntimeTestPackages(
         : [];
       const runtimeFiles = testPackage.runtimeArtifacts.map((pin) => {
         const observed = runtimeObservations.find((item) => item.url === pin.url);
+        // Mirrors evaluateRuntimeSecurity: a runtime_child declaration counts
+        // only when the observation proves the file was runtime-created.
+        const observedAsChild =
+          observed?.loadedByPage === false && observed?.trustedRuntimeInitiator === true;
+        const observedSourceMap = observed?.sourceMap as
+          | { available?: unknown; url?: unknown }
+          | undefined;
         return {
           url: pin.url,
           loadMode: pin.loadMode ?? 'document',
@@ -666,8 +676,13 @@ export async function listRuntimeTestPackages(
           hashMatched: observed?.observedSha256 === pin.sha256,
           integrityMatched:
             (pin.loadMode ?? 'document') === 'runtime_child'
-              ? observed?.trustedRuntimeInitiator === true
-              : observed?.domIntegrity === pin.integrity
+              ? observedAsChild &&
+                (observed?.domIntegrity === null || observed?.domIntegrity === pin.integrity)
+              : observed?.domIntegrity === pin.integrity,
+          sourceMapAvailable: observedSourceMap?.available === true,
+          ...(typeof observedSourceMap?.url === 'string'
+            ? { sourceMapUrl: observedSourceMap.url }
+            : {})
         };
       });
       const artifactRows =
@@ -713,6 +728,16 @@ export async function listRuntimeTestPackages(
                 blockers: securityBlockers.filter(
                   (item): item is string => typeof item === 'string'
                 ),
+                runtimeCreatedScripts: Array.isArray(manifest?.runtimeCreatedScripts)
+                  ? manifest.runtimeCreatedScripts.filter(
+                      (item): item is string => typeof item === 'string'
+                    )
+                  : [],
+                unreviewedRuntimeScripts: Array.isArray(manifest?.unreviewedRuntimeScripts)
+                  ? manifest.unreviewedRuntimeScripts.filter(
+                      (item): item is string => typeof item === 'string'
+                    )
+                  : [],
                 runtimeFiles,
                 cleanupStatus,
                 cleanupResidue: cleanupResidue.filter(
@@ -1055,6 +1080,15 @@ export function evaluateRuntimeSecurity(
   const canary = manifest.negativeProxyCanary as Record<string, unknown>;
   const noProxyDeclared = contract.negativeProxyProbe?.mode === 'none_declared';
   const targetHost = new URL(contract.target.url).hostname.toLowerCase();
+
+  // A runtime_child declaration is honored only when the observation itself
+  // proves the file was runtime-created: NOT loaded by the page document, and
+  // initiated by another pinned runtime. Otherwise the partner-supplied
+  // loadMode could swap the DOM-SRI equality check for a weaker predicate on
+  // an ordinary page-loaded script.
+  const observedAsChild = (item: Record<string, unknown>): boolean =>
+    item.loadedByPage === false && item.trustedRuntimeInitiator === true;
+
   const predicates: RuntimeSecurityPredicates = {
     publishedTarget:
       targetHost !== 'design.webflow.com' &&
@@ -1063,7 +1097,13 @@ export function evaluateRuntimeSecurity(
       !targetHost.endsWith('.webflow-ext.com'),
     runtimeReadyObserved: manifest.runtimeReadyObserved === true,
     runtimeLoadedByPage: contract.runtimeArtifacts.every((pin) =>
-      observations.some((item) => item.url === pin.url && item.loadedByPage === true)
+      observations.some(
+        (item) =>
+          item.url === pin.url &&
+          ((pin.loadMode ?? 'document') === 'runtime_child'
+            ? observedAsChild(item)
+            : item.loadedByPage === true)
+      )
     ),
     runtimeHashMatched: contract.runtimeArtifacts.every((pin) =>
       observations.some((item) => item.url === pin.url && item.observedSha256 === pin.sha256)
@@ -1073,7 +1113,8 @@ export function evaluateRuntimeSecurity(
         (item) =>
           item.url === pin.url &&
           ((pin.loadMode ?? 'document') === 'runtime_child'
-            ? item.trustedRuntimeInitiator === true
+            ? observedAsChild(item) &&
+              (item.domIntegrity === null || item.domIntegrity === pin.integrity)
             : item.domIntegrity === pin.integrity)
       )
     ),
@@ -1083,10 +1124,26 @@ export function evaluateRuntimeSecurity(
       Array.isArray(manifest.unreviewedRuntimeScripts) &&
       manifest.unreviewedRuntimeScripts.length === 0,
     negativeProxyBlocked: canary.outcome === 'blocked',
-    proxyPolicySatisfied:
-      noProxyDeclared
-        ? canary.outcome === 'not_applicable'
-        : canary.outcome === 'blocked'
+    // A partner-supplied "no proxy surface" declaration can never satisfy the
+    // proxy predicate on its own: it is an unverified claim, not evidence.
+    // It always yields a mandatory manual-review blocker below; only a real
+    // blocked canary probe satisfies the predicate automatically.
+    proxyPolicySatisfied: noProxyDeclared ? false : canary.outcome === 'blocked',
+    // Byte-level pinning proves WHICH executable ran; it does not make that
+    // executable readable. A served runtime with no reachable source map
+    // cannot be traced to source, so the reviewed artifact and the executing
+    // artifact cannot be compared line for line. Reachability here is
+    // observed by the server-owned browser, so it is evidence rather than a
+    // claim — but its absence is not automatically a violation, since a
+    // partner may supply readable source privately. Like a no-proxy
+    // declaration, it therefore yields a mandatory manual-review blocker.
+    runtimeSourceMapAvailable: contract.runtimeArtifacts.every((pin) =>
+      observations.some(
+        (item) =>
+          item.url === pin.url &&
+          (item.sourceMap as { available?: unknown } | undefined)?.available === true
+      )
+    )
   };
   const blockers = [
     !predicates.publishedTarget ? 'Use a real published Webflow test-site URL.' : null,
@@ -1094,13 +1151,13 @@ export function evaluateRuntimeSecurity(
       ? 'The runtime-ready signal was not observed on the published page.'
       : null,
     !predicates.runtimeLoadedByPage
-      ? 'The pinned runtime was not loaded by the published page.'
+      ? 'A pinned runtime did not load the way it was declared: page-loaded files must load from the document, and child files must be created at runtime by another pinned runtime.'
       : null,
     !predicates.runtimeHashMatched
       ? 'The executed runtime bytes did not match the pinned SHA-256.'
       : null,
     !predicates.runtimeIntegrityMatched
-      ? 'A page-loaded runtime lacked its pinned SRI, or a child runtime was not initiated by another pinned runtime.'
+      ? 'A page-loaded runtime lacked its pinned SRI, or a declared child runtime was not observed as runtime-created by another pinned runtime.'
       : null,
     !predicates.noRuntimeCreatedScripts
       ? 'The runtime created additional script elements at execution time.'
@@ -1110,8 +1167,11 @@ export function evaluateRuntimeSecurity(
       : null,
     !predicates.proxyPolicySatisfied
       ? noProxyDeclared
-        ? 'The no-proxy declaration was not preserved by the observation.'
+        ? 'The package declares no proxy surface. That declaration is unverified: a Webflow reviewer must manually confirm the app exposes no proxy or fetch-through endpoint before this check can pass.'
         : 'The negative proxy canary was not blocked.'
+      : null,
+    !predicates.runtimeSourceMapAvailable
+      ? 'A pinned runtime exposed no reachable source map, so the executed bytes cannot be traced to readable source. A Webflow reviewer must manually confirm readable source matching the served runtime was supplied before this check can pass.'
       : null
   ].filter((item): item is string => item !== null);
   return {
@@ -1194,11 +1254,11 @@ async function validateEvidenceArtifacts(
     const objectKey = [
       'runtime-observations',
       safePathSegment(ownerUserId),
-      contract.reviewId,
-      contract.reviewVersionId,
-      contract.testPackageId,
-      observationJobId,
-      `${declaration.kind}-${declaration.sha256}.${policy.extension}`
+      safePathSegment(contract.reviewId),
+      safePathSegment(contract.reviewVersionId),
+      safePathSegment(contract.testPackageId),
+      safePathSegment(observationJobId),
+      `${safePathSegment(declaration.kind)}-${declaration.sha256}.${policy.extension}`
     ].join('/');
     result.push({ ...declaration, file, objectKey });
   }
@@ -1284,6 +1344,7 @@ export async function recordRuntimeObservationEvidence(
   if (claim.meta.changes !== 1) return { unavailable: true };
 
   const uploadedKeys: string[] = [];
+  const completionEventId = crypto.randomUUID();
   try {
     for (const artifact of artifacts) {
       await env.ARTIFACTS.put(artifact.objectKey, artifact.file, {
@@ -1299,7 +1360,7 @@ export async function recordRuntimeObservationEvidence(
     }
 
     const completedAt = new Date().toISOString();
-    await env.DB.batch([
+    const batchResults = await env.DB.batch([
       ...artifacts.map((artifact) =>
         env.DB.prepare(
           `INSERT INTO runtime_observation_artifacts
@@ -1331,7 +1392,7 @@ export async function recordRuntimeObservationEvidence(
          VALUES (?, ?, ?, 'webflow-runtime-runner',
                  'runtime_observation_completed', ?, ?)`
       ).bind(
-        crypto.randomUUID(),
+        completionEventId,
         contract.reviewId,
         contract.reviewVersionId,
         JSON.stringify({
@@ -1345,6 +1406,23 @@ export async function recordRuntimeObservationEvidence(
         completedAt
       )
     ]);
+
+    // The completion UPDATE is guarded by `status = 'uploading'`. If the job
+    // was reclaimed (e.g. expired) between the claim and this batch, the
+    // UPDATE matched zero rows while the artifact and event INSERTs still
+    // committed. Never report success for a job the server no longer owns:
+    // roll the writes back and fail closed.
+    const completion = batchResults[artifacts.length];
+    if (!completion || completion.meta.changes !== 1) {
+      await env.DB.batch([
+        env.DB.prepare(
+          'DELETE FROM runtime_observation_artifacts WHERE observation_job_id = ?'
+        ).bind(observationJobId),
+        env.DB.prepare('DELETE FROM review_events WHERE id = ?').bind(completionEventId)
+      ]);
+      await Promise.all(uploadedKeys.map((key) => env.ARTIFACTS.delete(key)));
+      return { unavailable: true };
+    }
   } catch (error) {
     await Promise.all(uploadedKeys.map((key) => env.ARTIFACTS.delete(key)));
     await env.DB.prepare(
@@ -1429,14 +1507,19 @@ export async function reconcileRuntimeObservationJobs(env: Env): Promise<{
   reconciled: number;
   failed: number;
 }> {
-  const now = new Date().toISOString();
+  const nowMs = Date.now();
+  const now = new Date(nowMs).toISOString();
+  // Jobs whose evidence upload is in flight ('uploading') keep an additional
+  // grace window: expiring them mid-upload would let the completion batch
+  // race the sweep and strand orphan evidence.
+  const uploadGraceCutoff = new Date(nowMs - UPLOAD_GRACE_MS).toISOString();
   await env.DB.prepare(
     `UPDATE runtime_observation_jobs
         SET status = 'expired', updated_at = ?
-      WHERE status IN ('approved', 'running', 'uploading')
-        AND expires_at <= ?`
+      WHERE (status IN ('approved', 'running') AND expires_at <= ?)
+         OR (status = 'uploading' AND expires_at <= ?)`
   )
-    .bind(now, now)
+    .bind(now, now, uploadGraceCutoff)
     .run();
   const rows = await env.DB.prepare(
     `SELECT id
@@ -1445,16 +1528,33 @@ export async function reconcileRuntimeObservationJobs(env: Env): Promise<{
         AND COALESCE(sandbox_termination_status, 'pending') <> 'verified'
         AND (status IN ('complete', 'failed', 'expired', 'revoked') OR expires_at <= ?)
       ORDER BY updated_at ASC
-      LIMIT 50`
+      LIMIT ${RECONCILE_BATCH_LIMIT}`
   )
     .bind(now)
     .all<{ id: string }>();
+  // Terminate in small concurrent batches with per-job error handling so one
+  // slow or failing provider call cannot consume the whole cron invocation.
   let reconciled = 0;
   let failed = 0;
-  for (const row of rows.results) {
-    const result = await terminateRuntimeObservationSandbox(row.id, env);
-    if (result === 'verified' || result === 'not_started') reconciled += 1;
-    else failed += 1;
+  const pending = [...rows.results];
+  while (pending.length > 0) {
+    const chunk = pending.splice(0, RECONCILE_CONCURRENCY);
+    const settled = await Promise.allSettled(
+      chunk.map((row) => terminateRuntimeObservationSandbox(row.id, env))
+    );
+    for (const outcome of settled) {
+      if (
+        outcome.status === 'fulfilled' &&
+        (outcome.value === 'verified' || outcome.value === 'not_started')
+      ) {
+        reconciled += 1;
+      } else {
+        failed += 1;
+        if (outcome.status === 'rejected') {
+          console.error('Runtime observation sandbox reconcile failed', outcome.reason);
+        }
+      }
+    }
   }
   return { reconciled, failed };
 }
@@ -1463,16 +1563,21 @@ async function activeRuntimeObservationJob(
   testPackageId: string,
   env: Env
 ): Promise<RequestedRuntimeObservationJob | null> {
+  const nowMs = Date.now();
   const row = await env.DB.prepare(
     `SELECT id, status, approved_at
        FROM runtime_observation_jobs
       WHERE test_package_id = ?
-        AND status IN ('approved', 'running', 'uploading')
-        AND expires_at > ?
+        AND ((status IN ('approved', 'running') AND expires_at > ?)
+             OR (status = 'uploading' AND expires_at > ?))
       ORDER BY created_at DESC
       LIMIT 1`
   )
-    .bind(testPackageId, new Date().toISOString())
+    .bind(
+      testPackageId,
+      new Date(nowMs).toISOString(),
+      new Date(nowMs - UPLOAD_GRACE_MS).toISOString()
+    )
     .first<{ id: string; status: 'approved' | 'running' | 'uploading'; approved_at: string }>();
   return row
     ? { id: row.id, status: row.status, approvedAt: row.approved_at, deduplicated: true }
@@ -1480,15 +1585,17 @@ async function activeRuntimeObservationJob(
 }
 
 async function expireActiveRuntimeObservationJobs(testPackageId: string, env: Env): Promise<void> {
-  const now = new Date().toISOString();
+  const nowMs = Date.now();
+  const now = new Date(nowMs).toISOString();
+  const uploadGraceCutoff = new Date(nowMs - UPLOAD_GRACE_MS).toISOString();
   await env.DB.prepare(
     `UPDATE runtime_observation_jobs
         SET status = 'expired', updated_at = ?
       WHERE test_package_id = ?
-        AND status IN ('approved', 'running', 'uploading')
-        AND expires_at <= ?`
+        AND ((status IN ('approved', 'running') AND expires_at <= ?)
+             OR (status = 'uploading' AND expires_at <= ?))`
   )
-    .bind(now, testPackageId, now)
+    .bind(now, testPackageId, now, uploadGraceCutoff)
     .run();
   const unresolved = await env.DB.prepare(
     `SELECT id
@@ -1504,7 +1611,8 @@ async function expireActiveRuntimeObservationJobs(testPackageId: string, env: En
   for (const job of unresolved.results) {
     const termination = await terminateRuntimeObservationSandbox(job.id, env);
     if (termination === 'failed') {
-      throw new RuntimeObservationApprovalError(
+      // This is an infrastructure cleanup failure, not a missing approval.
+      throw new RuntimeObservationCleanupError(
         'The previous runtime sandbox could not be terminated safely.'
       );
     }
@@ -1541,11 +1649,23 @@ async function issueRuntimeObservationJob(
   testPackage.negativeProxyProbe = normalizeStoredProxyPolicy(testPackage.negativeProxyProbe);
   let canaryUrl: URL | null = null;
   if (testPackage.negativeProxyProbe.mode !== 'none_declared') {
+    // A missing or invalid RUNTIME_CANARY_URL is a server configuration
+    // problem, not a missing approval: surface it as a 503 dispatch error
+    // with an operator-actionable message instead of a misleading 403.
+    if (!env.RUNTIME_CANARY_URL) {
+      throw new RuntimeObservationDispatchError(
+        'The server-owned runtime canary is not configured. An operator must set the RUNTIME_CANARY_URL Worker variable (a Webflow-controlled HTTPS origin in production).',
+        'configuration'
+      );
+    }
     try {
       canaryUrl = normalizeUrl(env.RUNTIME_CANARY_URL, env, 'canary');
     } catch (error) {
-      throw new RuntimeObservationApprovalError(
-        error instanceof Error ? error.message : 'Runtime canary is not configured.'
+      throw new RuntimeObservationDispatchError(
+        `The configured RUNTIME_CANARY_URL is invalid: ${
+          error instanceof Error ? error.message : 'unparseable value.'
+        }`,
+        'configuration'
       );
     }
   }
@@ -1560,6 +1680,14 @@ async function issueRuntimeObservationJob(
     testPackage.target.host,
     ...testPackage.runtimeArtifacts.map((artifact) => new URL(artifact.url).hostname.toLowerCase())
   ];
+  // Defense in depth: the parse-time artifact cap bounds this, but stored
+  // packages are re-validated so the sandbox egress allowlist can never be
+  // expanded beyond the documented limit.
+  if (new Set(allowedHosts).size > MAX_ALLOWED_HOSTS) {
+    throw new RuntimeObservationApprovalError(
+      'The runtime test package names too many distinct hosts for one sandbox egress allowlist.'
+    );
+  }
   const contract: RuntimeObservationJobContract = {
     schemaVersion: 'runtime_observation_job.v1',
     purpose: 'webflow_observation',
@@ -1673,7 +1801,26 @@ export async function approveRuntimeObservationJob(
     );
   }
 
-  return issueRuntimeObservationJob(testPackageId, env);
+  try {
+    return await issueRuntimeObservationJob(testPackageId, env);
+  } catch (error) {
+    // Migration 0007 enforces one active job per package with a partial
+    // unique index. When a concurrent issue wins that race, report the
+    // conflict instead of surfacing a raw constraint failure as a 500.
+    if (
+      error instanceof RuntimeObservationApprovalError ||
+      error instanceof RuntimeObservationDispatchError
+    ) {
+      throw error;
+    }
+    const raced = await activeRuntimeObservationJob(testPackageId, env);
+    if (raced) {
+      throw new RuntimeObservationApprovalError(
+        'An observation job is already active for this runtime test package.'
+      );
+    }
+    throw error;
+  }
 }
 
 function safeLaunchMessage(stage: E2BRuntimeLaunchStage): string {
@@ -1784,9 +1931,13 @@ export async function requestRuntimeObservationRun(
   } = {}
 ): Promise<RequestedRuntimeObservationJob | { notFound: true }> {
   const owned = await env.DB.prepare(
-    'SELECT id FROM runtime_test_packages WHERE id = ? AND (? = 1 OR owner_user_id = ?)'
+    `SELECT p.id
+       FROM runtime_test_packages p
+       JOIN review_versions v ON v.id = p.review_version_id
+       JOIN reviews r ON r.id = v.review_id
+      WHERE p.id = ? AND (? = 1 OR (p.owner_user_id = ? AND r.site_id IS ?))`
   )
-    .bind(testPackageId, options.includeAll ? 1 : 0, user.id)
+    .bind(testPackageId, options.includeAll ? 1 : 0, user.id, user.siteId)
     .first<{ id: string }>();
   if (!owned) return { notFound: true };
 

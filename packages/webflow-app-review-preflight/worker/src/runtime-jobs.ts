@@ -1,4 +1,5 @@
 import type { BundleReview } from '@create-something/webflow-app-review-preflight';
+import { isPrivateOrLocalHostname } from './net';
 import type { AuthenticatedUser, Env } from './types';
 
 const MAX_RUNTIME_TARGETS = 8;
@@ -35,22 +36,6 @@ export interface StoredRuntimeJob {
   contract: AppRuntimeEvidenceJobContract;
 }
 
-function isPrivateIpv4(hostname: string): boolean {
-  const parts = hostname.split('.').map(Number);
-  if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) {
-    return false;
-  }
-  const [a, b] = parts;
-  return (
-    a === 10 ||
-    a === 127 ||
-    a === 0 ||
-    (a === 169 && b === 254) ||
-    (a === 172 && b! >= 16 && b! <= 31) ||
-    (a === 192 && b === 168)
-  );
-}
-
 function publicRuntimeTarget(reference: string): { url: string; host: string } | null {
   if (reference.includes('{') || reference.includes('}')) return null;
   try {
@@ -61,10 +46,7 @@ function publicRuntimeTarget(reference: string): { url: string; host: string } |
       url.username ||
       url.password ||
       !hostname ||
-      hostname === 'localhost' ||
-      hostname.endsWith('.local') ||
-      hostname.includes(':') ||
-      isPrivateIpv4(hostname)
+      isPrivateOrLocalHostname(hostname)
     ) {
       return null;
     }
@@ -164,9 +146,9 @@ export async function approveRuntimeJob(
     `SELECT r.id AS review_id, v.id AS version_id, v.review_json
        FROM reviews r
        JOIN review_versions v ON v.id = r.latest_version_id
-      WHERE r.id = ? AND r.owner_user_id = ?`
+      WHERE r.id = ? AND r.owner_user_id = ? AND r.site_id IS ?`
   )
-    .bind(reviewId, user.id)
+    .bind(reviewId, user.id, user.siteId)
     .first<ReviewVersionRow>();
   if (!row) return null;
 

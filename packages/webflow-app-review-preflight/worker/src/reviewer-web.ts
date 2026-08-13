@@ -73,17 +73,39 @@ function shell(content: string, title = 'Reviewer workspace'): string {
 </html>`;
 }
 
+/**
+ * Reviewer handoff. The one-time code is consumed only by an explicit POST:
+ * a GET renders an interstitial confirmation form instead of redeeming, so
+ * link-preview fetchers, mail scanners, and other GET-issuing intermediaries
+ * cannot burn (or steal a session from) the capability. The minted session is
+ * delivered exclusively as an HttpOnly cookie — never as a readable bearer.
+ */
 export async function connectReviewerWorkspace(request: Request, env: Env): Promise<Response> {
-  const code = new URL(request.url).searchParams.get('code') ?? '';
-  const redemption = await redeemCompanionPairing(
-    new Request('https://reviewer.internal/redeem', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ code })
-    }),
-    env,
-    'reviewer'
-  );
+  if (request.method === 'GET') {
+    const code = new URL(request.url).searchParams.get('code') ?? '';
+    if (typeof code !== 'string' || code.length < 32 || code.length > 256) {
+      return html(shell('<main><div class="card"><h1>Reviewer link unavailable</h1><p>This one-time link is invalid, expired, or already used.</p></div></main>'), 403);
+    }
+    return html(shell(`<main>
+      <div class="card">
+        <h1>Open the reviewer workspace</h1>
+        <p>This one-time reviewer link signs you in with a short-lived session cookie. Continue only if you requested this handoff.</p>
+        <form method="post" action="/reviewer/connect">
+          <input type="hidden" name="code" value="${escapeHtml(code)}">
+          <button type="submit">Enter reviewer workspace</button>
+        </form>
+      </div>
+    </main>`));
+  }
+
+  let code: unknown = null;
+  try {
+    const form = await request.formData();
+    code = form.get('code');
+  } catch {
+    code = null;
+  }
+  const redemption = await redeemCompanionPairing(code, env, 'reviewer');
   if (!redemption || redemption.actorRole !== 'reviewer') {
     return html(shell('<main><div class="card"><h1>Reviewer link unavailable</h1><p>This one-time link is invalid, expired, or already used.</p></div></main>'), 403);
   }

@@ -68,7 +68,7 @@ export async function createCompanionPairing(
        JOIN runtime_test_packages p ON p.review_version_id = rv.id
       WHERE rv.review_id = ? AND rv.id = ?
         AND p.id = ? AND p.status = 'ready' AND p.license_expires_at > ?
-        AND (? = 'reviewer' OR r.owner_user_id = ?)`
+        AND (? = 'reviewer' OR (r.owner_user_id = ? AND r.site_id IS ?))`
   )
     .bind(
       reviewId,
@@ -76,7 +76,8 @@ export async function createCompanionPairing(
       input.runtimeTestPackageId,
       new Date().toISOString(),
       actorRole,
-      user.id
+      user.id,
+      user.siteId
     )
     .first<{ owner_user_id: string; runtime_test_package_id: string }>();
   if (!version) return null;
@@ -108,10 +109,18 @@ export async function createCompanionPairing(
   return { code, expiresAt };
 }
 
+/**
+ * Consumes a one-time pairing code and mints a companion session.
+ *
+ * This is intentionally NOT exposed as an HTTP endpoint. The only caller is
+ * the reviewer web handoff (`POST /reviewer/connect`), which delivers the
+ * session exclusively as an HttpOnly cookie. The raw session token in the
+ * return value must never be written into a response body.
+ */
 export async function redeemCompanionPairing(
-  request: Request,
+  code: unknown,
   env: Env,
-  expectedActorRole?: 'developer' | 'reviewer'
+  expectedActorRole: 'developer' | 'reviewer'
 ): Promise<
   | {
       token: string;
@@ -120,12 +129,10 @@ export async function redeemCompanionPairing(
       reviewVersionId: string;
       runtimeTestPackageId: string;
       actorRole: 'developer' | 'reviewer';
-      evidenceTrust: 'partner_supplied' | 'webflow_observed';
     }
   | null
 > {
-  const input = await readJson(request);
-  if (typeof input.code !== 'string' || input.code.length < 32 || input.code.length > 256) {
+  if (typeof code !== 'string' || code.length < 32 || code.length > 256) {
     throw new CompanionPairingInputError('A valid one-time pairing code is required.');
   }
   const now = new Date();
@@ -134,16 +141,15 @@ export async function redeemCompanionPairing(
         SET redeemed_at = ?
       WHERE code_sha256 = ? AND redeemed_at IS NULL AND expires_at > ?
         AND runtime_test_package_id IS NOT NULL
-        AND (? IS NULL OR actor_role = ?)
+        AND actor_role = ?
       RETURNING id, review_id, review_version_id, runtime_test_package_id,
                 actor_user_id, actor_site_id, actor_role`
   )
     .bind(
       now.toISOString(),
-      await sha256(input.code),
+      await sha256(code),
       now.toISOString(),
-      expectedActorRole ?? null,
-      expectedActorRole ?? null
+      expectedActorRole
     )
     .first<{
       id: string;
@@ -186,8 +192,6 @@ export async function redeemCompanionPairing(
     reviewId: pairing.review_id,
     reviewVersionId: pairing.review_version_id,
     runtimeTestPackageId: pairing.runtime_test_package_id,
-    actorRole: pairing.actor_role,
-    evidenceTrust:
-      pairing.actor_role === 'reviewer' ? 'webflow_observed' : 'partner_supplied'
+    actorRole: pairing.actor_role
   };
 }

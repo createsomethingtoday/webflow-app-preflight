@@ -1,11 +1,13 @@
-export { createBundleReview } from './create-review';
-export { discoverRuntimeReferences } from './runtime-references';
+export { createBundleReview, SourceMapArtifactError } from './create-review';
 export {
-  COMPANION_MISSIONS,
-  createCompanionRun,
-  finalizeCompanionRun,
-  recordCompanionMission
-} from './companion-runs';
+  createHostedRuntimeReview,
+  createHostedRuntimeReviewArtifact,
+  HostedRuntimeReviewInputError
+} from './hosted-runtime-review';
+export type { HostedRuntimeReviewArtifact } from './hosted-runtime-review';
+export { discoverRuntimeReferences } from './runtime-references';
+// Companion run/mission builders are retired: the browser companion can no longer
+// produce evidence. Only the historical read path and its types remain.
 export type {
   ArtifactSurface,
   BundleReview,
@@ -19,6 +21,7 @@ export type {
   CompanionRunStatus,
   CoverageStatus,
   CreateBundleReviewInput,
+  CreateHostedRuntimeReviewInput,
   ReviewCoverage,
   ReviewGuidance,
   RuntimeArtifactPin,

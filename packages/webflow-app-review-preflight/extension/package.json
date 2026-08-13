@@ -7,11 +7,11 @@
   "scripts": {
     "build": "node scripts/build.mjs",
     "build:production": "PREFLIGHT_BUILD_MODE=production node scripts/build.mjs",
-    "bundle": "pnpm build:production && node scripts/verify-production-bundle.mjs && webflow extension bundle",
+    "bundle": "pnpm build:production && DO_NOT_TRACK=1 CI=1 webflow extension bundle --skip-update-check && node scripts/verify-production-bundle.mjs",
     "check": "tsc --noEmit",
     "lint": "pnpm run check",
     "pretest": "pnpm --filter @create-something/webflow-app-review-preflight build",
-    "serve": "pnpm build && webflow extension serve",
+    "serve": "pnpm build && DO_NOT_TRACK=1 webflow extension serve",
     "test": "vitest run"
   },
   "dependencies": {
@@ -28,6 +28,7 @@
     "@webflow/designer-extension-typings": "2.1.1",
     "@webflow/webflow-cli": "^1.8.38",
     "esbuild": "^0.24.2",
+    "jszip": "^3.10.1",
     "jsdom": "^27.4.0",
     "typescript": "^5.9.3",
     "vite": "^7.2.4",

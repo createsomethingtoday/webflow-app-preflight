@@ -1,4 +1,6 @@
-CREATE TABLE companion_pairings (
+PRAGMA foreign_keys = ON;
+
+CREATE TABLE IF NOT EXISTS companion_pairings (
   id TEXT PRIMARY KEY,
   code_sha256 TEXT NOT NULL UNIQUE,
   review_id TEXT NOT NULL,
@@ -14,10 +16,10 @@ CREATE TABLE companion_pairings (
   FOREIGN KEY (review_version_id) REFERENCES review_versions(id)
 );
 
-CREATE INDEX companion_pairings_code_lookup
+CREATE INDEX IF NOT EXISTS companion_pairings_code_lookup
   ON companion_pairings(code_sha256, expires_at, redeemed_at);
 
-CREATE TABLE companion_sessions (
+CREATE TABLE IF NOT EXISTS companion_sessions (
   id TEXT PRIMARY KEY,
   token_sha256 TEXT NOT NULL UNIQUE,
   pairing_id TEXT NOT NULL UNIQUE,
@@ -34,5 +36,5 @@ CREATE TABLE companion_sessions (
   FOREIGN KEY (review_version_id) REFERENCES review_versions(id)
 );
 
-CREATE INDEX companion_sessions_token_lookup
+CREATE INDEX IF NOT EXISTS companion_sessions_token_lookup
   ON companion_sessions(token_sha256, expires_at, revoked_at);

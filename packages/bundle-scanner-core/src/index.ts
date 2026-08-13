@@ -8,6 +8,7 @@
 
 // Scanner functions
 export { processZipFile, processZipBuffer } from './scanner/zip';
+export type { ZipExtractionResult } from './scanner/zip';
 export { buildInventory } from './scanner/inventory';
 export { runScan } from './scanner/scan';
 export { generateReport } from './scanner/report';
@@ -20,40 +21,11 @@ export { defaultConfig } from './policy/default-config';
 
 // Utilities
 export { matchesAnyGlob, shouldExclude, getExtension } from './utils/glob';
-export { generateRejectionEmail, generatePassEmail } from './utils/email';
-export { analyzeReportWithAi, GeminiProvider, createGeminiProviderFromEnv } from './utils/ai';
-export type { AiProvider } from './utils/ai';
 
-// Analytics
-export {
-  CorrelationAnalyzer,
-  scoreSubmissionPriority,
-  calculatePriorityScore,
-  sortQueueByPriority,
-  filterForReviewer,
-  ReviewRouter,
-  DEFAULT_PRIORITY_CONFIG,
-  DEFAULT_ROUTING_CONFIG,
-  DEFAULT_REVIEWERS
-} from './analytics';
-export type {
-  ReviewOutcome,
-  RecordedSubmission,
-  RuleCorrelation,
-  CorrelationReport,
-  CategoryInsight,
-  AssetType,
-  CreatorTier,
-  SubmissionContext,
-  PriorityScore,
-  PriorityFactor,
-  PriorityScoringConfig,
-  AssetCategory,
-  ReviewerProfile,
-  SubmissionForRouting,
-  RoutingDecision,
-  RoutingConfig
-} from './analytics';
+// NOTE: the former analytics (correlation/priority/routing), AI, and email
+// modules were removed from this package. They were never used by the review
+// preflight path, and the routing module embedded reviewer personnel data
+// that must not ship inside a library bundled into the review Worker.
 
 // All types
 export type {
@@ -89,12 +61,6 @@ export type {
   SourceMapReference,
   SourceMapSummary,
   ScanHistoryEntry,
-
-  // AI
-  AiAnalysisResult,
-  AiMissedRisk,
-  AiSuggestedRuleAddition,
-  AiSuggestedNoiseReduction,
 
   // Callbacks
   ProgressCallback

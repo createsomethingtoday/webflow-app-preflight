@@ -35,14 +35,6 @@
     "jszip": "^3.10.1",
     "minimatch": "^9.0.0"
   },
-  "peerDependencies": {
-    "@google/genai": ">=0.1.0"
-  },
-  "peerDependenciesMeta": {
-    "@google/genai": {
-      "optional": true
-    }
-  },
   "devDependencies": {
     "@types/node": "^20.0.0",
     "tsup": "^8.0.0",

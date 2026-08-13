@@ -56,6 +56,9 @@ export const defaultConfig: ScanConfig = {
     zipSafety: {
       preventZipSlip: true,
       maxTotalUnzippedBytes: 200 * 1024 * 1024, // 200MB
+      // Per-entry cap, checked against the declared uncompressed size before
+      // decompression so a single crafted entry cannot exhaust memory.
+      maxEntryUnzippedBytes: 100 * 1024 * 1024, // 100MB
       maxFiles: 5000
     }
   },

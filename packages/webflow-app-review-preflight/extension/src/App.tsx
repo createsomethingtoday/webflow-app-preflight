@@ -3,32 +3,16 @@ import type { ReviewGuidance } from '@create-something/webflow-app-review-prefli
 import type {
   PreflightIdentity,
   PreflightApi,
+  CreateHostedRuntimeReviewInput,
   ReviewComparison,
   ReviewSummary,
   RuntimeTestPackageInput,
   RuntimeTestPackageView,
   ReviewerHandoff,
-  StoredReview
+  StoredReview,
+  SubmissionReceipt
 } from './types';
-
-const SELECTED_REVIEW_KEY = 'app-review-preflight.selected-review';
-
-function rememberedReviewId(): string | null {
-  try {
-    return localStorage.getItem(SELECTED_REVIEW_KEY);
-  } catch {
-    return null;
-  }
-}
-
-function rememberReview(id: string | null): void {
-  try {
-    if (id) localStorage.setItem(SELECTED_REVIEW_KEY, id);
-    else localStorage.removeItem(SELECTED_REVIEW_KEY);
-  } catch {
-    // Durable review history still lives in D1 when iframe storage is unavailable.
-  }
-}
+import { PreflightAuthenticationError } from './api';
 
 function statusLabel(item: ReviewGuidance): string {
   if (item.label === 'Security blocker') return 'Blocker';
@@ -85,38 +69,362 @@ function duplicateRuntimePosition(
   return previous >= 0 ? previous : null;
 }
 
+interface RuntimeIssue {
+  title: string;
+  detail: string;
+  nextMove: string;
+  urls?: string[];
+}
+
+function runtimeIssues(testPackage: RuntimeTestPackageView): RuntimeIssue[] {
+  const evidence = testPackage.observation?.evidence;
+  if (!evidence || evidence.securityStatus === 'passed') return [];
+  const issues: RuntimeIssue[] = [];
+  const runtimeFiles = evidence.runtimeFiles;
+  const failedFiles = (predicate: (file: typeof runtimeFiles[number]) => boolean) =>
+    runtimeFiles.filter(predicate).map((file) => file.url);
+
+  if (!evidence.securityPredicates.publishedTarget) {
+    issues.push({
+      title: 'Published test page required',
+      detail: 'The test URL points to Designer or another page that cannot prove the live runtime.',
+      nextMove: 'Publish a dedicated Webflow test site, then prepare a new test package with that URL.'
+    });
+  }
+  if (!evidence.securityPredicates.runtimeReadyObserved) {
+    issues.push({
+      title: 'Ready signal not found',
+      detail: `Webflow did not find ${testPackage.lifecycle.readySelector} after the page loaded.`,
+      nextMove: 'Add this marker only after the runtime is usable, or prepare a new test package with the correct selector.'
+    });
+  }
+  if (!evidence.securityPredicates.runtimeLoadedByPage) {
+    issues.push({
+      title: 'Declared runtime did not load',
+      detail: 'The published page did not request every file in the reviewed runtime set.',
+      nextMove: 'Publish the exact runtime URL on the test page, then run the test again.',
+      urls: failedFiles((file) => !file.loadedByPage)
+    });
+  }
+  if (!evidence.securityPredicates.runtimeHashMatched) {
+    issues.push({
+      title: 'Runtime bytes changed',
+      detail: 'The downloaded JavaScript does not match the SHA-256 saved in this test package.',
+      nextMove: 'Restore the reviewed file, or download the current file and prepare a new test package with its new SHA-256.',
+      urls: failedFiles((file) => !file.hashMatched)
+    });
+  }
+  if (!evidence.securityPredicates.runtimeIntegrityMatched) {
+    const pageFiles = failedFiles(
+      (file) => file.loadMode !== 'runtime_child' && !file.integrityMatched
+    );
+    const childFiles = failedFiles(
+      (file) => file.loadMode === 'runtime_child' && !file.integrityMatched
+    );
+    if (pageFiles.length > 0) {
+      issues.push({
+        title: 'Script integrity is missing or wrong',
+        detail: 'A page-loaded script does not use the SRI value saved in this test package.',
+        nextMove: 'Add the saved integrity value and crossorigin="anonymous" to each script tag. Make sure the CDN allows cross-origin SRI.',
+        urls: pageFiles
+      });
+    }
+    if (childFiles.length > 0) {
+      issues.push({
+        title: 'Reviewed parent was not detected',
+        detail: 'A child runtime did not start from another pinned runtime in this test.',
+        nextMove: 'Load the child from a pinned parent, or mark it as page-loaded and publish its SRI on the script tag.',
+        urls: childFiles
+      });
+    }
+  }
+  if (!evidence.securityPredicates.noRuntimeCreatedScripts) {
+    issues.push({
+      title: 'New script elements were created',
+      detail: 'The runtime added script elements after the page began running.',
+      nextMove: 'Review every added script. Remove it, bundle it into reviewed code, or add it to the pinned runtime set.',
+      urls: evidence.runtimeCreatedScripts ?? []
+    });
+  }
+  if (!evidence.securityPredicates.noUnreviewedRuntimeScripts) {
+    issues.push({
+      title: 'Unreviewed scripts loaded',
+      detail: 'The page requested JavaScript that is not part of the reviewed runtime set.',
+      nextMove: 'Remove each script, bundle it into reviewed code, or add its immutable URL and SHA-256 to a new test package.',
+      urls: evidence.unreviewedRuntimeScripts ?? []
+    });
+  }
+  if (evidence.securityPredicates.proxyPolicySatisfied === false) {
+    issues.push({
+      title: 'Proxy check did not match the declaration',
+      detail: 'The browser result does not match the proxy setting saved in this test package.',
+      nextMove: 'Check the proxy declaration or endpoint, prepare a corrected test package, and run it again.'
+    });
+  }
+  if (evidence.securityPredicates.runtimeSourceMapAvailable === false) {
+    issues.push({
+      title: 'Runtime is not traceable to source',
+      detail: 'A pinned runtime served no reachable source map, so the executed code cannot be read alongside the bytes that ran.',
+      nextMove: 'Publish a source map next to each runtime file, or supply readable source matching the served runtime for a Webflow reviewer to confirm manually.',
+      urls: failedFiles((file) => !file.sourceMapAvailable)
+    });
+  }
+  return issues;
+}
+
+function ArtifactFileField({
+  id,
+  label,
+  buttonLabel,
+  accept,
+  file,
+  disabled,
+  onChange
+}: {
+  id: string;
+  label: string;
+  buttonLabel: string;
+  accept: string;
+  file: File | null;
+  disabled: boolean;
+  onChange: (file: File | null) => void;
+}) {
+  return (
+    <div className="artifact-field">
+      <label className="artifact-field-label" htmlFor={id}>{label}</label>
+      <div className="artifact-field-control">
+        <label
+          className={`button button-secondary artifact-field-button${disabled ? ' is-disabled' : ''}`}
+          htmlFor={id}
+        >
+          {file ? file.name : buttonLabel}
+        </label>
+        <input
+          id={id}
+          className="visually-hidden"
+          type="file"
+          accept={accept}
+          disabled={disabled}
+          onChange={(event) => {
+            onChange(event.currentTarget.files?.[0] ?? null);
+            event.currentTarget.value = '';
+          }}
+        />
+      </div>
+    </div>
+  );
+}
+
 function UploadCard({
   busy,
-  onFile
+  onRun
 }: {
   busy: boolean;
-  onFile: (file: File) => void;
+  onRun: (bundle: File, sourceMaps: File | null) => void;
 }) {
   const id = useId();
+  const [bundle, setBundle] = useState<File | null>(null);
+  const [sourceMaps, setSourceMaps] = useState<File | null>(null);
   return (
-    <section className="upload-card" aria-labelledby={`${id}-title`}>
+    <section className="upload-card entry-card" aria-labelledby={`${id}-title`}>
       <div className="upload-icon" aria-hidden="true">↑</div>
+      <span className="eyebrow">ZIP bundle</span>
       <h2 id={`${id}-title`}>Upload your app bundle</h2>
       <p>
-        Start with the exact zip you plan to submit. We will map what is included,
-        what still needs verification, and your next move.
+        Use the same private artifacts you will attach to the official submission
+        form. Preflight validates them together and creates a receipt for
+        reconciliation.
       </p>
-      <label className="button button-primary" htmlFor={id}>
-        {busy ? 'Running preflight…' : 'Choose bundle'}
-      </label>
-      <input
-        id={id}
-        className="visually-hidden"
-        type="file"
+      <ArtifactFileField
+        id={`${id}-bundle`}
+        label="App bundle"
+        buttonLabel="Choose bundle"
         accept=".zip,application/zip"
+        file={bundle}
         disabled={busy}
-        onChange={(event) => {
-          const file = event.currentTarget.files?.[0];
-          if (file) onFile(file);
-          event.currentTarget.value = '';
-        }}
+        onChange={setBundle}
       />
-      <span className="upload-note">Zip bundles up to 10 MB · saved automatically</span>
+      <ArtifactFileField
+        id={`${id}-maps`}
+        label="Source maps for review"
+        buttonLabel="Choose source maps (.zip or .map)"
+        accept=".map,.zip,application/json,application/zip"
+        file={sourceMaps}
+        disabled={busy}
+        onChange={setSourceMaps}
+      />
+      <p className="artifact-field-note">
+        Upload the same private source-map ZIP (or one .map file) you will submit
+        through the official form. Required when the bundle is minified or
+        generated. It is never published.
+      </p>
+      <button
+        className="button button-primary"
+        disabled={busy || !bundle}
+        onClick={() => {
+          if (bundle) onRun(bundle, sourceMaps);
+        }}
+      >
+        {busy ? 'Running preflight…' : 'Run preflight'}
+      </button>
+      <span className="upload-note">Private artifacts up to 10 MB each · saved automatically</span>
+    </section>
+  );
+}
+
+function copyToClipboard(value: string): void {
+  void navigator.clipboard?.writeText(value).catch(() => {
+    // Copy is a convenience; the code stays visible for manual selection.
+  });
+}
+
+function SubmissionReceiptCard({
+  receipt,
+  busy,
+  onReissue
+}: {
+  receipt: SubmissionReceipt | null;
+  busy: boolean;
+  onReissue: () => void;
+}) {
+  const [copied, setCopied] = useState(false);
+  useEffect(() => {
+    if (!copied) return;
+    const timer = setTimeout(() => setCopied(false), 2000);
+    return () => clearTimeout(timer);
+  }, [copied]);
+  return (
+    <section className="revision-card submission-receipt-card">
+      <div>
+        <span className="eyebrow">Submission receipt</span>
+        <h2>Reconcile this run with your submission</h2>
+        <p>
+          Paste this receipt into the Marketplace submission form. It lets the
+          review team confirm the form&apos;s artifacts are the exact ones this
+          preflight validated. It references this run only — it is not an
+          approval.
+        </p>
+      </div>
+      {receipt ? (
+        <div className="submission-receipt-row">
+          <code className="submission-receipt-code">{receipt.code}</code>
+          <button
+            className="button button-secondary"
+            type="button"
+            onClick={() => {
+              copyToClipboard(receipt.code);
+              setCopied(true);
+            }}
+          >
+            {copied ? 'Copied' : 'Copy receipt'}
+          </button>
+        </div>
+      ) : (
+        <button
+          className="button button-secondary"
+          type="button"
+          disabled={busy}
+          onClick={onReissue}
+        >
+          {busy ? 'Issuing…' : 'Issue a submission receipt'}
+        </button>
+      )}
+    </section>
+  );
+}
+
+function HostedRuntimeCard({
+  busy,
+  onStart
+}: {
+  busy: boolean;
+  onStart: (input: CreateHostedRuntimeReviewInput) => void;
+}) {
+  const titleId = useId();
+  const [expanded, setExpanded] = useState(false);
+  const [appName, setAppName] = useState('');
+  const [runtimeUrls, setRuntimeUrls] = useState('');
+
+  if (!expanded) {
+    return (
+      <section className="runtime-start-card entry-card" aria-labelledby={titleId}>
+        <div className="runtime-start-icon" aria-hidden="true">↗</div>
+        <div>
+          <span className="eyebrow">Hosted JavaScript</span>
+          <h2 id={titleId}>Review production scripts</h2>
+          <p>
+            Use this path for a Data Client or another app whose code runs from public URLs.
+          </p>
+        </div>
+        <button
+          className="button button-secondary"
+          disabled={busy}
+          onClick={() => setExpanded(true)}
+        >
+          Enter script URLs
+        </button>
+      </section>
+    );
+  }
+
+  return (
+    <section className="runtime-start-card runtime-start-form" aria-labelledby={titleId}>
+      <div>
+        <span className="eyebrow">Hosted JavaScript</span>
+        <h2 id={titleId}>Add production scripts</h2>
+        <p>
+          Add every JavaScript URL that runs in the same test, in execution order. You will pin
+          the exact file contents before Webflow runs the browser test.
+        </p>
+      </div>
+      <form
+        onSubmit={(event) => {
+          event.preventDefault();
+          onStart({
+            appName: appName.trim(),
+            runtimeUrls: runtimeUrls
+              .split(/\r?\n/)
+              .map((value) => value.trim())
+              .filter(Boolean)
+          });
+        }}
+      >
+        <label>
+          App name
+          <input
+            aria-label="App name"
+            required
+            maxLength={120}
+            value={appName}
+            onChange={(event) => setAppName(event.target.value)}
+            placeholder="Your app name"
+          />
+        </label>
+        <label>
+          Production JavaScript URLs
+          <textarea
+            aria-label="Hosted runtime URLs"
+            required
+            rows={4}
+            value={runtimeUrls}
+            onChange={(event) => setRuntimeUrls(event.target.value)}
+            placeholder={'https://cdn.example.com/runtime-v1.js\nhttps://cdn.example.com/child-v1.js'}
+          />
+          <small>Enter one public HTTPS URL per line. Do not include credentials.</small>
+        </label>
+        <div className="runtime-start-actions">
+          <button
+            className="button button-tertiary"
+            type="button"
+            onClick={() => setExpanded(false)}
+          >
+            Cancel
+          </button>
+          <button className="button button-primary" disabled={busy} type="submit">
+            {busy ? 'Saving scripts…' : 'Continue'}
+          </button>
+        </div>
+      </form>
     </section>
   );
 }
@@ -138,20 +446,44 @@ function History({
         <span>{items.length}</span>
       </div>
       <div className="history-list">
-        {items.map((item) => (
-          <button
-            className="history-row"
-            key={item.id}
-            disabled={busy}
-            onClick={() => onSelect(item.id)}
-          >
-            <span>
-              <strong>{item.name}</strong>
-              <small>Revision {item.latestSequence} · {formatDate(item.updatedAt)}</small>
-            </span>
-            <span className={`readiness-dot ${item.readiness}`} aria-label={item.readiness} />
-          </button>
-        ))}
+        {items.map((item) => {
+          const runtimePending = item.coverage.some(
+            (coverage) =>
+              coverage.surface === 'production_runtime' &&
+              coverage.status === 'needs_verification'
+          );
+          const status = item.readiness === 'changes_required'
+            ? 'changes_required'
+            : runtimePending
+              ? 'needs_verification'
+              : 'ready';
+          const statusLabel = status === 'changes_required'
+            ? 'Changes needed'
+            : status === 'needs_verification'
+              ? 'Runtime test needed'
+              : 'Ready for review';
+          return (
+            <button
+              className="history-row"
+              key={item.id}
+              disabled={busy}
+              onClick={() => onSelect(item.id)}
+            >
+              <span>
+                <strong>{item.name}</strong>
+                <small>
+                  {item.reviewType === 'runtime_manifest'
+                    ? 'Runtime manifest'
+                    : `Revision ${item.latestSequence}`} · {formatDate(item.updatedAt)}
+                </small>
+              </span>
+              <span className={`readiness-status ${status}`}>
+                <span className={`readiness-dot ${status}`} aria-hidden="true" />
+                {statusLabel}
+              </span>
+            </button>
+          );
+        })}
       </div>
     </section>
   );
@@ -241,6 +573,7 @@ function RuntimeObservationCard({
   testPackages,
   busy,
   runtimeError,
+  authenticatedSiteId,
   onPrepare,
   onRun,
   onRefresh
@@ -249,6 +582,7 @@ function RuntimeObservationCard({
   testPackages: RuntimeTestPackageView[];
   busy: boolean;
   runtimeError: string | null;
+  authenticatedSiteId: string | null;
   onPrepare: (input: RuntimeTestPackageInput) => void;
   onRun: (testPackageId: string) => void;
   onRefresh: () => void;
@@ -261,19 +595,29 @@ function RuntimeObservationCard({
   ) ?? null;
   const discoveredArtifactUrl =
     review.latestVersion.result.runtime.references.find((value) => !value.includes('{')) ?? '';
+  const discoveredArtifacts = review.latestVersion.result.runtime.references
+    .filter((value) => !value.includes('{'))
+    .map((url) => ({ url, sha256: '', integrity: '', loadMode: 'document' as const }));
   const dialogTitle = useId();
   const [confirm, setConfirm] = useState(false);
   const [targetUrl, setTargetUrl] = useState('');
-  const [sandboxInstallationId, setSandboxInstallationId] = useState('');
+  const [sandboxInstallationId, setSandboxInstallationId] = useState(
+    authenticatedSiteId ?? ''
+  );
   const [runtimeArtifacts, setRuntimeArtifacts] = useState<
     RuntimeTestPackageInput['runtimeArtifacts']
-  >([{ url: discoveredArtifactUrl, sha256: '', integrity: '', loadMode: 'document' }]);
+  >(discoveredArtifacts.length > 0
+    ? discoveredArtifacts
+    : [{ url: discoveredArtifactUrl, sha256: '', integrity: '', loadMode: 'document' }]);
   const [readySelector, setReadySelector] = useState('[data-runtime-ready]');
   const [proxyMode, setProxyMode] = useState<'probe' | 'none_declared'>('probe');
   const [proxyTemplate, setProxyTemplate] = useState('');
   const [showNewPackage, setShowNewPackage] = useState(false);
   const [inputError, setInputError] = useState<string | null>(null);
   const cardRef = useRef<HTMLElement>(null);
+  const errorRef = useRef<HTMLDivElement>(null);
+  const setupButtonRef = useRef<HTMLButtonElement>(null);
+  const cancelConfirmationRef = useRef<HTMLButtonElement>(null);
   const actionableError = inputError;
   const trustLabel = latest?.observation?.trust === 'webflow_observed'
     ? 'Webflow observed'
@@ -286,6 +630,8 @@ function RuntimeObservationCard({
     latest.observation.status === 'failed' ||
     latest.observation.status === 'expired' ||
     latest.observation.status === 'revoked';
+  const observedIssues = latest ? runtimeIssues(latest) : [];
+  const runtimeOnly = review.latestVersion.result.artifact.kind === 'runtime_manifest';
 
   useEffect(() => {
     setShowNewPackage(false);
@@ -294,14 +640,16 @@ function RuntimeObservationCard({
   const fillFromPackage = (source: RuntimeTestPackageView | null) => {
     setInputError(null);
     setTargetUrl(source?.target.url ?? '');
-    setSandboxInstallationId(source?.sandboxInstallationId ?? '');
+    setSandboxInstallationId(authenticatedSiteId ?? source?.sandboxInstallationId ?? '');
     setRuntimeArtifacts(
       source?.runtimeArtifacts.length
         ? source.runtimeArtifacts.map((artifact) => ({
             ...artifact,
             loadMode: artifact.loadMode ?? 'document'
           }))
-        : [{ url: discoveredArtifactUrl, sha256: '', integrity: '', loadMode: 'document' }]
+        : discoveredArtifacts.length > 0
+          ? discoveredArtifacts
+          : [{ url: discoveredArtifactUrl, sha256: '', integrity: '', loadMode: 'document' }]
     );
     setReadySelector(source?.lifecycle.readySelector ?? '[data-runtime-ready]');
     setProxyMode(source?.negativeProxyProbe.mode === 'none_declared' ? 'none_declared' : 'probe');
@@ -318,14 +666,27 @@ function RuntimeObservationCard({
   }, [review.latestVersion.id, previous?.id]);
 
   useEffect(() => {
+    if (authenticatedSiteId) setSandboxInstallationId(authenticatedSiteId);
+  }, [authenticatedSiteId]);
+
+  useEffect(() => {
     setInputError(runtimeError);
   }, [runtimeError]);
 
   useEffect(() => {
-    if (!actionableError || !cardRef.current) return;
-    cardRef.current.focus();
-    cardRef.current.scrollIntoView?.({ behavior: 'smooth', block: 'center' });
+    if (!actionableError || !errorRef.current) return;
+    errorRef.current.focus({ preventScroll: true });
+    errorRef.current.scrollIntoView?.({ behavior: 'smooth', block: 'center' });
   }, [actionableError]);
+
+  useEffect(() => {
+    if (confirm) cancelConfirmationRef.current?.focus();
+  }, [confirm]);
+
+  const closeConfirmation = () => {
+    setConfirm(false);
+    setupButtonRef.current?.focus();
+  };
 
   const submit = () => {
     onPrepare({
@@ -356,8 +717,8 @@ function RuntimeObservationCard({
     >
       <div className="runtime-heading">
         <div>
-          <span className="eyebrow">Complete behavior test</span>
-          <h2 id="observation-title">Webflow runtime observation</h2>
+          <span className="eyebrow">Webflow browser test</span>
+          <h2 id="observation-title">Test the published runtime</h2>
         </div>
         <span
           className={`manual-pill ${latest?.observation?.trust ? 'approved' : ''}`}
@@ -367,20 +728,26 @@ function RuntimeObservationCard({
         </span>
       </div>
       <p>
-        Make a dedicated Webflow test installation available. Webflow runs the browser
-        in E2B and captures the evidence automatically; output from your computer is not
-        used as review evidence.
+        Webflow opens the published test site in a fresh browser and records what the runtime
+        loads. The result helps a reviewer; it does not approve or reject the app.
       </p>
-      {actionableError ? <div className="error-banner" role="alert">{actionableError}</div> : null}
+      {actionableError ? (
+        <div ref={errorRef} className="error-banner" role="alert" tabIndex={-1}>
+          {actionableError}
+        </div>
+      ) : null}
 
       {latest && !showNewPackage ? (
         <div className="observation-status" role="status">
           <div className="checkpoint-row">
             <span className="checkpoint-number">1</span>
             <div>
-              <strong>Test package ready</strong>
+              <strong>Test setup saved</strong>
               <p>{latest.target.url}</p>
-              <small>Bound to bundle {latest.bundleSha256.slice(0, 12)}…</small>
+              <small>
+                Bound to {runtimeOnly ? 'runtime manifest' : 'bundle'}{' '}
+                {latest.bundleSha256.slice(0, 12)}…
+              </small>
             </div>
           </div>
           {latest.observation?.trust === 'webflow_observed' && latest.observation.evidence ? (
@@ -388,10 +755,10 @@ function RuntimeObservationCard({
               <div className="checkpoint-row complete">
                 <span className="checkpoint-number">2</span>
                 <div>
-                  <strong>Evidence captured by Webflow</strong>
+                  <strong>Webflow captured the result</strong>
                   <p>
-                    {latest.observation.evidence.runtimeFiles.length} runtime{' '}
-                    {latest.observation.evidence.runtimeFiles.length === 1 ? 'file' : 'files'} verified
+                    {latest.observation.evidence.runtimeFiles.length} declared runtime{' '}
+                    {latest.observation.evidence.runtimeFiles.length === 1 ? 'file' : 'files'} observed
                     {' · '}{latest.observation.evidence.artifactCount} evidence{' '}
                     {latest.observation.evidence.artifactCount === 1 ? 'artifact' : 'artifacts'}
                   </p>
@@ -402,12 +769,12 @@ function RuntimeObservationCard({
                   <strong>
                     {latest.observation.evidence.securityStatus === 'passed'
                       ? 'Runtime security passed'
-                      : 'Runtime security blocked'}
+                      : `${observedIssues.length} ${observedIssues.length === 1 ? 'check needs' : 'checks need'} attention`}
                   </strong>
                   <span>
                     {latest.observation.evidence.securityStatus === 'passed'
                       ? 'Published code matched its reviewed hash and SRI requirements.'
-                      : latest.observation.evidence.blockers.join(' ')}
+                      : 'Fix each item, publish the test site, then run the test again.'}
                   </span>
                 </div>
                 <div
@@ -435,6 +802,36 @@ function RuntimeObservationCard({
                   </span>
                 </div>
               </div>
+              {observedIssues.length > 0 ? (
+                <section className="runtime-issues" aria-labelledby="runtime-issues-title">
+                  <div className="runtime-issues-heading">
+                    <h3 id="runtime-issues-title">What to fix</h3>
+                    <span>{observedIssues.length}</span>
+                  </div>
+                  <ol>
+                    {observedIssues.map((issue) => (
+                      <li key={issue.title}>
+                        <div className="runtime-issue-number" aria-hidden="true" />
+                        <div>
+                          <strong>{issue.title}</strong>
+                          <p>{issue.detail}</p>
+                          {issue.urls && issue.urls.length > 0 ? (
+                            <ul className="runtime-issue-files">
+                              {issue.urls.map((url) => (
+                                <li key={url}><code>{runtimeFileName(url) ?? url}</code></li>
+                              ))}
+                            </ul>
+                          ) : null}
+                          <div className="runtime-issue-action">
+                            <span>Next step</span>
+                            <p>{issue.nextMove}</p>
+                          </div>
+                        </div>
+                      </li>
+                    ))}
+                  </ol>
+                </section>
+              ) : null}
               <details
                 className="runtime-file-results"
                 open={latest.observation.evidence.securityStatus === 'blocked' || undefined}
@@ -468,6 +865,11 @@ function RuntimeObservationCard({
                                 ? 'SRI matched'
                                 : 'SRI mismatch'}
                           </span>
+                          <span className={runtimeFile.sourceMapAvailable ? 'pass' : 'fail'}>
+                            {runtimeFile.sourceMapAvailable
+                              ? 'Source map reachable'
+                              : 'No source map'}
+                          </span>
                         </div>
                       </li>
                     );
@@ -491,14 +893,14 @@ function RuntimeObservationCard({
               <span className="checkpoint-number">2</span>
               <div>
                 <strong>Webflow test {latest.observation.status}</strong>
-                <p>E2B owns the browser and will return sanitized evidence.</p>
+                <p>Webflow is running the test in a fresh browser.</p>
               </div>
             </div>
           ) : (
             <div className="checkpoint-row pending">
               <div>
-                <strong>Ready to run</strong>
-                <p>Start a fresh Webflow-controlled browser test when this installation is ready.</p>
+                <strong>Ready to test</strong>
+                <p>Run the test after the scripts are published on this test site.</p>
               </div>
             </div>
           )}
@@ -509,14 +911,14 @@ function RuntimeObservationCard({
               onClick={() => onRun(latest.id)}
             >
               {busy
-                ? 'Starting Webflow run…'
+                ? 'Starting Webflow test…'
                 : latest.observation
-                  ? 'Run test again'
-                  : 'Run test now'}
+                  ? 'Run Webflow test again'
+                  : 'Run Webflow test'}
             </button>
           ) : null}
           <button className="button button-secondary" disabled={busy} onClick={onRefresh}>
-            Check run status
+            Refresh results
           </button>
           <button
             className="button button-tertiary"
@@ -526,9 +928,8 @@ function RuntimeObservationCard({
               setShowNewPackage(true);
             }}
           >
-            Prepare another test package
+            Edit test setup
           </button>
-          <small>Partner-supplied settings cannot become Webflow-observed evidence by themselves.</small>
         </div>
       ) : (
         <form
@@ -553,14 +954,13 @@ function RuntimeObservationCard({
             <div className="prefill-note" role="status">
               <strong>Previous setup loaded</strong>
               <p>
-                We reused the last test site, runtime pins, selector, and proxy check. Review the
-                values before continuing. Webflow will verify every runtime file and its SRI again
-                for this bundle.
+                We reused the last test site, script pins, ready signal, and proxy check. Review
+                each value before continuing; Webflow will test every script again.
               </p>
             </div>
           ) : null}
           <fieldset>
-            <legend><span>1</span> Dedicated test installation</legend>
+            <legend><span>1</span> Use a dedicated test site</legend>
             <label>
               Published Webflow test URL
               <input aria-label="Published Webflow test URL" required type="url" value={targetUrl} onChange={(event) => setTargetUrl(event.target.value)} placeholder="https://app-review-sandbox.webflow.io" />
@@ -571,18 +971,24 @@ function RuntimeObservationCard({
             </label>
             <label>
               Webflow installation or site ID
-              <input aria-label="Webflow installation or site ID" required value={sandboxInstallationId} onChange={(event) => setSandboxInstallationId(event.target.value)} placeholder="webflow-sandbox-site-123" />
+              <input
+                aria-label="Webflow installation or site ID"
+                required
+                readOnly
+                value={sandboxInstallationId}
+                placeholder="Open this extension from the dedicated test site"
+              />
               <small>
-                Copy the installation ID supplied by your app, or the site ID shown in Webflow
-                Site settings. A site slug is not a site ID.
+                Preflight fills this from the site open in Designer so the test cannot be attached
+                to a different site.
               </small>
             </label>
           </fieldset>
           <fieldset>
-            <legend><span>2</span> Pin the reviewed runtime set</legend>
+            <legend><span>2</span> Pin each production script</legend>
             <p className="runtime-set-intro">
-              List every JavaScript file that runs in this test. Each file must match its own
-              SHA-256 and SRI pin.
+              List every JavaScript file that runs in this test. Each one needs its exact SHA-256;
+              Preflight calculates the matching SRI value.
             </p>
             <details className="runtime-guide">
               <summary>How to find and pin runtime files</summary>
@@ -706,9 +1112,9 @@ openssl dgst -sha256 -binary /tmp/reviewed-runtime.js \\
                     ) : null}
                   </div>
                   <label>
-                    {`Immutable runtime URL${suffix}`}
+                    {`Versioned runtime URL${suffix}`}
                     <input
-                      aria-label={`Immutable runtime URL${suffix}`}
+                      aria-label={`Versioned runtime URL${suffix}`}
                       required
                       type="url"
                       value={artifact.url}
@@ -716,8 +1122,8 @@ openssl dgst -sha256 -binary /tmp/reviewed-runtime.js \\
                       onChange={(event) => update('url', event.target.value)}
                     />
                     <small>
-                      Use the exact JavaScript request from the published test page. Prefer a
-                      versioned URL whose bytes will not change after review.
+                      Use the exact JavaScript request from the published test page. The URL should
+                      keep serving the same bytes after review.
                     </small>
                     {duplicateIndex !== null ? (
                       <small className="field-error">
@@ -801,29 +1207,72 @@ openssl dgst -sha256 -binary /tmp/reviewed-runtime.js \\
               <button
                 className="button button-secondary"
                 type="button"
-                disabled={runtimeArtifacts.length >= 8}
                 onClick={() => {
                   setRuntimeArtifacts((current) =>
-                    current.length >= 8
-                      ? current
-                      : [...current, {
-                          url: '',
-                          sha256: '',
-                          integrity: '',
-                          loadMode: 'runtime_child'
-                        }]
+                    [...current, {
+                      url: '',
+                      sha256: '',
+                      integrity: '',
+                      loadMode: 'runtime_child'
+                    }]
                   );
                 }}
               >
                 Add another runtime file
               </button>
-              {runtimeArtifacts.length >= 8 ? (
-                <small>Eight runtime files is the limit for one test package.</small>
-              ) : null}
             </details>
           </fieldset>
+          <fieldset className="proxy-choice proxy-choice-primary">
+            <legend>Does your app proxy or fetch another URL for customers?</legend>
+            <p className="field-intro">
+              Choose the option that matches your app. This lets us test a real proxy when one
+              exists, without asking you to invent a test for a feature you do not have.
+            </p>
+            <label>
+              <input
+                type="radio"
+                name="proxy-mode"
+                value="probe"
+                checked={proxyMode === 'probe'}
+                onChange={() => setProxyMode('probe')}
+              />
+              Yes — test my real proxy endpoint
+            </label>
+            <label>
+              <input
+                type="radio"
+                name="proxy-mode"
+                value="none_declared"
+                checked={proxyMode === 'none_declared'}
+                onChange={() => {
+                  setProxyMode('none_declared');
+                  setProxyTemplate('');
+                }}
+              />
+              No — this app has no proxy or fetch-through surface
+            </label>
+            {proxyMode === 'probe' ? (
+              <label>
+                Proxy probe URL template
+                <input aria-label="Proxy probe URL template" required value={proxyTemplate} onChange={(event) => setProxyTemplate(event.target.value)} placeholder="https://api.example.com/proxy?url={canaryUrl}" />
+                <small>
+                  Use your app's real proxy or fetch-through endpoint and include{' '}
+                  <code>{'{canaryUrl}'}</code> exactly once. If you are unsure whether your app
+                  has one, choose “No” and flag it for the human reviewer.
+                </small>
+              </label>
+            ) : (
+              <div className="proxy-declaration" role="status">
+                <strong>Proxy check: not applicable</strong>
+                <p>
+                  The package records your declaration for the reviewer. Webflow will not run a
+                  proxy test or treat this declaration as proof.
+                </p>
+              </div>
+            )}
+          </fieldset>
           <details className="advanced-settings">
-            <summary>Runtime-ready selector and proxy check</summary>
+            <summary>Ready signal</summary>
             <label>
               Ready selector
               <input aria-label="Ready selector" required value={readySelector} onChange={(event) => setReadySelector(event.target.value)} />
@@ -835,92 +1284,51 @@ openssl dgst -sha256 -binary /tmp/reviewed-runtime.js \\
                 selector—have the runtime's ready event add a data attribute first.
               </small>
             </label>
-            <fieldset className="proxy-choice">
-              <legend>Proxy or fetch-through surface</legend>
-              <label>
-                <input
-                  type="radio"
-                  name="proxy-mode"
-                  value="probe"
-                  checked={proxyMode === 'probe'}
-                  onChange={() => setProxyMode('probe')}
-                />
-                Yes — test my real proxy endpoint
-              </label>
-              <label>
-                <input
-                  type="radio"
-                  name="proxy-mode"
-                  value="none_declared"
-                  checked={proxyMode === 'none_declared'}
-                  onChange={() => {
-                    setProxyMode('none_declared');
-                    setProxyTemplate('');
-                  }}
-                />
-                No — this app has no proxy or fetch-through surface
-              </label>
-              <small>
-                “No” is a developer declaration, not observed proof. It remains visible to the
-                reviewer and will never be labeled “Proxy canary blocked.”
-              </small>
-            </fieldset>
-            {proxyMode === 'probe' ? (
-              <label>
-                Proxy probe URL template
-                <input aria-label="Proxy probe URL template" required value={proxyTemplate} onChange={(event) => setProxyTemplate(event.target.value)} placeholder="https://api.example.com/proxy?url={canaryUrl}" />
-                <small>
-                  Use your app's real proxy or fetch-through endpoint and include{' '}
-                  <code>{'{canaryUrl}'}</code> exactly once. Do not use an example URL or invent a
-                  blocked response.
-                </small>
-              </label>
-            ) : (
-              <div className="proxy-declaration" role="status">
-                <strong>Proxy check: not applicable</strong>
-                <p>
-                  The package will record that you declared no proxy surface. Webflow will not
-                  send a canary request or turn this declaration into observed blocking evidence.
-                </p>
-              </div>
-            )}
           </details>
-          <button className="button button-primary" disabled={busy} type="submit">
-            Prepare Webflow run
+          <button ref={setupButtonRef} className="button button-primary" disabled={busy} type="submit">
+            Review test setup
           </button>
-          <small>No customer sites, account passwords, session exports, or license secrets.</small>
+          <small>Do not use a customer site or enter passwords, session exports, or license secrets.</small>
         </form>
       )}
 
       <details className="trust-details">
         <summary>What the evidence labels mean</summary>
         <dl>
-          <div><dt>Partner supplied</dt><dd>Test settings only. Not review evidence.</dd></div>
-          <div><dt>Webflow observed</dt><dd>Captured automatically in a Webflow-controlled browser.</dd></div>
-          <div><dt>Human verified</dt><dd>A reviewer separately confirmed the evidence and conclusion.</dd></div>
+          <div><dt>Partner supplied</dt><dd>The developer entered these settings. They are not evidence.</dd></div>
+          <div><dt>Webflow observed</dt><dd>Webflow captured this result in a controlled browser.</dd></div>
+          <div><dt>Human verified</dt><dd>A reviewer checked the evidence and conclusion.</dd></div>
         </dl>
       </details>
 
       {confirm ? (
-        <div className="dialog-backdrop" role="dialog" aria-modal="true" aria-labelledby={dialogTitle}>
+        <div
+          className="dialog-backdrop"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby={dialogTitle}
+          onKeyDown={(event) => {
+            if (event.key === 'Escape') closeConfirmation();
+          }}
+        >
           <div className="dialog-card">
-            <span className="eyebrow">Partner checkpoint</span>
-            <h2 id={dialogTitle}>Confirm dedicated test access</h2>
+            <span className="eyebrow">Before you continue</span>
+            <h2 id={dialogTitle}>Confirm test access</h2>
             <p>
-              Confirm this is a Webflow-controlled test installation with no customer data,
-              and that its license is allowlisted for the next 24 hours. Webflow—not this browser—will run the test.
+              Use a dedicated Webflow test site with no customer data. Allow this site to run the
+              app for the next 24 hours. Webflow—not this browser—will run the test.
             </p>
             <p>
               {runtimeArtifacts.length} runtime {runtimeArtifacts.length === 1 ? 'file' : 'files'} will
               be tested together.
             </p>
             <ul>
-              <li>Runtime bytes are pinned to this bundle version</li>
-              <li>Evidence is captured in a fresh Webflow browser</li>
-              <li>The result cannot approve or reject the app</li>
+              <li>Each production script is pinned to the bytes you reviewed</li>
+              <li>Webflow captures the result in a fresh browser</li>
+              <li>A human reviewer makes the final decision</li>
             </ul>
             <div className="dialog-actions">
-              <button className="button button-secondary" onClick={() => setConfirm(false)}>Cancel</button>
+              <button ref={cancelConfirmationRef} className="button button-secondary" onClick={closeConfirmation}>Cancel</button>
               <button
                 className="button button-primary"
                 onClick={() => {
@@ -928,7 +1336,7 @@ openssl dgst -sha256 -binary /tmp/reviewed-runtime.js \\
                   submit();
                 }}
               >
-                Confirm test package
+                Save test setup
               </button>
             </div>
           </div>
@@ -944,6 +1352,9 @@ function ReviewDetail({
   runtimeTestPackages,
   busy,
   runtimeError,
+  authenticatedSiteId,
+  submissionReceipt,
+  onReissueReceipt,
   onRevision,
   onPrepareRuntimePackage,
   onRunRuntimeObservation,
@@ -958,7 +1369,10 @@ function ReviewDetail({
   runtimeTestPackages: RuntimeTestPackageView[];
   busy: boolean;
   runtimeError: string | null;
-  onRevision: (file: File) => void;
+  authenticatedSiteId: string | null;
+  submissionReceipt: SubmissionReceipt | null;
+  onReissueReceipt: () => void;
+  onRevision: (file: File, sourceMaps: File | null) => void;
   onPrepareRuntimePackage: (input: RuntimeTestPackageInput) => void;
   onRunRuntimeObservation: (testPackageId: string) => void;
   onRefreshRuntimePackages: () => void;
@@ -968,52 +1382,74 @@ function ReviewDetail({
   onBack: () => void;
 }) {
   const result = review.latestVersion.result;
+  const runtimeOnly = result.artifact.kind === 'runtime_manifest';
   const revisionId = useId();
+  const [revisionBundle, setRevisionBundle] = useState<File | null>(null);
+  const [revisionSourceMaps, setRevisionSourceMaps] = useState<File | null>(null);
   const blockerText = result.summary.securityBlockers === 1 ? 'blocker' : 'blockers';
+  const readinessMessage = runtimeOnly
+    ? 'Script list saved. Set up a Webflow test to observe the published runtime.'
+    : result.summary.securityBlockers > 0
+    ? `Fix ${result.summary.securityBlockers} ${blockerText} before review.`
+    : result.runtime.status === 'discovered_unverified'
+      ? 'Bundle scan finished. Test the production runtime next.'
+      : 'Preflight checks complete. Send the evidence to a human reviewer.';
 
   return (
     <main className="review-view">
       <button className="back-button" onClick={onBack}>← All runs</button>
       <header className="review-header">
-        <div className="eyebrow">Revision {review.latestVersion.sequence}</div>
+        <div className="eyebrow">
+          {runtimeOnly ? 'Data Client runtime' : `Revision ${review.latestVersion.sequence}`}
+        </div>
         <h2>{result.artifactScope.appName ?? review.name}</h2>
         <p>
-          {result.summary.securityBlockers > 0
-            ? `${result.summary.securityBlockers} ${blockerText} before you are ready`
-            : 'No deterministic security blockers found'}
+          {readinessMessage}
         </p>
-        <div className="saved-state"><span>✓</span> Checkpoint saved</div>
+        <div className="saved-state"><span>✓</span> Saved</div>
       </header>
 
       {comparison ? <Comparison comparison={comparison} /> : null}
       <Coverage review={review} testPackages={runtimeTestPackages} />
 
-      <section className="summary-grid" aria-label="Finding summary">
+      <SubmissionReceiptCard
+        receipt={submissionReceipt}
+        busy={busy}
+        onReissue={onReissueReceipt}
+      />
+
+      {!runtimeOnly ? <section className="summary-grid" aria-label="Finding summary">
         <div><strong>{result.summary.securityBlockers}</strong><span>Security blockers</span></div>
         <div><strong>{result.summary.requiredUpdates}</strong><span>Required updates</span></div>
         <div><strong>{result.summary.suggestedUpdates}</strong><span>Suggested updates</span></div>
-      </section>
+      </section> : null}
 
-      <section className="findings" aria-labelledby="findings-title">
-        <div className="section-heading">
-          <h2 id="findings-title">Review feedback</h2>
-          <span>{result.guidance.length}</span>
-        </div>
-        {result.guidance.length > 0 ? (
-          result.guidance.map((item) => <GuidanceCard item={item} key={item.id} />)
-        ) : (
-          <div className="success-card">
-            <strong>Ready for teammate review</strong>
-            <p>The bundle scan has no remaining deterministic findings.</p>
+      {!runtimeOnly || result.guidance.length > 0 ? (
+        <section className="findings" aria-labelledby="findings-title">
+          <div className="section-heading">
+            <h2 id="findings-title">Review feedback</h2>
+            <span>{result.guidance.length}</span>
           </div>
-        )}
-      </section>
+          {result.guidance.length > 0 ? (
+            result.guidance.map((item) => <GuidanceCard item={item} key={item.id} />)
+          ) : (
+            <div className="success-card">
+              <strong>Ready for human review</strong>
+              <p>
+                The bundle scan found no remaining deterministic issues. A reviewer still makes
+                the Marketplace decision.
+              </p>
+            </div>
+          )}
+        </section>
+      ) : null}
 
       <RuntimeObservationCard
         review={review}
         testPackages={runtimeTestPackages}
         busy={busy}
         runtimeError={runtimeError}
+        authenticatedSiteId={authenticatedSiteId}
         onPrepare={onPrepareRuntimePackage}
         onRun={onRunRuntimeObservation}
         onRefresh={onRefreshRuntimePackages}
@@ -1047,33 +1483,54 @@ function ReviewDetail({
         </section>
       ) : null}
 
-      <section className="revision-card">
+      {!runtimeOnly ? <section className="revision-card revision-upload-card">
         <div>
           <span className="eyebrow">Next move</span>
           <h2>Upload a revised bundle</h2>
           <p>We will compare it with this checkpoint and show exactly what changed.</p>
         </div>
-        <label className="button button-primary" htmlFor={revisionId}>
-          {busy ? 'Comparing…' : 'Upload revision'}
-        </label>
-        <input
-          id={revisionId}
-          className="visually-hidden"
-          type="file"
+        <ArtifactFileField
+          id={`${revisionId}-bundle`}
+          label="App bundle"
+          buttonLabel="Choose bundle"
           accept=".zip,application/zip"
+          file={revisionBundle}
           disabled={busy}
-          onChange={(event) => {
-            const file = event.currentTarget.files?.[0];
-            if (file) onRevision(file);
-            event.currentTarget.value = '';
-          }}
+          onChange={setRevisionBundle}
         />
-      </section>
+        <ArtifactFileField
+          id={`${revisionId}-maps`}
+          label="Source maps for review"
+          buttonLabel="Choose source maps (.zip or .map)"
+          accept=".map,.zip,application/json,application/zip"
+          file={revisionSourceMaps}
+          disabled={busy}
+          onChange={setRevisionSourceMaps}
+        />
+        <button
+          className="button button-primary"
+          disabled={busy || !revisionBundle}
+          onClick={() => {
+            if (!revisionBundle) return;
+            onRevision(revisionBundle, revisionSourceMaps);
+            setRevisionBundle(null);
+            setRevisionSourceMaps(null);
+          }}
+        >
+          {busy ? 'Comparing…' : 'Run preflight again'}
+        </button>
+      </section> : null}
     </main>
   );
 }
 
-export function App({ api }: { api: PreflightApi }) {
+export function App({
+  api,
+  reconnectUrl
+}: {
+  api: PreflightApi;
+  reconnectUrl?: string;
+}) {
   const [history, setHistory] = useState<ReviewSummary[]>([]);
   const [review, setReview] = useState<StoredReview | null>(null);
   const [comparison, setComparison] = useState<ReviewComparison | null>(null);
@@ -1083,6 +1540,8 @@ export function App({ api }: { api: PreflightApi }) {
   const [runtimeError, setRuntimeError] = useState<string | null>(null);
   const [identity, setIdentity] = useState<PreflightIdentity | null>(null);
   const [reviewerHandoff, setReviewerHandoff] = useState<ReviewerHandoff | null>(null);
+  const [submissionReceipt, setSubmissionReceipt] = useState<SubmissionReceipt | null>(null);
+  const [connectionNeedsReauth, setConnectionNeedsReauth] = useState(false);
 
   const refreshHistory = async () => {
     const items = await api.listReviews();
@@ -1096,32 +1555,28 @@ export function App({ api }: { api: PreflightApi }) {
     return items;
   };
 
+  const reportError = (
+    cause: unknown,
+    fallback: string,
+    onError: (message: string) => void = setError
+  ) => {
+    if (cause instanceof PreflightAuthenticationError) {
+      setConnectionNeedsReauth(true);
+    }
+    onError(cause instanceof Error ? cause.message : fallback);
+  };
+
   useEffect(() => {
     (async () => {
-      const items = await refreshHistory();
-      const selectedId = rememberedReviewId();
-      if (!selectedId) return;
-      if (!items.some((item) => item.id === selectedId)) {
-        rememberReview(null);
-        return;
-      }
-      try {
-        const [selectedReview] = await Promise.all([
-          api.getReview(selectedId),
-          refreshRuntimePackages(selectedId)
-        ]);
-        setReview(selectedReview);
-      } catch {
-        rememberReview(null);
-      }
+      await refreshHistory();
     })().catch((cause: unknown) => {
-      setError(cause instanceof Error ? cause.message : 'Saved runs are unavailable.');
+      reportError(cause, 'Saved runs are unavailable.');
     });
   }, []);
 
   useEffect(() => {
     api.getIdentity().then(setIdentity).catch((cause: unknown) => {
-      setError(cause instanceof Error ? cause.message : 'Webflow identity is unavailable.');
+      reportError(cause, 'Webflow identity is unavailable.');
     });
   }, []);
 
@@ -1131,18 +1586,47 @@ export function App({ api }: { api: PreflightApi }) {
   ) => {
     setBusy(true);
     setError(null);
+    setConnectionNeedsReauth(false);
     try {
       await action();
     } catch (cause) {
-      onError(cause instanceof Error ? cause.message : 'That step could not be completed.');
+      reportError(cause, 'That step could not be completed.', onError);
     } finally {
       setBusy(false);
     }
   };
 
+  const retryConnection = () => run(async () => {
+    const [items, currentIdentity] = await Promise.all([
+      api.listReviews(),
+      api.getIdentity()
+    ]);
+    setHistory(items);
+    setIdentity(currentIdentity);
+  });
+
   return (
     <div className="app-shell">
       {error ? <div className="error-banner" role="alert">{error}</div> : null}
+      {connectionNeedsReauth ? (
+        <section className="connection-recovery" aria-labelledby="connection-recovery-title">
+          <span className="eyebrow">Secure connection required</span>
+          <h2 id="connection-recovery-title">Reconnect Webflow to continue</h2>
+          <p>
+            Preflight could not confirm its server-side Webflow authorization. This attempt did not upload files or create a receipt.
+          </p>
+          <div className="connection-recovery-actions">
+            {reconnectUrl ? (
+              <a className="button button-primary" href={reconnectUrl} target="_blank" rel="noreferrer">
+                Reconnect Webflow
+              </a>
+            ) : null}
+            <button className="button button-secondary" disabled={busy} onClick={() => void retryConnection()}>
+              {busy ? 'Checking connection…' : 'Retry connection'}
+            </button>
+          </div>
+        </section>
+      ) : null}
 
       {review ? (
         <ReviewDetail
@@ -1151,20 +1635,26 @@ export function App({ api }: { api: PreflightApi }) {
           runtimeTestPackages={runtimeTestPackages}
           busy={busy}
           runtimeError={runtimeError}
+          authenticatedSiteId={identity?.siteId ?? null}
           reviewerMode={identity?.companionRole === 'reviewer'}
           reviewerHandoff={reviewerHandoff}
+          submissionReceipt={submissionReceipt}
+          onReissueReceipt={() => run(async () => {
+            setSubmissionReceipt(await api.reissueSubmissionReceipt(review.id));
+          })}
           onBack={() => {
             setReview(null);
             setComparison(null);
             setRuntimeTestPackages([]);
             setReviewerHandoff(null);
-            rememberReview(null);
+            setSubmissionReceipt(null);
           }}
-          onRevision={(file) => run(async () => {
-            const revised = await api.addRevision(review.id, file);
+          onRevision={(file, sourceMaps) => run(async () => {
+            const revised = await api.addRevision(review.id, file, sourceMaps ?? undefined);
             setReview(revised.review);
             setComparison(revised.comparison);
             setReviewerHandoff(null);
+            setSubmissionReceipt(revised.submissionReceipt);
             await refreshRuntimePackages(review.id);
             await refreshHistory();
           })}
@@ -1201,26 +1691,46 @@ export function App({ api }: { api: PreflightApi }) {
               <span className="eyebrow">Review run</span>
               {identity ? (
                 <div className="identity-state">
-                  <strong>{identity.companionRole === 'reviewer' ? 'Reviewer identity' : 'Developer identity'}</strong>
-                  <code>{identity.id}</code>
+                  <span className="connection-dot" aria-hidden="true" />
+                  <strong>Connected to this Webflow site</strong>
+                  {identity.companionRole === 'reviewer' ? (
+                    <span className="connection-role">Reviewer</span>
+                  ) : null}
                 </div>
               ) : null}
             </div>
-            <h2>Make the next review easier.</h2>
-            <p>See what is blocking, what is recommended, and which parts still need a human check.</p>
+            <h2>Start a preflight</h2>
+            <p>Choose what the app ships. Preflight will collect evidence and show the next useful step.</p>
           </div>
-          <UploadCard
-            busy={busy}
-            onFile={(file) => run(async () => {
-              const created = await api.createReview(file);
-              setReview(created);
-              setComparison(null);
-              setRuntimeTestPackages([]);
-              setReviewerHandoff(null);
-              rememberReview(created.id);
-              await refreshHistory();
-            })}
-          />
+          <div className="start-options">
+            <UploadCard
+              busy={busy}
+              onRun={(bundle, sourceMaps) => run(async () => {
+                const created = await api.createReview(
+                  bundle,
+                  sourceMaps ? { sourceMaps } : undefined
+                );
+                setReview(created.review);
+                setComparison(null);
+                setRuntimeTestPackages([]);
+                setReviewerHandoff(null);
+                setSubmissionReceipt(created.submissionReceipt);
+                await refreshHistory();
+              })}
+            />
+            <HostedRuntimeCard
+              busy={busy}
+              onStart={(input) => run(async () => {
+                const created = await api.createRuntimeReview(input);
+                setReview(created.review);
+                setComparison(null);
+                setRuntimeTestPackages([]);
+                setReviewerHandoff(null);
+                setSubmissionReceipt(created.submissionReceipt);
+                await refreshHistory();
+              })}
+            />
+          </div>
           <History
             items={history}
             busy={busy}
@@ -1232,11 +1742,11 @@ export function App({ api }: { api: PreflightApi }) {
               setReview(selectedReview);
               setComparison(null);
               setReviewerHandoff(null);
-              rememberReview(id);
+              setSubmissionReceipt(null);
             })}
           />
           <p className="privacy-note">
-            Bundles are private review evidence. Cross-app learning is anonymized and requires human approval.
+            Your bundle and script list stay private. Preflight may use anonymized patterns only after a person approves them.
           </p>
         </main>
       )}

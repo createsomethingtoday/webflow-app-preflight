@@ -32,6 +32,21 @@ export interface E2BRuntimeLaunchInput {
   capability: string;
 }
 
+// In-sandbox launch authentication contract (webflow-app-review-runtime-template):
+// the Worker injects a fresh per-sandbox secret as this env var at sandbox
+// create time, and the template's /run route requires it in this header
+// (constant-time compared). The secret never leaves the Worker↔sandbox path:
+// it is not stored, logged, or returned to any user surface.
+const LAUNCH_SECRET_ENV = 'APP_REVIEW_RUNTIME_LAUNCH_SECRET';
+const LAUNCH_SECRET_HEADER = 'x-webflow-runtime-launch-secret';
+
+function randomLaunchSecret(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(32));
+  let binary = '';
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+}
+
 export async function terminateRuntimeObservationInE2B(
   sandboxId: string,
   env: Env
@@ -66,6 +81,7 @@ export async function launchRuntimeObservationInE2B(
     throw new E2BRuntimeLaunchError('configuration');
   }
 
+  const launchSecret = randomLaunchSecret();
   let createResponse: Response;
   try {
     createResponse = await fetch(`${E2B_API_ORIGIN}/sandboxes`, {
@@ -80,6 +96,7 @@ export async function launchRuntimeObservationInE2B(
         secure: true,
         allow_internet_access: true,
         network: { allowPublicTraffic: false },
+        envVars: { [LAUNCH_SECRET_ENV]: launchSecret },
         metadata: {
           lane: 'app_review_runtime_observation',
           observation_job_id: input.observationJobId,
@@ -124,7 +141,8 @@ export async function launchRuntimeObservationInE2B(
       method: 'POST',
       headers: {
         'content-type': 'application/json',
-        'e2b-traffic-access-token': trafficAccessToken
+        'e2b-traffic-access-token': trafficAccessToken,
+        [LAUNCH_SECRET_HEADER]: launchSecret
       },
       body: JSON.stringify(input),
       signal: AbortSignal.timeout(CONTROL_PLANE_TIMEOUT_MS)

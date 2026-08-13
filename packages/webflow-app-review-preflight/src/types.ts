@@ -1,4 +1,8 @@
-import type { Confidence, Severity } from '@create-something/bundle-scanner-core';
+import type {
+  Confidence,
+  Severity,
+  SourceMapSummary
+} from '@create-something/bundle-scanner-core';
 
 export type ArtifactSurface =
   | 'designer_extension'
@@ -29,18 +33,55 @@ export interface ReviewGuidance {
   }>;
 }
 
+/**
+ * What the deterministic scan actually covered.
+ *
+ * Unscanned executable files are a MANUAL-REVIEW INPUT, not a pass: a file
+ * the scanner never decoded produced zero findings by construction, so its
+ * absence from guidance carries no assurance. `skippedExecutablePaths` lists
+ * every skipped or undecodable file with an executable extension
+ * (.js/.mjs/.cjs/.ts/.jsx/.tsx/.html/.wasm) so reviewers can route them to
+ * manual inspection.
+ */
+export interface ScanCoverage {
+  /** Total files in the extracted bundle inventory. */
+  fileCount: number;
+  /** Files whose text content was decoded and run through the rule engine. */
+  scannedFileCount: number;
+  /** Files whose content was NOT scanned (excluded, binary, or undecodable). */
+  skippedFileCount: number;
+  /** Unscanned paths that look executable — manual-review input, not a pass. */
+  skippedExecutablePaths: string[];
+  /** ZIP entries rejected by the unsafe-path guard (zip-slip, absolute paths). */
+  unsafeEntryPaths: string[];
+  /** True when any executable-looking content escaped the deterministic scan. */
+  manualReviewRequired: boolean;
+}
+
 export interface BundleReview {
   schemaVersion: 'app_review_preflight.v1';
   reviewId: string;
   createdAt: string;
   artifact: {
+    kind?: 'bundle' | 'runtime_manifest';
     fileName: string;
     sha256: string;
     compressedBytes: number;
     fileCount: number;
+    /**
+     * Present when a private source-map artifact was uploaded with the
+     * bundle. The SHA-256 lets a reviewer confirm the submission form's
+     * artifact is byte-identical to the one this review validated.
+     */
+    sourceMaps?: {
+      fileName: string;
+      sha256: string;
+      mapFileCount: number;
+    };
   };
   artifactScope: {
     primary: ArtifactSurface;
+    appType?: 'designer_extension' | 'data_client' | 'hybrid';
     appName: string | null;
     manifestPath: string | null;
   };
@@ -65,12 +106,41 @@ export interface BundleReview {
     scanReportVersion: string;
     scanRunId: string;
   };
+  /**
+   * Present for bundle reviews (absent for hosted-runtime manifests, which
+   * have no zip to scan). Reports what the deterministic scan did and did
+   * not cover; unscanned executable files require manual review.
+   */
+  scanCoverage?: ScanCoverage;
+  /**
+   * Source-map correspondence for the scanned bundle (bundle reviews only;
+   * absent for hosted-runtime manifests). A `missing`, `partial`,
+   * `mismatch`, or `invalid` status means minified or generated executable
+   * files cannot be traced to readable source — surfaced as a Required
+   * update, mirroring the Marketplace reviewable-source standard.
+   */
+  sourceMapSummary?: SourceMapSummary;
   officialDecision: null;
+}
+
+export interface CreateHostedRuntimeReviewInput {
+  appName: string;
+  runtimeUrls: string[];
 }
 
 export interface CreateBundleReviewInput {
   bundle: ArrayBuffer;
   fileName: string;
+  /**
+   * Private source-map artifact uploaded alongside the bundle — the same
+   * artifact the developer attaches to the official submission form. A
+   * single `.map` file or a `.zip` of maps. Reconciled against the bundle's
+   * generated executables together with any maps found inside the zip.
+   */
+  sourceMapArtifact?: {
+    fileName: string;
+    bytes: ArrayBuffer;
+  };
 }
 
 export type RuntimeEvidenceTrust =
@@ -201,14 +271,24 @@ export interface RuntimeObservationSummary {
       noUnreviewedRuntimeScripts: boolean;
       negativeProxyBlocked: boolean;
       proxyPolicySatisfied?: boolean;
+      /**
+       * Every pinned runtime exposed a reachable source map, so the served
+       * executable can be traced to readable source. Optional: evidence
+       * recorded before this predicate existed omits it.
+       */
+      runtimeSourceMapAvailable?: boolean;
     };
     blockers: string[];
+    runtimeCreatedScripts?: string[];
+    unreviewedRuntimeScripts?: string[];
     runtimeFiles: Array<{
       url: string;
       loadMode?: 'document' | 'runtime_child';
       loadedByPage: boolean;
       hashMatched: boolean;
       integrityMatched: boolean;
+      sourceMapAvailable: boolean;
+      sourceMapUrl?: string;
     }>;
     cleanupStatus: 'clean' | 'residue_detected' | 'not_tested';
     cleanupResidue: string[];
