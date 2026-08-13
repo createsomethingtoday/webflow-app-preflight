@@ -226,11 +226,11 @@ Open **Runtime file results** to find the exact file that failed. Each row repor
 
 ### Proxy canary
 
-| Result                         | Meaning                                                                   |
-| ------------------------------ | ------------------------------------------------------------------------- |
-| **Proxy canary blocked**       | Expected result; the proxy refused the canary destination                 |
-| **Proxy canary exposed**       | Security blocker; the proxy allowed the canary destination                |
-| **Proxy canary inconclusive**  | The check failed to reach a clear result; investigate before continuing   |
+| Result                         | Meaning                                                                                                                        |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------ |
+| **Proxy canary blocked**       | Expected result; the proxy refused the canary destination                                                                      |
+| **Proxy canary exposed**       | Security blocker; the proxy allowed the canary destination                                                                     |
+| **Proxy canary inconclusive**  | The check failed to reach a clear result; investigate before continuing                                                        |
 | **Proxy check not applicable** | The developer declared no proxy surface; the result stays blocked on a manual-review item until a reviewer verifies that claim |
 
 ### Evidence artifacts
