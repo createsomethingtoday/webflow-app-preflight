@@ -649,14 +649,16 @@ describe('App Review Preflight extension', () => {
     expect(await screen.findByLabelText('Current evidence: Webflow observed')).toBeVisible();
     expect(screen.getByText('Production runtime observed')).toBeVisible();
     expect(screen.queryByText('Production runtime not yet verified')).not.toBeInTheDocument();
-    expect(screen.getByText(/Security blockers remain in the result below/i)).toBeVisible();
+    expect(
+      screen.getByText(/Recommended-practice findings for published-site code are in the result below/i)
+    ).toBeVisible();
     expect(screen.getByText('4 checks need attention')).toBeVisible();
     expect(screen.getByText('Ready signal not found')).toBeVisible();
     expect(screen.getByText('Runtime bytes changed')).toBeVisible();
     expect(screen.getByText('New script elements were created')).toBeVisible();
     expect(screen.getByText('Unreviewed scripts loaded')).toBeVisible();
     expect(screen.getAllByText('debugger.js')).toHaveLength(2);
-    expect(screen.getByText(/Fix each item, publish the test site, then run the test again/i))
+    expect(screen.getByText(/Address them, publish the test site, then run the test again/i))
       .toBeVisible();
     expect(screen.getByText('Proxy canary blocked')).toBeVisible();
     expect(screen.getByText('2 declared runtime files observed · 1 evidence artifact')).toBeVisible();
