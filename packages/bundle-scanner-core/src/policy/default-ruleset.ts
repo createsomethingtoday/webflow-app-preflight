@@ -593,6 +593,90 @@ export const defaultRuleset: Ruleset = {
           confidence: 'HIGH'
         }
       ]
+    },
+
+    {
+      ruleId: 'SEC-NO-TOKEN-IN-URL',
+      name: 'Credential in URL',
+      category: 'SECURITY',
+      reviewBucket: 'AUTO_REJECT',
+      severity: 'BLOCKER',
+      disposition: 'REJECTED',
+      description:
+        'Tokens and credentials must never travel in URL query strings — URLs land in server logs, browser history, and analytics. Send credentials in an Authorization header or request body (Marketplace Guidelines: token security / Webflow-authenticated endpoints).',
+      matchers: [
+        {
+          id: 'token-query-param',
+          type: 'regex',
+          pattern: '[?&](access_token|id_token|auth_token|jwt|bearer|apikey|api_key)=',
+          flags: 'i',
+          fileGlobs: ['**/*.{js,ts,jsx,tsx,mjs,cjs}'],
+          triggerTokens: ['access_token', 'id_token', 'auth_token', 'jwt=', 'bearer=', 'apikey', 'api_key'],
+          confidence: 'HIGH'
+        },
+        {
+          id: 'generic-token-query-interpolation',
+          type: 'regex',
+          pattern: '[?&]token=(\\$\\{|["\'`]\\s*\\+)',
+          flags: 'i',
+          fileGlobs: ['**/*.{js,ts,jsx,tsx,mjs,cjs}'],
+          triggerTokens: ['token='],
+          confidence: 'MEDIUM'
+        }
+      ]
+    },
+
+    {
+      ruleId: 'PROD-NO-DEBUG-RESIDUE',
+      name: 'Debug and Bypass Residue',
+      category: 'PRODUCTION_READINESS',
+      reviewBucket: 'ACTION_REQUIRED',
+      severity: 'HIGH',
+      disposition: 'ACTION_REQUIRED',
+      description:
+        'Production bundles must not contain debug routes, onboarding or auth bypass flags, or other development shortcuts. Remove them and rebuild the exact production artifact before submitting (Marketplace submission artifacts).',
+      matchers: [
+        {
+          id: 'debug-route-literal',
+          type: 'regex',
+          pattern: '["\'`][^"\'`]*\\/debug\\/[^"\'`]*["\'`]',
+          flags: 'g',
+          fileGlobs: ['**/*.{js,ts,jsx,tsx,mjs,cjs}'],
+          triggerTokens: ['/debug/'],
+          confidence: 'HIGH'
+        },
+        {
+          id: 'bypass-flag',
+          type: 'regex',
+          pattern: '\\b(bypass|skip)[_-]?(onboarding|auth|review|verification|validation)\\b',
+          flags: 'i',
+          fileGlobs: ['**/*.{js,ts,jsx,tsx,mjs,cjs}'],
+          triggerTokens: ['bypass', 'skip'],
+          confidence: 'MEDIUM'
+        }
+      ]
+    },
+
+    {
+      ruleId: 'UX-NO-MUTATION-ON-LOAD',
+      name: 'Site Mutation Without User Action',
+      category: 'UX',
+      reviewBucket: 'NEEDS_EXPLANATION',
+      severity: 'MEDIUM',
+      disposition: 'INFO',
+      description:
+        'Creating or removing site resources (styles, variables, assets, components) must follow a deliberate user action — opening the extension must not mutate the site. If these calls only run after an explicit user choice, explain that in your review notes (Marketplace Guidelines: user interaction).',
+      matchers: [
+        {
+          id: 'designer-write-call',
+          type: 'regex',
+          pattern: 'webflow\\.(create(Style|Variable|VariableCollection|Asset|Component|Page)|remove(Style|Variable|Asset|Component))\\s*\\(',
+          flags: 'g',
+          fileGlobs: ['**/*.{js,ts,jsx,tsx,mjs,cjs}'],
+          triggerTokens: ['webflow.create', 'webflow.remove'],
+          confidence: 'MEDIUM'
+        }
+      ]
     }
   ]
 };
