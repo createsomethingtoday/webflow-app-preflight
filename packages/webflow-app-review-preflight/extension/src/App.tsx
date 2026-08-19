@@ -509,7 +509,7 @@ function Coverage({
       label: 'Production runtime observed',
       detail: observed.securityStatus === 'passed'
         ? 'Webflow captured the published runtime and its pinned security checks passed.'
-        : 'Webflow captured the published runtime. Recommended-practice findings for published-site code are in the result below — they inform review but do not block submission.'
+        : 'Webflow captured the published runtime. Security blockers remain in the result below.'
     };
   });
 
@@ -774,7 +774,7 @@ function RuntimeObservationCard({
                   <span>
                     {latest.observation.evidence.securityStatus === 'passed'
                       ? 'Published code matched its reviewed hash and SRI requirements.'
-                      : 'These are recommended practices for published-site code — they inform review but do not block submission. Address them, publish the test site, then run the test again.'}
+                      : 'Fix each item, publish the test site, then run the test again.'}
                   </span>
                 </div>
                 <div
@@ -805,7 +805,7 @@ function RuntimeObservationCard({
               {observedIssues.length > 0 ? (
                 <section className="runtime-issues" aria-labelledby="runtime-issues-title">
                   <div className="runtime-issues-heading">
-                    <h3 id="runtime-issues-title">Recommended practices to address</h3>
+                    <h3 id="runtime-issues-title">What to fix</h3>
                     <span>{observedIssues.length}</span>
                   </div>
                   <ol>

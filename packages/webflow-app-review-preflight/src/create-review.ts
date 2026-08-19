@@ -67,13 +67,7 @@ const NEXT_MOVES: Record<string, string> = {
     'Package the reviewed runtime with the app, or use one immutable, reviewed runtime with a defined removal lifecycle.',
   'SEC-NO-DCE': 'Remove runtime code compilation and replace it with reviewed, bundled functions.',
   'SEC-NO-CLIENT-SECRETS': 'Remove the secret, rotate it, and keep privileged credentials on a server boundary.',
-  'SEC-CODE-TRANSPARENCY': 'Provide reviewable source and matching source maps for every executable production file.',
-  'SEC-NO-TOKEN-IN-URL':
-    'Move the credential out of the URL: send it in an Authorization header or a protected request body, and change any GET route that carries it to POST.',
-  'PROD-NO-DEBUG-RESIDUE':
-    'Remove the debug routes and bypass flags from the production build, rebuild the exact artifact you will ship, and rescan.',
-  'UX-NO-MUTATION-ON-LOAD':
-    'Tie site-mutating Designer API calls to a deliberate user action (a button, not extension mount). If they already are, say so in your review notes so the reviewer can verify quickly.'
+  'SEC-CODE-TRANSPARENCY': 'Provide reviewable source and matching source maps for every executable production file.'
 };
 
 const MAX_EVIDENCE_SNIPPET_LENGTH = 500;
@@ -255,82 +249,6 @@ function sourceMapGuidance(summary: SourceMapSummary): ReviewGuidance | null {
   } satisfies ReviewGuidance;
 }
 
-/**
- * The app manifest is part of the reviewed surface: an app that identifies
- * itself as a development or staging build is production residue (Marketplace
- * submission artifacts), independent of anything the code does.
- */
-// Deliberately excludes "test": legitimate app names carry it (A/B test
-// tooling), while "dev"/"staging"/"sandbox" in a marketplace app name reliably
-// mean the wrong artifact was packaged.
-const DEV_IDENTITY_PATTERN = /\b(dev|development|staging|stage|sandbox)\b/i;
-
-function manifestIdentityGuidance(scope: {
-  appName: string | null;
-  manifestPath: string | null;
-}): ReviewGuidance | null {
-  if (!scope.appName || !scope.manifestPath) return null;
-  if (!DEV_IDENTITY_PATTERN.test(scope.appName)) return null;
-
-  return {
-    id: 'PROD-DEV-IDENTITY',
-    label: 'Required update',
-    title: 'App manifest carries a development identity',
-    explanation: `The app name in the manifest ("${scope.appName}") reads as a development or staging build. Production submissions must ship under the production identity — a dev-named bundle is the clearest sign the wrong artifact was packaged.`,
-    nextMove:
-      'Set the production app name in the manifest, rebuild the exact artifact you will submit, and rescan.',
-    severity: 'HIGH',
-    confidence: 'MEDIUM',
-    evidence: [
-      {
-        filePath: scope.manifestPath,
-        line: 1,
-        snippet: `"name": "${scope.appName}"`
-      }
-    ]
-  } satisfies ReviewGuidance;
-}
-
-const PACKAGE_MANIFEST_NAMES = new Set(['package.json']);
-const LOCKFILE_NAMES = new Set(['pnpm-lock.yaml', 'package-lock.json', 'yarn.lock', 'bun.lockb', 'bun.lock']);
-
-/**
- * The Marketplace submission-artifacts docs ask for the package manifest and
- * lockfile alongside compiled bundles so review can reconcile the artifact
- * with its dependencies. Absence is a suggestion, not a gate — the submission
- * form is the enforcement point.
- */
-function manifestPresenceGuidance(
-  inventory: ReadonlyArray<{ path: string; ext: string }>
-): ReviewGuidance | null {
-  const hasExecutables = inventory.some((file) => EXECUTABLE_EXTENSIONS.has(file.ext));
-  if (!hasExecutables) return null;
-
-  const baseNames = new Set(
-    inventory.map((file) => file.path.split('/').pop()?.toLowerCase() ?? '')
-  );
-  const hasPackageManifest = [...PACKAGE_MANIFEST_NAMES].some((name) => baseNames.has(name));
-  const hasLockfile = [...LOCKFILE_NAMES].some((name) => baseNames.has(name));
-  if (hasPackageManifest && hasLockfile) return null;
-
-  const missing = [
-    ...(hasPackageManifest ? [] : ['package manifest (package.json)']),
-    ...(hasLockfile ? [] : ['lockfile'])
-  ].join(' and ');
-
-  return {
-    id: 'PROD-PACKAGE-MANIFEST',
-    label: 'Suggested update',
-    title: 'Include the package manifest and lockfile for this build',
-    explanation: `This bundle contains compiled executables but no ${missing}. The Marketplace submission-artifacts guidance asks for both, from the exact build that produced the bundle, so review can reconcile the artifact with its dependencies.`,
-    nextMove:
-      'Include the package manifest and lockfile for this exact build in the bundle or alongside your submission.',
-    severity: 'LOW',
-    confidence: 'HIGH',
-    evidence: []
-  } satisfies ReviewGuidance;
-}
-
 function toGuidance(groups: Record<string, FindingGroup>): ReviewGuidance[] {
   return Object.values(groups)
     .map((group) => {
@@ -411,14 +329,8 @@ export async function createBundleReview(
   const artifactScope = findManifest(inventory);
   const runtimeReferences = discoverRuntimeReferences(inventory);
   const sourceMapFinding = sourceMapGuidance(sourceMapSummary);
-  const identityFinding = manifestIdentityGuidance(artifactScope);
-  const packagePresenceFinding = manifestPresenceGuidance(inventory);
-  const guidance = [
-    ...toGuidance(report.findings),
-    ...(sourceMapFinding ? [sourceMapFinding] : []),
-    ...(identityFinding ? [identityFinding] : []),
-    ...(packagePresenceFinding ? [packagePresenceFinding] : [])
-  ].sort(compareGuidance);
+  const guidance = [...toGuidance(report.findings), ...(sourceMapFinding ? [sourceMapFinding] : [])]
+    .sort(compareGuidance);
   const securityBlockers = guidance.filter((item) => item.label === 'Security blocker').length;
   const requiredUpdates = guidance.filter((item) => item.label === 'Required update').length;
   const suggestedUpdates = guidance.filter((item) => item.label === 'Suggested update').length;
