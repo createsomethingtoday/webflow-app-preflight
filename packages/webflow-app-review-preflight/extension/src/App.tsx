@@ -76,7 +76,7 @@ interface RuntimeIssue {
   urls?: string[];
 }
 
-function runtimeIssues(testPackage: RuntimeTestPackageView): RuntimeIssue[] {
+export function runtimeIssues(testPackage: RuntimeTestPackageView): RuntimeIssue[] {
   const evidence = testPackage.observation?.evidence;
   if (!evidence || evidence.securityStatus === 'passed') return [];
   const issues: RuntimeIssue[] = [];
@@ -154,7 +154,14 @@ function runtimeIssues(testPackage: RuntimeTestPackageView): RuntimeIssue[] {
       urls: evidence.unreviewedRuntimeScripts ?? []
     });
   }
-  if (evidence.securityPredicates.proxyPolicySatisfied === false) {
+  // A declared no-proxy surface also reports proxyPolicySatisfied === false
+  // (the server treats the declaration as an unverified claim, not evidence),
+  // but that state is a reviewer confirmation, not a developer-fixable
+  // mismatch — the neutral "Proxy check not applicable" card covers it.
+  if (
+    evidence.securityPredicates.proxyPolicySatisfied === false &&
+    evidence.negativeProxyOutcome !== 'not_applicable'
+  ) {
     issues.push({
       title: 'Proxy check did not match the declaration',
       detail: 'The browser result does not match the proxy setting saved in this test package.',

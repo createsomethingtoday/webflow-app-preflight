@@ -1,6 +1,6 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, test, vi } from 'vitest';
-import { App } from './App';
+import { App, runtimeIssues } from './App';
 import { PreflightAuthenticationError } from './api';
 import type { PreflightApi, StoredReview, SubmissionReceipt } from './types';
 
@@ -1249,5 +1249,49 @@ describe('App Review Preflight extension', () => {
     expect(screen.queryByRole('button', { name: 'Approve sandbox test' })).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Run Webflow test' })).toBeVisible();
     expect(screen.getByText('Ready to test')).toBeVisible();
+  });
+});
+
+describe('runtimeIssues proxy finding', () => {
+  const packageWithProxyEvidence = (
+    negativeProxyOutcome: 'blocked' | 'exposed' | 'error' | 'not_applicable'
+  ) =>
+    ({
+      observation: {
+        evidence: {
+          securityStatus: 'blocked',
+          securityPredicates: {
+            publishedTarget: true,
+            runtimeReadyObserved: true,
+            runtimeLoadedByPage: true,
+            runtimeHashMatched: true,
+            runtimeIntegrityMatched: true,
+            noRuntimeCreatedScripts: true,
+            noUnreviewedRuntimeScripts: true,
+            proxyPolicySatisfied: false,
+            runtimeSourceMapAvailable: true
+          },
+          runtimeFiles: [],
+          negativeProxyOutcome
+        }
+      }
+    }) as never;
+
+  test('a declared no-proxy surface is not reported as a proxy mismatch', () => {
+    // The server records proxyPolicySatisfied === false for a no-proxy
+    // declaration (unverified claim awaiting reviewer confirmation). That is
+    // not a developer-fixable mismatch and must not appear in "What to fix" —
+    // the neutral "Proxy check not applicable" card covers it.
+    const issues = runtimeIssues(packageWithProxyEvidence('not_applicable'));
+    expect(issues.map((issue) => issue.title)).not.toContain(
+      'Proxy check did not match the declaration'
+    );
+  });
+
+  test('an exposed proxy canary still reports the mismatch finding', () => {
+    const issues = runtimeIssues(packageWithProxyEvidence('exposed'));
+    expect(issues.map((issue) => issue.title)).toContain(
+      'Proxy check did not match the declaration'
+    );
   });
 });
