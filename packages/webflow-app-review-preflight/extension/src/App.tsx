@@ -179,6 +179,42 @@ export function runtimeIssues(testPackage: RuntimeTestPackageView): RuntimeIssue
   return issues;
 }
 
+interface RuntimeSecuritySummary {
+  tone: 'pass' | 'neutral' | 'fail';
+  title: string;
+  detail: string;
+}
+
+// A blocked status with an empty "What to fix" list means every remaining
+// blocker is an unverified declaration (e.g. a no-proxy surface) that a
+// Webflow reviewer confirms manually — not a developer-fixable failure, so
+// it must not render with the red fix-it framing.
+export function runtimeSecuritySummary(
+  securityStatus: 'passed' | 'blocked',
+  issueCount: number
+): RuntimeSecuritySummary {
+  if (securityStatus === 'passed') {
+    return {
+      tone: 'pass',
+      title: 'Runtime security passed',
+      detail: 'Published code matched its reviewed hash and SRI requirements.'
+    };
+  }
+  if (issueCount === 0) {
+    return {
+      tone: 'neutral',
+      title: 'Manual reviewer confirmation required',
+      detail:
+        'Every automated check passed. The remaining items are declarations a Webflow reviewer confirms during review.'
+    };
+  }
+  return {
+    tone: 'fail',
+    title: `${issueCount} ${issueCount === 1 ? 'check needs' : 'checks need'} attention`,
+    detail: 'Fix each item, publish the test site, then run the test again.'
+  };
+}
+
 function ArtifactFileField({
   id,
   label,
@@ -503,11 +539,12 @@ function Coverage({
   review: StoredReview;
   testPackages: RuntimeTestPackageView[];
 }) {
-  const observed = testPackages.find(
+  const observedPackage = testPackages.find(
     (testPackage) =>
       testPackage.reviewVersionId === review.latestVersion.id &&
       testPackage.observation?.trust === 'webflow_observed'
-  )?.observation?.evidence;
+  );
+  const observed = observedPackage?.observation?.evidence;
   const coverage = review.latestVersion.result.coverage.map((item) => {
     if (item.surface !== 'production_runtime' || !observed) return item;
     return {
@@ -516,7 +553,9 @@ function Coverage({
       label: 'Production runtime observed',
       detail: observed.securityStatus === 'passed'
         ? 'Webflow captured the published runtime and its pinned security checks passed.'
-        : 'Webflow captured the published runtime. Security blockers remain in the result below.'
+        : observedPackage && runtimeIssues(observedPackage).length === 0
+          ? 'Webflow captured the published runtime. Automated checks passed; the remaining declarations await manual reviewer confirmation.'
+          : 'Webflow captured the published runtime. Security blockers remain in the result below.'
     };
   });
 
@@ -638,6 +677,11 @@ function RuntimeObservationCard({
     latest.observation.status === 'expired' ||
     latest.observation.status === 'revoked';
   const observedIssues = latest ? runtimeIssues(latest) : [];
+  const observedEvidence =
+    latest?.observation?.trust === 'webflow_observed' ? latest.observation.evidence : undefined;
+  const securitySummary = observedEvidence
+    ? runtimeSecuritySummary(observedEvidence.securityStatus, observedIssues.length)
+    : null;
   const runtimeOnly = review.latestVersion.result.artifact.kind === 'runtime_manifest';
 
   useEffect(() => {
@@ -772,18 +816,12 @@ function RuntimeObservationCard({
                 </div>
               </div>
               <div className="observation-results">
-                <div className={latest.observation.evidence.securityStatus === 'passed' ? 'pass' : 'fail'}>
-                  <strong>
-                    {latest.observation.evidence.securityStatus === 'passed'
-                      ? 'Runtime security passed'
-                      : `${observedIssues.length} ${observedIssues.length === 1 ? 'check needs' : 'checks need'} attention`}
-                  </strong>
-                  <span>
-                    {latest.observation.evidence.securityStatus === 'passed'
-                      ? 'Published code matched its reviewed hash and SRI requirements.'
-                      : 'Fix each item, publish the test site, then run the test again.'}
-                  </span>
-                </div>
+                {securitySummary ? (
+                  <div className={securitySummary.tone}>
+                    <strong>{securitySummary.title}</strong>
+                    <span>{securitySummary.detail}</span>
+                  </div>
+                ) : null}
                 <div
                   className={
                     latest.observation.evidence.negativeProxyOutcome === 'blocked'

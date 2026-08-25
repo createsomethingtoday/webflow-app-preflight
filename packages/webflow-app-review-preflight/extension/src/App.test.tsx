@@ -1,6 +1,6 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, test, vi } from 'vitest';
-import { App, runtimeIssues } from './App';
+import { App, runtimeIssues, runtimeSecuritySummary } from './App';
 import { PreflightAuthenticationError } from './api';
 import type { PreflightApi, StoredReview, SubmissionReceipt } from './types';
 
@@ -1293,5 +1293,34 @@ describe('runtimeIssues proxy finding', () => {
     expect(issues.map((issue) => issue.title)).toContain(
       'Proxy check did not match the declaration'
     );
+  });
+});
+
+describe('runtimeSecuritySummary', () => {
+  test('a passed status reports runtime security passed', () => {
+    expect(runtimeSecuritySummary('passed', 0)).toEqual({
+      tone: 'pass',
+      title: 'Runtime security passed',
+      detail: 'Published code matched its reviewed hash and SRI requirements.'
+    });
+  });
+
+  test('a blocked status with no findings asks for reviewer confirmation, not fixes', () => {
+    // Regression: a declared no-proxy surface keeps securityStatus blocked by
+    // design (unverified claim → manual-review blocker), but with zero
+    // findings the card rendered a red "0 checks need attention — Fix each
+    // item…" that contradicted the clean result on the same screen.
+    const summary = runtimeSecuritySummary('blocked', 0);
+    expect(summary.tone).toBe('neutral');
+    expect(summary.title).toBe('Manual reviewer confirmation required');
+    expect(summary.detail).not.toMatch(/fix each item/i);
+  });
+
+  test('a blocked status with findings keeps the fix-it framing', () => {
+    expect(runtimeSecuritySummary('blocked', 1).title).toBe('1 check needs attention');
+    const summary = runtimeSecuritySummary('blocked', 4);
+    expect(summary.tone).toBe('fail');
+    expect(summary.title).toBe('4 checks need attention');
+    expect(summary.detail).toBe('Fix each item, publish the test site, then run the test again.');
   });
 });
