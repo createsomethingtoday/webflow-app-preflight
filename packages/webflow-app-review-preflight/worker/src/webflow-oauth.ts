@@ -440,3 +440,16 @@ export async function storedWebflowAccessToken(env: Env): Promise<string | null>
     env
   );
 }
+
+/**
+ * Prefer the most recently completed OAuth installation. The managed secret is
+ * retained only as a rollback fallback for deployments without a stored
+ * installation; otherwise it would make a successful reconnect a no-op.
+ */
+export async function webflowAccessToken(env: Env): Promise<string | null> {
+  return (
+    (await storedWebflowAccessToken(env)) ??
+    env.WEBFLOW_APP_ACCESS_TOKEN ??
+    null
+  );
+}

@@ -1,5 +1,5 @@
 import type { AuthenticatedUser, Env } from './types';
-import { storedWebflowAccessToken } from './webflow-oauth';
+import { webflowAccessToken } from './webflow-oauth';
 
 interface ResolvedWebflowUser {
   id?: unknown;
@@ -52,8 +52,7 @@ export async function authenticate(
     return { id: 'local-webflow-reviewer', siteId: 'local-webflow-review-site' };
   }
 
-  const appAccessToken =
-    env.WEBFLOW_APP_ACCESS_TOKEN ?? (await storedWebflowAccessToken(env));
+  const appAccessToken = await webflowAccessToken(env);
   if (!appAccessToken) return null;
 
   const response = await fetch('https://api.webflow.com/beta/token/resolve', {
