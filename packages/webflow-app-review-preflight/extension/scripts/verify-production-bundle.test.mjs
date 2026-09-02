@@ -53,6 +53,12 @@ function committedPublicEntries() {
 }
 
 describe("production artifact verifier", () => {
+  test("pins production directly to the Webflow Hosting Worker", () => {
+    expect(productionApiBase).toBe(
+      "https://webflow-app-review-preflight.webflow-inc.workers.dev",
+    );
+  });
+
   test("accepts a minified production payload with readable source", () => {
     expect(inspectProductionEntries(validEntries(), "Fixture")).toEqual([]);
   });

@@ -23,7 +23,7 @@
   // ALLOWED_ORIGINS.
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "webflow-app-review-preflight",
-  "account_id": "9645bd52e640b8a4f40a3a55ff1dd75a",
+  "account_id": "ac24bc906aca8307bdba8c2a85ff08c9",
   "main": "src/index.ts",
   "compatibility_date": "2026-07-14",
   "compatibility_flags": ["nodejs_compat"],
@@ -33,13 +33,13 @@
     "ENVIRONMENT": "production",
     "ALLOWED_ORIGINS": "chrome-extension://eiogakldgljpbbmplgckjkoglfgabblm,https://6a57b0fa70db1b7a0cd666ac.webflow-ext.com",
     "E2B_RUNTIME_TEMPLATE_ID": "app-review-companion-runtime:791372d3-a8ea-4700-b54a-80a7b3854a0e",
-    "WEBFLOW_OAUTH_REDIRECT_URI": "https://webflow-app-review-preflight.createsomething.workers.dev/v1/oauth/webflow/callback"
+    "WEBFLOW_OAUTH_REDIRECT_URI": "https://webflow-app-review-preflight.webflow-inc.workers.dev/v1/oauth/webflow/callback"
   },
   "d1_databases": [
     {
       "binding": "DB",
       "database_name": "webflow-app-review-preflight",
-      "database_id": "2f81cae5-8232-4509-92a7-9485f5dcf401",
+      "database_id": "925dd708-26a4-439a-aa3b-ff4db164e26d",
       "migrations_dir": "../migrations"
     }
   ],
