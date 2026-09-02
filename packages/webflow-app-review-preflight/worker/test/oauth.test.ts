@@ -1,6 +1,7 @@
 import { env } from 'cloudflare:workers';
 import { afterEach, describe, expect, test, vi } from 'vitest';
 import worker from '../src/index';
+import type { Env } from '../src/types';
 
 const fetchWorker = (request: Request) => worker.fetch(request, env);
 
@@ -80,6 +81,72 @@ describe('Webflow OAuth installation', () => {
       'https://preflight.test/v1/oauth/webflow/complete'
     );
     expect(outboundFetch).toHaveBeenCalledTimes(2);
+  });
+
+  test('uses a completed OAuth installation before the managed fallback token', async () => {
+    const start = await fetchWorker(
+      new Request('https://preflight.test/v1/oauth/webflow/start')
+    );
+    const authorization = new URL(start.headers.get('location')!);
+    const state = authorization.searchParams.get('state')!;
+    const cookie = start.headers.get('set-cookie')!;
+
+    const outboundFetch = vi.fn(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const request =
+          input instanceof Request ? input : new Request(input, init);
+        if (request.url === 'https://api.webflow.com/oauth/access_token') {
+          return Response.json({ access_token: 'fresh-oauth-token' });
+        }
+        if (request.url === 'https://api.webflow.com/beta/token/resolve') {
+          return request.headers.get('authorization') ===
+            'Bearer fresh-oauth-token'
+            ? Response.json({
+                id: 'webflow-user-id',
+                siteId: 'webflow-site-id'
+              })
+            : Response.json({ error: 'unauthorized' }, { status: 401 });
+        }
+        return Response.json(
+          { error: 'unexpected_outbound_request' },
+          { status: 500 }
+        );
+      }
+    );
+    vi.stubGlobal('fetch', outboundFetch);
+
+    const productionEnv = {
+      ...env,
+      WEBFLOW_APP_ACCESS_TOKEN: 'managed-fallback-token'
+    } as Env;
+    const callback = await worker.fetch(
+      new Request(
+        `https://preflight.test/v1/oauth/webflow/callback?code=single-use-code&state=${state}`,
+        { headers: { cookie: cookie.split(';', 1)[0]! } }
+      ),
+      productionEnv
+    );
+    expect(callback.status).toBe(303);
+
+    const identity = await worker.fetch(
+      new Request('https://preflight.test/v1/me', {
+        headers: { authorization: 'Bearer designer-id-token' }
+      }),
+      productionEnv
+    );
+
+    expect(identity.status).toBe(200);
+    expect(await identity.json()).toMatchObject({
+      user: { id: 'webflow-user-id', siteId: 'webflow-site-id' }
+    });
+    expect(outboundFetch).toHaveBeenLastCalledWith(
+      'https://api.webflow.com/beta/token/resolve',
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          authorization: 'Bearer fresh-oauth-token'
+        })
+      })
+    );
   });
 
   test('rejects a callback whose browser state does not match', async () => {

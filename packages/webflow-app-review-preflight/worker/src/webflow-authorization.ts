@@ -1,5 +1,5 @@
 import type { Env } from './types';
-import { storedWebflowAccessToken } from './webflow-oauth';
+import { webflowAccessToken } from './webflow-oauth';
 
 export type WebflowAuthorizationState =
   | 'ready'
@@ -11,10 +11,6 @@ export interface WebflowAuthorizationReadiness {
   statusCode: number | null;
 }
 
-async function appAccessToken(env: Env): Promise<string | null> {
-  return env.WEBFLOW_APP_ACCESS_TOKEN ?? storedWebflowAccessToken(env);
-}
-
 /**
  * Proves that the server-side token can perform the exact authorized-user
  * operation needed to resolve fresh Designer ID tokens. No token or response
@@ -23,7 +19,7 @@ async function appAccessToken(env: Env): Promise<string | null> {
 export async function checkWebflowAuthorization(
   env: Env
 ): Promise<WebflowAuthorizationReadiness> {
-  const token = await appAccessToken(env);
+  const token = await webflowAccessToken(env);
   if (!token) return { state: 'reconnect_required', statusCode: null };
 
   try {
