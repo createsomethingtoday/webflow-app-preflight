@@ -193,33 +193,48 @@ async function readJson(request: Request): Promise<Record<string, unknown>> {
   }
 }
 
-async function readBoundedText(response: Response, maxBytes: number): Promise<string> {
-  if (!response.body) return '';
+const OWNERSHIP_SCAN_LIMIT_BYTES = 256 * 1024;
+
+/**
+ * Reads a published page only as far as the opening `<html ...>` tag and
+ * reports whether it carries `data-wf-site` for the authenticated site.
+ *
+ * Webflow stamps `data-wf-site` on the `<html>` element, so the answer sits in
+ * the first few hundred bytes. Reading the whole document (the previous
+ * behavior) made ordinary CMS-heavy pages — routinely 500 KB+ decoded — fail
+ * with "too large to verify safely" even though ownership was provable.
+ */
+async function publishedSiteMatchesAuthenticatedSite(
+  response: Response,
+  siteId: string
+): Promise<boolean> {
+  if (!response.body) return false;
+  const escapedSiteId = siteId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const marker = new RegExp(`data-wf-site\\s*=\\s*["']${escapedSiteId}["']`, 'i');
   const reader = response.body.getReader();
-  const chunks: Uint8Array[] = [];
+  const decoder = new TextDecoder();
+  let text = '';
   let bytes = 0;
   try {
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
       bytes += value.byteLength;
-      if (bytes > maxBytes) {
+      text += decoder.decode(value, { stream: true });
+      const htmlTag = /<html\b[^>]*>/i.exec(text);
+      if (htmlTag) return marker.test(htmlTag[0]);
+      if (bytes > OWNERSHIP_SCAN_LIMIT_BYTES) {
         throw new RuntimeTestPackageError(
-          'The published Webflow site HTML is too large to verify safely.'
+          'The published Webflow site HTML is too large to verify safely. Point Preflight at a lighter published page on the same site, such as its home page.'
         );
       }
-      chunks.push(value);
     }
+    const htmlTag = /<html\b[^>]*>/i.exec(text + decoder.decode());
+    return htmlTag ? marker.test(htmlTag[0]) : false;
   } finally {
+    await reader.cancel().catch(() => undefined);
     reader.releaseLock();
   }
-  const combined = new Uint8Array(bytes);
-  let offset = 0;
-  for (const chunk of chunks) {
-    combined.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return new TextDecoder().decode(combined);
 }
 
 async function verifyPublishedWebflowSiteOwnership(
@@ -246,9 +261,7 @@ async function verifyPublishedWebflowSiteOwnership(
   ) {
     throw new RuntimeTestPackageError('The published Webflow site could not be verified.');
   }
-  const html = await readBoundedText(response, 256 * 1024);
-  const escapedSiteId = siteId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  if (!new RegExp(`data-wf-site\\s*=\\s*["']${escapedSiteId}["']`, 'i').test(html)) {
+  if (!(await publishedSiteMatchesAuthenticatedSite(response, siteId))) {
     throw new RuntimeTestPackageError(
       'The published Webflow site does not belong to the authenticated Webflow site.'
     );
