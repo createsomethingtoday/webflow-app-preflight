@@ -1531,6 +1531,88 @@ describe('review API', () => {
     });
   });
 
+  test('verifies ownership from the <html> element without reading a large published page in full', async () => {
+    const form = new FormData();
+    form.set(
+      'bundle',
+      new File([await createBundle()], 'consent-pro.zip', { type: 'application/zip' })
+    );
+    const createdResponse = await exports.default.fetch(
+      new Request('https://preflight.test/v1/reviews', {
+        method: 'POST',
+        headers: { authorization: 'Bearer test-token', origin: 'http://localhost:1337' },
+        body: form
+      })
+    );
+    const created = await createdResponse.json<{ review: { id: string } }>();
+    const productionEnv = {
+      DB: env.DB,
+      ARTIFACTS: env.ARTIFACTS,
+      ENVIRONMENT: 'production',
+      ALLOWED_ORIGINS: '',
+      WEBFLOW_APP_ACCESS_TOKEN: 'app-token'
+    } as Env;
+    // A CMS-heavy published page: ownership marker on <html>, then far more
+    // body than the 256 KiB scan budget. Previously this failed with
+    // "too large to verify safely".
+    const largePublishedPage =
+      '<!doctype html><html data-wf-page="home" data-wf-site="local-webflow-site" lang="en"><head><title>Large</title></head><body>' +
+      '<p>cms</p>'.repeat(80 * 1024) +
+      '</body></html>';
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const request = input instanceof Request ? input : new Request(input);
+        if (request.url === 'https://api.webflow.com/beta/token/resolve') {
+          return Response.json({ id: 'local-webflow-user', siteId: 'local-webflow-site' });
+        }
+        if (request.url === 'https://large-site.webflow.io/') {
+          return new Response(largePublishedPage, {
+            status: 200,
+            headers: { 'content-type': 'text/html; charset=utf-8' }
+          });
+        }
+        return Response.json({ error: 'unexpected_request' }, { status: 500 });
+      })
+    );
+
+    const response = await worker.fetch(
+      new Request(`https://preflight.test/v1/reviews/${created.review.id}/runtime-test-packages`, {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer designer-id-token',
+          'content-type': 'application/json'
+        },
+        body: JSON.stringify({
+          targetUrl: 'https://large-site.webflow.io/',
+          sandboxInstallationId: 'local-webflow-site',
+          sandboxOwnershipConfirmed: true,
+          license: {
+            mode: 'installation_allowlist',
+            expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString()
+          },
+          runtimeArtifacts: [
+            {
+              url: 'https://api.consentpro.com/v2/cdn/runtime.js',
+              sha256: 'a'.repeat(64),
+              integrity: TEST_RUNTIME_INTEGRITY
+            }
+          ],
+          negativeProxyProbe: {
+            method: 'GET',
+            urlTemplate: 'https://api.consentpro.com/v2/proxy?url={canaryUrl}'
+          },
+          lifecycle: { readySelector: '[data-runtime-ready]' }
+        })
+      }),
+      productionEnv
+    );
+    expect(response.status).toBe(201);
+    await expect(response.json()).resolves.toMatchObject({
+      testPackage: expect.objectContaining({ status: 'ready' })
+    });
+  });
+
   test('rejects a runtime package whose SRI does not describe the pinned SHA-256 bytes', async () => {
     const form = new FormData();
     form.set(
