@@ -1,3 +1,4 @@
+import { EXPECTED_API_ORIGIN } from '../../../webflow-app-review-runtime-template/src/production-origin';
 import { launchRuntimeObservationInE2B } from '../src/e2b-runtime-launcher';
 import type { Env } from '../src/types';
 
@@ -11,7 +12,7 @@ export default {
     const result = await launchRuntimeObservationInE2B(
       {
         observationJobId: env.PROBE_OBSERVATION_JOB_ID,
-        apiBaseUrl: 'https://webflow-app-review-preflight.createsomething.workers.dev',
+        apiBaseUrl: EXPECTED_API_ORIGIN,
         capability: env.PROBE_CAPABILITY
       },
       env

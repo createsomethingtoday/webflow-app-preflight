@@ -32,7 +32,7 @@
   "vars": {
     "ENVIRONMENT": "production",
     "ALLOWED_ORIGINS": "chrome-extension://eiogakldgljpbbmplgckjkoglfgabblm,https://6a57b0fa70db1b7a0cd666ac.webflow-ext.com",
-    "E2B_RUNTIME_TEMPLATE_ID": "app-review-companion-runtime:791372d3-a8ea-4700-b54a-80a7b3854a0e",
+    "E2B_RUNTIME_TEMPLATE_ID": "app-review-companion-runtime:25557986-745c-4bd9-80bd-ffbd665239fa",
     "WEBFLOW_OAUTH_REDIRECT_URI": "https://webflow-app-review-preflight.webflow-inc.workers.dev/v1/oauth/webflow/callback"
   },
   "d1_databases": [
