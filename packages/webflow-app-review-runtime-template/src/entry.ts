@@ -6,8 +6,7 @@ import {
 
 const PORT = 3_000;
 const MAX_REQUEST_BYTES = 8_192;
-const EXPECTED_API_ORIGIN =
-  'https://webflow-app-review-preflight.createsomething.workers.dev';
+import { EXPECTED_API_ORIGIN } from './production-origin.js';
 // Per-sandbox launch secret injected by the Worker at sandbox create time.
 // When absent, the sandbox falls back to E2B's per-sandbox token only.
 const LAUNCH_SECRET = process.env.APP_REVIEW_RUNTIME_LAUNCH_SECRET;

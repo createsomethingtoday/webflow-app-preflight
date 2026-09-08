@@ -5,8 +5,7 @@ import {
   type RuntimeProcessLauncher
 } from '../src/server.js';
 
-const EXPECTED_API_ORIGIN =
-  'https://webflow-app-review-preflight.createsomething.workers.dev';
+import { EXPECTED_API_ORIGIN } from '../src/production-origin.js';
 const input = {
   observationJobId: '7615de67-693e-467c-8b3c-947dbcbc308c',
   apiBaseUrl: EXPECTED_API_ORIGIN,
@@ -135,6 +134,20 @@ describe('immutable runtime template interface', () => {
     });
     const response = await handle(request());
     expect(response.status).toBe(202);
+    expect(runtime.launch).toHaveBeenCalledOnce();
+  });
+});
+
+// Exercise the deployed coordinator origin against the actual baked policy.
+describe('production coordinator migration', () => {
+  it('accepts the Webflow coordinator and rejects the retired origin', async () => {
+    const runtime = launcher();
+    const handle = createRuntimeTemplateHandler({ expectedApiOrigin: EXPECTED_API_ORIGIN, runtime });
+    const retired = await handle(request({ ...input, apiBaseUrl: 'https://webflow-app-review-preflight.createsomething.workers.dev' }));
+    expect(retired.status).toBe(400);
+    expect(runtime.launch).not.toHaveBeenCalled();
+    const current = await handle(request({ ...input, apiBaseUrl: 'https://webflow-app-review-preflight.webflow-inc.workers.dev' }));
+    expect(current.status).toBe(202);
     expect(runtime.launch).toHaveBeenCalledOnce();
   });
 });
