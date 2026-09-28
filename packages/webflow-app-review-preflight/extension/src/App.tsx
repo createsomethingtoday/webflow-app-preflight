@@ -211,7 +211,8 @@ export function runtimeSecuritySummary(
   return {
     tone: 'fail',
     title: `${issueCount} ${issueCount === 1 ? 'check needs' : 'checks need'} attention`,
-    detail: 'Fix each item, publish the test site, then run the test again.'
+    detail:
+      'These are recommended practices for published-site code. They inform review but do not block submission. Address them, publish the test site, then run the test again.'
   };
 }
 
@@ -555,7 +556,7 @@ function Coverage({
         ? 'Webflow captured the published runtime and its pinned security checks passed.'
         : observedPackage && runtimeIssues(observedPackage).length === 0
           ? 'Webflow captured the published runtime. Automated checks passed; the remaining declarations await manual reviewer confirmation.'
-          : 'Webflow captured the published runtime. Security blockers remain in the result below.'
+          : 'Webflow captured the published runtime. Recommended-practice findings for published-site code are in the result below. They inform review but do not block submission.'
     };
   });
 
@@ -850,7 +851,7 @@ function RuntimeObservationCard({
               {observedIssues.length > 0 ? (
                 <section className="runtime-issues" aria-labelledby="runtime-issues-title">
                   <div className="runtime-issues-heading">
-                    <h3 id="runtime-issues-title">What to fix</h3>
+                    <h3 id="runtime-issues-title">Recommended practices to address</h3>
                     <span>{observedIssues.length}</span>
                   </div>
                   <ol>

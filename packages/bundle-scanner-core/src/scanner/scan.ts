@@ -6,7 +6,10 @@ import type {
   RuleMatcher,
   ProgressCallback,
   LocationType,
-  Confidence
+  Confidence,
+  Severity,
+  ReviewBucket,
+  Disposition
 } from '../types';
 import { matchesAnyGlob } from '../utils/glob';
 
@@ -203,8 +206,15 @@ export function runScan(
         const lineContent = content.substring(lineStart, lineEnd !== -1 ? lineEnd : content.length);
         const trimmedLine = lineContent.trim();
 
-        if (trimmedLine.startsWith('//') || trimmedLine.startsWith('*') || trimmedLine.startsWith('/*')) {
+        if (trimmedLine.startsWith('//')) {
           locationType = 'COMMENT';
+        } else if (trimmedLine.startsWith('*') || trimmedLine.startsWith('/*')) {
+          // Block-comment line: only a comment if the match sits before the
+          // comment closes on this line (`/* note */ eval(x)` is live code).
+          const closeIndex = lineContent.indexOf('*/');
+          if (closeIndex === -1 || lineStart + closeIndex > index) {
+            locationType = 'COMMENT';
+          }
         }
 
         // Determine confidence
@@ -222,9 +232,9 @@ export function runScan(
         }
 
         // Apply conditional overrides
-        let severity = undefined;
-        let reviewBucket = undefined;
-        let disposition = undefined;
+        let severity: Severity | undefined = undefined;
+        let reviewBucket: ReviewBucket | undefined = undefined;
+        let disposition: Disposition | undefined = undefined;
 
         if (cm.matcher.conditionalOverrides) {
           for (const override of cm.matcher.conditionalOverrides) {
@@ -240,6 +250,15 @@ export function runScan(
               console.error('Override regex error:', e);
             }
           }
+        }
+
+        // A match inside a comment never executes. Keep it visible as an
+        // advisory so a reviewer can see it, but it must not block readiness.
+        if (locationType === 'COMMENT') {
+          severity = 'LOW';
+          reviewBucket = 'INFO';
+          disposition = 'INFO';
+          confidenceReason = 'Comment match: does not execute';
         }
 
         // Redact sensitive data in SECURITY findings

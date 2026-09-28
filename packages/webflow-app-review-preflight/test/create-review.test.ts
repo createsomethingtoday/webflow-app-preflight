@@ -394,3 +394,375 @@ describe('createHostedRuntimeReviewArtifact', () => {
   });
 
 });
+
+describe('scope-alignment checks (openapi-internal #964 retained gates)', () => {
+  async function bundleWith(files: Record<string, string>, appName = 'Checkout App'): Promise<ArrayBuffer> {
+    const zip = new JSZip();
+    zip.file('webflow.json', JSON.stringify({ name: appName, apiVersion: '2', publicDir: 'dist' }));
+    for (const [path, content] of Object.entries(files)) {
+      zip.file(path, content);
+    }
+    return zip.generateAsync({ type: 'arraybuffer' });
+  }
+
+  test('flags a credential travelling in a URL query string as a blocker', async () => {
+    const bundle = await bundleWith({
+      'dist/auth.js': 'const url = `/v1/auth/webflow/sign-in?access_token=${token}`;\nfetch(url);'
+    });
+    const review = await createBundleReview({ fileName: 'bundle.zip', bundle });
+
+    const finding = review.guidance.find((item) => item.id === 'SEC-NO-TOKEN-IN-URL');
+    expect(finding?.label).toBe('Security blocker');
+    expect(review.summary.readiness).toBe('changes_required');
+  });
+
+  test('flags debug routes and bypass flags left in the production bundle', async () => {
+    const bundle = await bundleWith({
+      'dist/app.js':
+        'const prefill = "/v1/debug/merchant/prefill";\nif (config.bypassOnboarding) { start(); }'
+    });
+    const review = await createBundleReview({ fileName: 'bundle.zip', bundle });
+
+    const finding = review.guidance.find((item) => item.id === 'PROD-NO-DEBUG-RESIDUE');
+    expect(finding?.label).toBe('Required update');
+  });
+
+  test('asks for an explanation when Designer API mutations are present', async () => {
+    const bundle = await bundleWith({
+      'dist/extension.js': 'await webflow.createStyle("north-button");\nawait webflow.createVariable(collection, "spacing");'
+    });
+    const review = await createBundleReview({ fileName: 'bundle.zip', bundle });
+
+    expect(review.guidance.some((item) => item.id === 'UX-NO-MUTATION-ON-LOAD')).toBe(true);
+  });
+
+  test('flags a development identity in the app manifest', async () => {
+    const bundle = await bundleWith({ 'dist/app.js': 'export const ok = true;' }, 'North Staging App');
+    const review = await createBundleReview({ fileName: 'bundle.zip', bundle });
+
+    const finding = review.guidance.find((item) => item.id === 'PROD-DEV-IDENTITY');
+    expect(finding?.label).toBe('Required update');
+    expect(finding?.evidence[0]?.snippet).toContain('North Staging App');
+  });
+
+  test('does not flag legitimate names containing "test"', async () => {
+    const bundle = await bundleWith({ 'dist/app.js': 'export const ok = true;' }, 'A/B Test Wizard');
+    const review = await createBundleReview({ fileName: 'bundle.zip', bundle });
+
+    expect(review.guidance.find((item) => item.id === 'PROD-DEV-IDENTITY')).toBeUndefined();
+  });
+
+  test('suggests including the package manifest and lockfile for compiled bundles', async () => {
+    const bundle = await bundleWith({ 'dist/app.js': 'export const ok = true;' });
+    const review = await createBundleReview({ fileName: 'bundle.zip', bundle });
+
+    const finding = review.guidance.find((item) => item.id === 'PROD-PACKAGE-MANIFEST');
+    expect(finding?.label).toBe('Suggested update');
+    expect(review.summary.readiness).toBe('ready');
+  });
+
+  test('stays quiet when the manifest and lockfile ship with the bundle', async () => {
+    const bundle = await bundleWith({
+      'dist/app.js': 'export const ok = true;',
+      'package.json': JSON.stringify({ name: 'checkout-app', version: '1.0.0' }),
+      'pnpm-lock.yaml': 'lockfileVersion: 9'
+    });
+    const review = await createBundleReview({ fileName: 'bundle.zip', bundle });
+
+    expect(review.guidance.find((item) => item.id === 'PROD-PACKAGE-MANIFEST')).toBeUndefined();
+  });
+});
+
+describe('Marketplace Guidelines alignment (developers.webflow.com, read 2026-09-28)', () => {
+  async function bundleWith(files: Record<string, string>): Promise<ArrayBuffer> {
+    const zip = new JSZip();
+    zip.file('webflow.json', JSON.stringify({ name: 'Checkout App', apiVersion: '2', publicDir: 'dist' }));
+    zip.file('package.json', JSON.stringify({ name: 'checkout-app', version: '1.0.0' }));
+    zip.file('pnpm-lock.yaml', 'lockfileVersion: 9');
+    for (const [path, content] of Object.entries(files)) zip.file(path, content);
+    return zip.generateAsync({ type: 'arraybuffer' });
+  }
+
+  const review = async (files: Record<string, string>) =>
+    createBundleReview({ fileName: 'bundle.zip', bundle: await bundleWith(files) });
+  const find = (result: Awaited<ReturnType<typeof review>>, id: string) =>
+    result.guidance.find((item) => item.id === id);
+
+  test('a compliant networked extension reaches ready', async () => {
+    const result = await review({
+      'dist/index.js': [
+        'const API = "https://api.example-app.com";',
+        'async function load() { const r = await fetch(API + "/v1/items"); return r.json(); }',
+        'button.addEventListener("click", () => { window.open("https://api.example-app.com/oauth/start", "_blank"); });',
+        'function exportPng(canvas) { return canvas.toBlob((blob) => blob); }',
+        'window.addEventListener("message", (event) => {',
+        '  if (event.origin !== "https://api.example-app.com") return;',
+        '});'
+      ].join('\n')
+    });
+
+    expect(result.summary.securityBlockers).toBe(0);
+    expect(result.summary.requiredUpdates).toBe(0);
+    expect(result.summary.readiness).toBe('ready');
+    expect(find(result, 'UX-NO-POPUPS')?.label).toBe('Suggested update');
+    expect(find(result, 'NET-EXTERNAL-EGRESS')?.label).toBe('Suggested update');
+    expect(find(result, 'PRIV-NO-FINGERPRINTING')).toBeUndefined();
+    expect(find(result, 'SEC-MESSAGE-ORIGIN')).toBeUndefined();
+  });
+
+  test('flags a message handler that never checks event.origin', async () => {
+    const result = await review({
+      'dist/index.js': 'window.addEventListener("message", (event) => {\n  run(event.data);\n});'
+    });
+    expect(find(result, 'SEC-MESSAGE-ORIGIN')?.label).toBe('Required update');
+  });
+
+  test('flags native prototype and global function overrides', async () => {
+    const result = await review({
+      'dist/index.js': 'Array.prototype.push = function () {};\nwindow.fetch = wrappedFetch;'
+    });
+    const finding = find(result, 'SEC-NO-NATIVE-OVERRIDE');
+    expect(finding?.label).toBe('Required update');
+    expect(finding?.evidence).toHaveLength(2);
+  });
+
+  test('does not treat a comparison as an override', async () => {
+    const result = await review({ 'dist/index.js': 'if (window.fetch === nativeFetch) start();' });
+    expect(find(result, 'SEC-NO-NATIVE-OVERRIDE')).toBeUndefined();
+  });
+
+  test('blocks inline event handlers and javascript: URIs', async () => {
+    const result = await review({
+      'dist/index.html': '<a href="javascript:void(0)">x</a><button onclick="go()">Go</button>'
+    });
+    const finding = find(result, 'SEC-CSP-INLINE');
+    expect(finding?.label).toBe('Security blocker');
+    expect(finding?.evidence.length).toBeGreaterThanOrEqual(2);
+  });
+
+  test('flags modifier-key shortcuts but not plain key handling', async () => {
+    const shortcut = await review({ 'dist/index.js': 'if (e.metaKey && e.key === "k") openPalette();' });
+    expect(find(shortcut, 'UX-NO-KEYBOARD-SHORTCUTS')?.label).toBe('Required update');
+
+    const enter = await review({ 'dist/index.js': 'if (e.key === "Enter") submit();' });
+    expect(find(enter, 'UX-NO-KEYBOARD-SHORTCUTS')).toBeUndefined();
+  });
+
+  test('flags private network and cloud metadata URLs, and asks about staging hosts', async () => {
+    const result = await review({
+      'dist/index.js': [
+        'const lan = "https://192.168.1.20:8443/api";',
+        'const meta = "http://169.254.169.254/latest";',
+        'const stg = "https://staging.example-app.com/api";'
+      ].join('\n')
+    });
+    expect(find(result, 'PROD-NO-LOCALHOST')?.label).toBe('Required update');
+    expect(find(result, 'PROD-STAGING-HOST')?.label).toBe('Suggested update');
+  });
+
+  test('asks about runtime base64 decoding without blocking', async () => {
+    const result = await review({ 'dist/index.js': 'const claims = JSON.parse(atob(token.split(".")[1]));' });
+    expect(find(result, 'SEC-RUNTIME-DECODING')?.label).toBe('Suggested update');
+    expect(result.summary.readiness).toBe('ready');
+  });
+
+  test('flags bundles over the 5MB upload limit', async () => {
+    const zip = new JSZip();
+    zip.file('webflow.json', JSON.stringify({ name: 'Checkout App', apiVersion: '2', publicDir: 'dist' }));
+    zip.file('dist/index.js', 'export const ok = true;');
+    // Random bytes do not compress, so the archive itself exceeds 5MB.
+    const noise = new Uint8Array(5.5 * 1024 * 1024);
+    for (let offset = 0; offset < noise.length; offset += 65536) {
+      crypto.getRandomValues(noise.subarray(offset, offset + 65536));
+    }
+    zip.file('dist/noise.bin', noise);
+    const bundle = await zip.generateAsync({ type: 'arraybuffer', compression: 'STORE' });
+    const result = await createBundleReview({ fileName: 'bundle.zip', bundle });
+
+    expect(find(result, 'BUNDLE-SIZE-LIMIT')?.label).toBe('Required update');
+  });
+});
+
+describe('Marketplace Guidelines alignment: precision review', () => {
+  async function bundleWith(files: Record<string, string>): Promise<ArrayBuffer> {
+    const zip = new JSZip();
+    zip.file('webflow.json', JSON.stringify({ name: 'Checkout App', apiVersion: '2', publicDir: 'dist' }));
+    zip.file('package.json', '{}');
+    zip.file('pnpm-lock.yaml', 'lockfileVersion: 9');
+    for (const [path, content] of Object.entries(files)) zip.file(path, content);
+    return zip.generateAsync({ type: 'arraybuffer' });
+  }
+  const review = async (files: Record<string, string>) =>
+    createBundleReview({ fileName: 'bundle.zip', bundle: await bundleWith(files) });
+  const find = (result: Awaited<ReturnType<typeof review>>, id: string) =>
+    result.guidance.find((item) => item.id === id);
+
+  // --- message handlers -------------------------------------------------
+  test('WebSocket and Worker message handlers are not window message handlers', async () => {
+    const result = await review({
+      'dist/index.js': [
+        'const ws = new WebSocket("wss://api.example-app.com/live");',
+        'ws.onmessage = (event) => { render(JSON.parse(event.data)); };',
+        'ws.addEventListener("message", (event) => { log(event.data); });',
+        'worker.addEventListener("message", (event) => { done(event.data); });'
+      ].join('\n')
+    });
+    expect(find(result, 'SEC-MESSAGE-ORIGIN')).toBeUndefined();
+  });
+
+  test('a bare or window.onmessage handler without an origin check is flagged', async () => {
+    const result = await review({
+      'dist/index.js': 'window.onmessage = (event) => { run(event.data); };\naddEventListener("message", (e) => run(e.data));'
+    });
+    expect(find(result, 'SEC-MESSAGE-ORIGIN')?.evidence).toHaveLength(2);
+  });
+
+  test('a delegated handler is asked about, not required', async () => {
+    const result = await review({
+      'dist/index.js': 'useEffect(() => {\n  window.addEventListener("message", handleMessage);\n  return () => window.removeEventListener("message", handleMessage);\n}, []);'
+    });
+    expect(find(result, 'SEC-MESSAGE-ORIGIN')).toBeUndefined();
+    expect(find(result, 'SEC-MESSAGE-ORIGIN-DELEGATED')?.label).toBe('Suggested update');
+  });
+
+  test('an unrelated location.origin nearby does not count as a check', async () => {
+    const result = await review({
+      'dist/index.js': 'window.addEventListener("message", (event) => {\n  const base = location.origin;\n  run(event.data, base);\n});'
+    });
+    expect(find(result, 'SEC-MESSAGE-ORIGIN')?.label).toBe('Required update');
+  });
+
+  test('destructured and allowlist-style origin checks count', async () => {
+    const result = await review({
+      'dist/index.js': [
+        'window.addEventListener("message", ({ origin, data }) => {',
+        '  if (origin !== "https://api.example-app.com") return;',
+        '  run(data);',
+        '});',
+        'window.addEventListener("message", (e) => {',
+        '  if (!ALLOWED.includes(e.origin)) return;',
+        '  run(e.data);',
+        '});'
+      ].join('\n')
+    });
+    expect(find(result, 'SEC-MESSAGE-ORIGIN')).toBeUndefined();
+  });
+
+  // --- native overrides --------------------------------------------------
+  test('guarded polyfills are not native overrides', async () => {
+    const result = await review({
+      'dist/index.js': [
+        'if (!self.fetch) { self.fetch = fetchPolyfill; }',
+        'Element.prototype.matches = Element.prototype.matches || Element.prototype.msMatchesSelector;'
+      ].join('\n')
+    });
+    expect(find(result, 'SEC-NO-NATIVE-OVERRIDE')).toBeUndefined();
+  });
+
+  // --- CSP inline ----------------------------------------------------------
+  test('a javascript: string used for sanitizing is not a blocker', async () => {
+    const result = await review({
+      'dist/index.js': 'function safe(url) {\n  if (url.trim().toLowerCase().startsWith("javascript:")) return "#";\n  return url;\n}'
+    });
+    expect(find(result, 'SEC-CSP-INLINE')).toBeUndefined();
+  });
+
+  test('a javascript: href assigned in code is a blocker', async () => {
+    const result = await review({
+      'dist/index.js': 'link.href = "javascript:void(0)";\nconst el = { href: "javascript:go()" };\na.setAttribute("href", "javascript:void(0)");'
+    });
+    expect(find(result, 'SEC-CSP-INLINE')?.evidence).toHaveLength(3);
+  });
+
+  test('non-handler attributes starting with "on" are not inline handlers', async () => {
+    const result = await review({
+      'dist/index.html': '<div one="1" data-onboarding="step" onboarding="x"></div>'
+    });
+    expect(find(result, 'SEC-CSP-INLINE')).toBeUndefined();
+  });
+
+  // --- keyboard shortcuts --------------------------------------------------
+  test('grouped modifiers and hotkey libraries are shortcuts', async () => {
+    const result = await review({
+      'dist/index.js': [
+        'if ((e.metaKey || e.ctrlKey) && e.key === "k") open();',
+        'hotkeys("cmd+k, ctrl+k", open);',
+        'useHotkeys("mod+shift+p", open);',
+        'Mousetrap.bind("ctrl+s", save);'
+      ].join('\n')
+    });
+    expect(find(result, 'UX-NO-KEYBOARD-SHORTCUTS')?.evidence).toHaveLength(3);
+  });
+
+  // --- staging hosts -------------------------------------------------------
+  test('hyphenated staging labels are caught and well-known dev hosts are not', async () => {
+    const result = await review({
+      'dist/a.js': 'const a = "https://api-staging.example-app.com";',
+      'dist/b.js': 'const b = "https://dev.to/article";',
+      'dist/c.js': 'const c = "https://developer.mozilla.org";'
+    });
+    const finding = find(result, 'PROD-STAGING-HOST');
+    expect(finding?.evidence.map((item) => item.filePath)).toEqual(['dist/a.js']);
+  });
+});
+
+describe('Marketplace Guidelines alignment: real-bundle false positives', () => {
+  async function bundleWith(files: Record<string, string>): Promise<ArrayBuffer> {
+    const zip = new JSZip();
+    zip.file('webflow.json', JSON.stringify({ name: 'Checkout App', apiVersion: '2', publicDir: 'dist' }));
+    zip.file('package.json', '{}');
+    zip.file('pnpm-lock.yaml', 'lockfileVersion: 9');
+    for (const [path, content] of Object.entries(files)) zip.file(path, content);
+    return zip.generateAsync({ type: 'arraybuffer' });
+  }
+  const review = async (files: Record<string, string>) =>
+    createBundleReview({ fileName: 'bundle.zip', bundle: await bundleWith(files) });
+  const find = (result: Awaited<ReturnType<typeof review>>, id: string) =>
+    result.guidance.find((item) => item.id === id);
+
+  test('a match inside a comment is advisory, because comments do not execute', async () => {
+    const result = await review({
+      'dist/index.js': [
+        '// As Andi Smith suggests (http://www.andismith.com/blog/2012/02/modernizr-prefixed/)',
+        '/* legacy: eval("x") was used here */',
+        'export const ok = true;'
+      ].join('\n')
+    });
+    expect(find(result, 'NET-URL-HYGIENE')?.label).toBe('Suggested update');
+    expect(find(result, 'SEC-NO-DCE')?.label).toBe('Suggested update');
+    expect(result.summary.readiness).toBe('ready');
+  });
+
+  test('the same patterns in live code stay required or blocking', async () => {
+    const result = await review({
+      'dist/index.js': 'const url = "http://www.andismith.com/";\neval("x");'
+    });
+    expect(find(result, 'NET-URL-HYGIENE')?.label).toBe('Required update');
+    expect(find(result, 'SEC-NO-DCE')?.label).toBe('Security blocker');
+  });
+
+  test('framework-internal innerHTML is a confirmation, not a required update', async () => {
+    const result = await review({
+      'dist/index.js': 'function setInnerHTML(node, html) {\n  node.innerHTML = html;\n}\nel.insertAdjacentHTML("beforeend", markup);'
+    });
+    expect(find(result, 'SEC-UNSAFE-HTML')?.label).toBe('Suggested update');
+    expect(result.summary.readiness).toBe('ready');
+  });
+
+  test('a block comment that closes before the match is live code', async () => {
+    const result = await review({ 'dist/index.js': '/* legacy */ eval("x");' });
+    expect(find(result, 'SEC-NO-DCE')?.label).toBe('Security blocker');
+  });
+
+  test('document.write stays a required update', async () => {
+    const result = await review({ 'dist/index.js': 'document.write("<p>hi</p>");' });
+    expect(find(result, 'SEC-UNSAFE-HTML')?.label).toBe('Required update');
+  });
+
+  test('script markup pushed through innerHTML is still a blocker', async () => {
+    const result = await review({
+      'dist/index.js': 'container.innerHTML = \'<script src="https://cdn.example.com/x.js"></script>\';'
+    });
+    expect(find(result, 'SEC-SCRIPT-INJECTION')?.label).toBe('Security blocker');
+  });
+});
