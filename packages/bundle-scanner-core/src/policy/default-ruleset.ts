@@ -244,10 +244,11 @@ export const defaultRuleset: Ruleset = {
       ruleId: 'SEC-UNSAFE-HTML',
       name: 'Unsafe HTML Injection',
       category: 'SECURITY',
-      reviewBucket: 'ACTION_REQUIRED',
-      severity: 'HIGH',
-      disposition: 'ACTION_REQUIRED',
-      description: 'Avoid document.write, innerHTML, outerHTML interactions that bypass React/safe DOM methods.',
+      reviewBucket: 'NEEDS_EXPLANATION',
+      severity: 'LOW',
+      disposition: 'INFO',
+      description:
+        'Raw HTML insertion found. Confirm the markup never carries untrusted data and never inserts script elements. Framework internals such as React DOM trigger this too.',
       matchers: [
         {
           id: 'doc-write',
@@ -256,7 +257,16 @@ export const defaultRuleset: Ruleset = {
           flags: 'i',
           fileGlobs: ['**/*.{js,ts,jsx,tsx,mjs,cjs}'],
           triggerTokens: ['document.write'],
-          confidence: 'HIGH'
+          confidence: 'HIGH',
+          // document.write is never acceptable inside the Designer iframe.
+          conditionalOverrides: [
+            {
+              pattern: 'document\\.write',
+              newSeverity: 'HIGH',
+              newReviewBucket: 'ACTION_REQUIRED',
+              newDisposition: 'ACTION_REQUIRED'
+            }
+          ]
         },
         {
           id: 'inner-outer-html',
@@ -701,7 +711,8 @@ export const defaultRuleset: Ruleset = {
         {
           id: 'staging-or-dev-host',
           type: 'regex',
-          pattern: 'https?:\\/\\/([a-z0-9-]+\\.)*(staging|stage|stg|dev|qa|uat)[.-][a-z0-9.-]*[a-z0-9]',
+          pattern: 'https?:\\/\\/(?:[a-z0-9-]+\\.)*(?:[a-z0-9]+-)?(?:staging|stage|stg|dev|qa|uat)[.-][a-z0-9.-]*[a-z0-9]',
+          allowlistPatterns: ['https?:\\/\\/(?:www\\.)?dev\\.(?:to|azure\\.com|mysql\\.com|java\\.net|twitch\\.tv)\\b'],
           flags: 'gi',
           fileGlobs: ['**/*.{js,ts,jsx,tsx,mjs,cjs,json,html}'],
           triggerTokens: ['staging', 'stage', 'dev', 'qa', 'uat'],
@@ -721,16 +732,45 @@ export const defaultRuleset: Ruleset = {
         'Every message event handler in the extension UI must check event.origin against an explicit allowlist before processing the message.',
       matchers: [
         {
-          id: 'message-listener-without-origin',
+          id: 'inline-window-message-handler',
           type: 'regex',
-          pattern: '(addEventListener\\s*\\(\\s*[\'"`]message[\'"`]|\\bonmessage\\s*=(?!=))',
+          // Window-level listeners only: window.*, self.*, globalThis.*, or a
+          // bare call. Socket, worker, and port handlers have no cross-origin
+          // sender and are not matched. The handler must be inline so the
+          // origin check can be seen in the surrounding lines.
+          pattern: '(?:\\b(?:window|self|globalThis)\\.|(?<![\\w$.]))(?:addEventListener\\s*\\(\\s*[\'"`]message[\'"`]\\s*,\\s*(?:async\\s*)?(?:function\\b|\\(|[\\w$]+\\s*=>)|onmessage\\s*=\\s*(?:async\\s*)?(?:function\\b|\\(|[\\w$]+\\s*=>))',
           flags: 'g',
           fileGlobs: ['**/*.{js,ts,jsx,tsx,mjs,cjs,html}'],
           triggerTokens: ['message', 'onmessage'],
           confidence: 'MEDIUM',
-          // The allowlist is tested against the match plus three lines of
-          // context, so a handler that reads .origin nearby is not flagged.
-          allowlistPatterns: ['\\.origin\\b']
+          // Tested against the match plus three lines of context: a
+          // comparison against .origin or a destructured origin, or passing
+          // .origin into an allowlist lookup, counts as a check.
+          allowlistPatterns: [
+            '\\.origin\\s*(?:!==|===|!=|==)|(?:!==|===|!=|==)\\s*[\\w$.]*\\.origin\\b|\\borigin\\s*(?:!==|===|!=|==)|\\(\\s*[\\w$.]+\\.origin\\s*\\)'
+          ]
+        }
+      ]
+    },
+
+    {
+      ruleId: 'SEC-MESSAGE-ORIGIN-DELEGATED',
+      name: 'Delegated message Handler',
+      category: 'SECURITY',
+      reviewBucket: 'NEEDS_EXPLANATION',
+      severity: 'LOW',
+      disposition: 'INFO',
+      description:
+        'A window message listener hands off to a named handler. Confirm that handler checks event.origin against an explicit allowlist before processing the message.',
+      matchers: [
+        {
+          id: 'delegated-window-message-handler',
+          type: 'regex',
+          pattern: '(?:\\b(?:window|self|globalThis)\\.|(?<![\\w$.]))(?:addEventListener\\s*\\(\\s*[\'"`]message[\'"`]\\s*,\\s*[\\w$.]+\\s*[,)]|onmessage\\s*=\\s*[\\w$.]+\\s*;)',
+          flags: 'g',
+          fileGlobs: ['**/*.{js,ts,jsx,tsx,mjs,cjs,html}'],
+          triggerTokens: ['message', 'onmessage'],
+          confidence: 'LOW'
         }
       ]
     },
@@ -752,7 +792,9 @@ export const defaultRuleset: Ruleset = {
           flags: 'g',
           fileGlobs: ['**/*.{js,ts,jsx,tsx,mjs,cjs}'],
           triggerTokens: ['.prototype.'],
-          confidence: 'MEDIUM'
+          confidence: 'MEDIUM',
+          // A polyfill keeps the native when present: X.prototype.y = X.prototype.y || ...
+          allowlistPatterns: ['prototype\\.[\\w$]+\\s*=\\s*[\\w$]+\\.prototype\\.[\\w$]+\\s*(?:\\|\\||\\?\\?)']
         },
         {
           id: 'global-function-assignment',
@@ -760,8 +802,10 @@ export const defaultRuleset: Ruleset = {
           pattern: '\\b(window|globalThis|self)\\.(fetch|XMLHttpRequest|open|postMessage|setTimeout|setInterval|addEventListener|webflow)\\s*=(?!=)',
           flags: 'g',
           fileGlobs: ['**/*.{js,ts,jsx,tsx,mjs,cjs}'],
-          triggerTokens: ['window.', 'globalThis.'],
-          confidence: 'HIGH'
+          triggerTokens: ['window.', 'globalThis.', 'self.'],
+          confidence: 'HIGH',
+          // A polyfill assigns only when the native is missing: if (!self.fetch) { self.fetch = ... }
+          allowlistPatterns: ['if\\s*\\(\\s*!\\s*(?:window|globalThis|self)\\.[\\w$]+\\s*\\)']
         }
       ]
     },
@@ -779,18 +823,29 @@ export const defaultRuleset: Ruleset = {
         {
           id: 'inline-event-handler',
           type: 'regex',
-          pattern: '<[a-zA-Z][^>]*\\son[a-z]+\\s*=\\s*[\'"]',
-          flags: 'g',
-          fileGlobs: ['**/*.{html,htm}'],
+          pattern: '<[a-zA-Z][^>]*\\son(?:abort|animation\\w*|auxclick|beforeunload|blur|canplay\\w*|change|click|close|contextmenu|copy|cut|dblclick|drag\\w*|drop|ended|error|focus\\w*|hashchange|input|invalid|key\\w+|load\\w*|message|mouse\\w+|paste|pause|play\\w*|pointer\\w+|popstate|progress|reset|resize|scroll|search|select\\w*|submit|toggle|touch\\w+|transition\\w*|unload|wheel)\\s*=\\s*[\'"]',
+          flags: 'gi',
+          fileGlobs: ['**/*.{html,htm,svg}'],
           triggerTokens: ['on'],
           confidence: 'HIGH'
         },
         {
-          id: 'javascript-uri',
+          id: 'javascript-uri-attribute',
           type: 'regex',
-          pattern: '[\'"`]\\s*javascript:',
+          pattern: '\\b(?:href|src|action|formaction)\\s*=\\s*[\'"]\\s*javascript:',
           flags: 'gi',
-          fileGlobs: ['**/*.{js,ts,jsx,tsx,mjs,cjs,html,htm}'],
+          fileGlobs: ['**/*.{html,htm,svg}'],
+          triggerTokens: ['javascript:'],
+          confidence: 'HIGH'
+        },
+        {
+          id: 'javascript-uri-in-code',
+          type: 'regex',
+          // Only assignments into URL-bearing properties and attributes.
+          // A bare "javascript:" string is usually a sanitizer and is not matched.
+          pattern: '(?:\\b(?:href|src|action|formaction)\\s*[:=]\\s*|setAttribute\\s*\\(\\s*[\'"](?:href|src|action|formaction)[\'"]\\s*,\\s*)[\'"`]\\s*javascript:',
+          flags: 'gi',
+          fileGlobs: ['**/*.{js,ts,jsx,tsx,mjs,cjs}'],
           triggerTokens: ['javascript:'],
           confidence: 'HIGH'
         }
@@ -832,14 +887,23 @@ export const defaultRuleset: Ruleset = {
         {
           id: 'modifier-plus-key',
           type: 'regex',
-          pattern: '(\\b(metaKey|ctrlKey|altKey)\\s*&&\\s*[\\w$.]*\\.(key|code|keyCode)\\s*===?\\s*[\'"`\\d]|\\.(key|code)\\s*===?\\s*[\'"`][^\'"`]{1,12}[\'"`]\\s*&&\\s*[\\w$.]*\\.(metaKey|ctrlKey|altKey)\\b)',
+          pattern: '(?:\\b(?:metaKey|ctrlKey|altKey)\\b[^;{}]{0,40}?&&[^;{}]{0,40}?\\.(?:key|code|keyCode|which)\\s*===?|\\.(?:key|code|keyCode|which)\\s*===?[^;{}]{0,40}?&&[^;{}]{0,40}?\\b(?:metaKey|ctrlKey|altKey)\\b)',
           flags: 'g',
           fileGlobs: ['**/*.{js,ts,jsx,tsx,mjs,cjs}'],
           triggerTokens: ['metaKey', 'ctrlKey', 'altKey'],
           confidence: 'MEDIUM'
+        },
+        {
+          id: 'hotkey-library-binding',
+          type: 'regex',
+          pattern: '\\b(?:hotkeys|useHotkeys|tinykeys|Mousetrap\\.bind|bindKey|registerShortcut)\\s*\\(\\s*(?:[\\w$]+\\s*,\\s*)?[\'"`][^\'"`]*\\b(?:mod|cmd|command|ctrl|control|meta|alt|option)\\s*\\+',
+          flags: 'gi',
+          fileGlobs: ['**/*.{js,ts,jsx,tsx,mjs,cjs}'],
+          triggerTokens: ['hotkeys', 'Mousetrap', 'tinykeys'],
+          confidence: 'HIGH'
         }
       ]
-    }
+    },
   ]
 };
 

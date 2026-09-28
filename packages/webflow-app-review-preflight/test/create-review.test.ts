@@ -582,3 +582,187 @@ describe('Marketplace Guidelines alignment (developers.webflow.com, read 2026-09
     expect(find(result, 'BUNDLE-SIZE-LIMIT')?.label).toBe('Required update');
   });
 });
+
+describe('Marketplace Guidelines alignment: precision review', () => {
+  async function bundleWith(files: Record<string, string>): Promise<ArrayBuffer> {
+    const zip = new JSZip();
+    zip.file('webflow.json', JSON.stringify({ name: 'Checkout App', apiVersion: '2', publicDir: 'dist' }));
+    zip.file('package.json', '{}');
+    zip.file('pnpm-lock.yaml', 'lockfileVersion: 9');
+    for (const [path, content] of Object.entries(files)) zip.file(path, content);
+    return zip.generateAsync({ type: 'arraybuffer' });
+  }
+  const review = async (files: Record<string, string>) =>
+    createBundleReview({ fileName: 'bundle.zip', bundle: await bundleWith(files) });
+  const find = (result: Awaited<ReturnType<typeof review>>, id: string) =>
+    result.guidance.find((item) => item.id === id);
+
+  // --- message handlers -------------------------------------------------
+  test('WebSocket and Worker message handlers are not window message handlers', async () => {
+    const result = await review({
+      'dist/index.js': [
+        'const ws = new WebSocket("wss://api.example-app.com/live");',
+        'ws.onmessage = (event) => { render(JSON.parse(event.data)); };',
+        'ws.addEventListener("message", (event) => { log(event.data); });',
+        'worker.addEventListener("message", (event) => { done(event.data); });'
+      ].join('\n')
+    });
+    expect(find(result, 'SEC-MESSAGE-ORIGIN')).toBeUndefined();
+  });
+
+  test('a bare or window.onmessage handler without an origin check is flagged', async () => {
+    const result = await review({
+      'dist/index.js': 'window.onmessage = (event) => { run(event.data); };\naddEventListener("message", (e) => run(e.data));'
+    });
+    expect(find(result, 'SEC-MESSAGE-ORIGIN')?.evidence).toHaveLength(2);
+  });
+
+  test('a delegated handler is asked about, not required', async () => {
+    const result = await review({
+      'dist/index.js': 'useEffect(() => {\n  window.addEventListener("message", handleMessage);\n  return () => window.removeEventListener("message", handleMessage);\n}, []);'
+    });
+    expect(find(result, 'SEC-MESSAGE-ORIGIN')).toBeUndefined();
+    expect(find(result, 'SEC-MESSAGE-ORIGIN-DELEGATED')?.label).toBe('Suggested update');
+  });
+
+  test('an unrelated location.origin nearby does not count as a check', async () => {
+    const result = await review({
+      'dist/index.js': 'window.addEventListener("message", (event) => {\n  const base = location.origin;\n  run(event.data, base);\n});'
+    });
+    expect(find(result, 'SEC-MESSAGE-ORIGIN')?.label).toBe('Required update');
+  });
+
+  test('destructured and allowlist-style origin checks count', async () => {
+    const result = await review({
+      'dist/index.js': [
+        'window.addEventListener("message", ({ origin, data }) => {',
+        '  if (origin !== "https://api.example-app.com") return;',
+        '  run(data);',
+        '});',
+        'window.addEventListener("message", (e) => {',
+        '  if (!ALLOWED.includes(e.origin)) return;',
+        '  run(e.data);',
+        '});'
+      ].join('\n')
+    });
+    expect(find(result, 'SEC-MESSAGE-ORIGIN')).toBeUndefined();
+  });
+
+  // --- native overrides --------------------------------------------------
+  test('guarded polyfills are not native overrides', async () => {
+    const result = await review({
+      'dist/index.js': [
+        'if (!self.fetch) { self.fetch = fetchPolyfill; }',
+        'Element.prototype.matches = Element.prototype.matches || Element.prototype.msMatchesSelector;'
+      ].join('\n')
+    });
+    expect(find(result, 'SEC-NO-NATIVE-OVERRIDE')).toBeUndefined();
+  });
+
+  // --- CSP inline ----------------------------------------------------------
+  test('a javascript: string used for sanitizing is not a blocker', async () => {
+    const result = await review({
+      'dist/index.js': 'function safe(url) {\n  if (url.trim().toLowerCase().startsWith("javascript:")) return "#";\n  return url;\n}'
+    });
+    expect(find(result, 'SEC-CSP-INLINE')).toBeUndefined();
+  });
+
+  test('a javascript: href assigned in code is a blocker', async () => {
+    const result = await review({
+      'dist/index.js': 'link.href = "javascript:void(0)";\nconst el = { href: "javascript:go()" };\na.setAttribute("href", "javascript:void(0)");'
+    });
+    expect(find(result, 'SEC-CSP-INLINE')?.evidence).toHaveLength(3);
+  });
+
+  test('non-handler attributes starting with "on" are not inline handlers', async () => {
+    const result = await review({
+      'dist/index.html': '<div one="1" data-onboarding="step" onboarding="x"></div>'
+    });
+    expect(find(result, 'SEC-CSP-INLINE')).toBeUndefined();
+  });
+
+  // --- keyboard shortcuts --------------------------------------------------
+  test('grouped modifiers and hotkey libraries are shortcuts', async () => {
+    const result = await review({
+      'dist/index.js': [
+        'if ((e.metaKey || e.ctrlKey) && e.key === "k") open();',
+        'hotkeys("cmd+k, ctrl+k", open);',
+        'useHotkeys("mod+shift+p", open);',
+        'Mousetrap.bind("ctrl+s", save);'
+      ].join('\n')
+    });
+    expect(find(result, 'UX-NO-KEYBOARD-SHORTCUTS')?.evidence).toHaveLength(3);
+  });
+
+  // --- staging hosts -------------------------------------------------------
+  test('hyphenated staging labels are caught and well-known dev hosts are not', async () => {
+    const result = await review({
+      'dist/a.js': 'const a = "https://api-staging.example-app.com";',
+      'dist/b.js': 'const b = "https://dev.to/article";',
+      'dist/c.js': 'const c = "https://developer.mozilla.org";'
+    });
+    const finding = find(result, 'PROD-STAGING-HOST');
+    expect(finding?.evidence.map((item) => item.filePath)).toEqual(['dist/a.js']);
+  });
+});
+
+describe('Marketplace Guidelines alignment: real-bundle false positives', () => {
+  async function bundleWith(files: Record<string, string>): Promise<ArrayBuffer> {
+    const zip = new JSZip();
+    zip.file('webflow.json', JSON.stringify({ name: 'Checkout App', apiVersion: '2', publicDir: 'dist' }));
+    zip.file('package.json', '{}');
+    zip.file('pnpm-lock.yaml', 'lockfileVersion: 9');
+    for (const [path, content] of Object.entries(files)) zip.file(path, content);
+    return zip.generateAsync({ type: 'arraybuffer' });
+  }
+  const review = async (files: Record<string, string>) =>
+    createBundleReview({ fileName: 'bundle.zip', bundle: await bundleWith(files) });
+  const find = (result: Awaited<ReturnType<typeof review>>, id: string) =>
+    result.guidance.find((item) => item.id === id);
+
+  test('a match inside a comment is advisory, because comments do not execute', async () => {
+    const result = await review({
+      'dist/index.js': [
+        '// As Andi Smith suggests (http://www.andismith.com/blog/2012/02/modernizr-prefixed/)',
+        '/* legacy: eval("x") was used here */',
+        'export const ok = true;'
+      ].join('\n')
+    });
+    expect(find(result, 'NET-URL-HYGIENE')?.label).toBe('Suggested update');
+    expect(find(result, 'SEC-NO-DCE')?.label).toBe('Suggested update');
+    expect(result.summary.readiness).toBe('ready');
+  });
+
+  test('the same patterns in live code stay required or blocking', async () => {
+    const result = await review({
+      'dist/index.js': 'const url = "http://www.andismith.com/";\neval("x");'
+    });
+    expect(find(result, 'NET-URL-HYGIENE')?.label).toBe('Required update');
+    expect(find(result, 'SEC-NO-DCE')?.label).toBe('Security blocker');
+  });
+
+  test('framework-internal innerHTML is a confirmation, not a required update', async () => {
+    const result = await review({
+      'dist/index.js': 'function setInnerHTML(node, html) {\n  node.innerHTML = html;\n}\nel.insertAdjacentHTML("beforeend", markup);'
+    });
+    expect(find(result, 'SEC-UNSAFE-HTML')?.label).toBe('Suggested update');
+    expect(result.summary.readiness).toBe('ready');
+  });
+
+  test('a block comment that closes before the match is live code', async () => {
+    const result = await review({ 'dist/index.js': '/* legacy */ eval("x");' });
+    expect(find(result, 'SEC-NO-DCE')?.label).toBe('Security blocker');
+  });
+
+  test('document.write stays a required update', async () => {
+    const result = await review({ 'dist/index.js': 'document.write("<p>hi</p>");' });
+    expect(find(result, 'SEC-UNSAFE-HTML')?.label).toBe('Required update');
+  });
+
+  test('script markup pushed through innerHTML is still a blocker', async () => {
+    const result = await review({
+      'dist/index.js': 'container.innerHTML = \'<script src="https://cdn.example.com/x.js"></script>\';'
+    });
+    expect(find(result, 'SEC-SCRIPT-INJECTION')?.label).toBe('Security blocker');
+  });
+});
