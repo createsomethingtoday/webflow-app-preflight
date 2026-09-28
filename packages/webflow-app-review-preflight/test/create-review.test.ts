@@ -472,3 +472,113 @@ describe('scope-alignment checks (openapi-internal #964 retained gates)', () => 
     expect(review.guidance.find((item) => item.id === 'PROD-PACKAGE-MANIFEST')).toBeUndefined();
   });
 });
+
+describe('Marketplace Guidelines alignment (developers.webflow.com, read 2026-09-28)', () => {
+  async function bundleWith(files: Record<string, string>): Promise<ArrayBuffer> {
+    const zip = new JSZip();
+    zip.file('webflow.json', JSON.stringify({ name: 'Checkout App', apiVersion: '2', publicDir: 'dist' }));
+    zip.file('package.json', JSON.stringify({ name: 'checkout-app', version: '1.0.0' }));
+    zip.file('pnpm-lock.yaml', 'lockfileVersion: 9');
+    for (const [path, content] of Object.entries(files)) zip.file(path, content);
+    return zip.generateAsync({ type: 'arraybuffer' });
+  }
+
+  const review = async (files: Record<string, string>) =>
+    createBundleReview({ fileName: 'bundle.zip', bundle: await bundleWith(files) });
+  const find = (result: Awaited<ReturnType<typeof review>>, id: string) =>
+    result.guidance.find((item) => item.id === id);
+
+  test('a compliant networked extension reaches ready', async () => {
+    const result = await review({
+      'dist/index.js': [
+        'const API = "https://api.example-app.com";',
+        'async function load() { const r = await fetch(API + "/v1/items"); return r.json(); }',
+        'button.addEventListener("click", () => { window.open("https://api.example-app.com/oauth/start", "_blank"); });',
+        'function exportPng(canvas) { return canvas.toBlob((blob) => blob); }',
+        'window.addEventListener("message", (event) => {',
+        '  if (event.origin !== "https://api.example-app.com") return;',
+        '});'
+      ].join('\n')
+    });
+
+    expect(result.summary.securityBlockers).toBe(0);
+    expect(result.summary.requiredUpdates).toBe(0);
+    expect(result.summary.readiness).toBe('ready');
+    expect(find(result, 'UX-NO-POPUPS')?.label).toBe('Suggested update');
+    expect(find(result, 'NET-EXTERNAL-EGRESS')?.label).toBe('Suggested update');
+    expect(find(result, 'PRIV-NO-FINGERPRINTING')).toBeUndefined();
+    expect(find(result, 'SEC-MESSAGE-ORIGIN')).toBeUndefined();
+  });
+
+  test('flags a message handler that never checks event.origin', async () => {
+    const result = await review({
+      'dist/index.js': 'window.addEventListener("message", (event) => {\n  run(event.data);\n});'
+    });
+    expect(find(result, 'SEC-MESSAGE-ORIGIN')?.label).toBe('Required update');
+  });
+
+  test('flags native prototype and global function overrides', async () => {
+    const result = await review({
+      'dist/index.js': 'Array.prototype.push = function () {};\nwindow.fetch = wrappedFetch;'
+    });
+    const finding = find(result, 'SEC-NO-NATIVE-OVERRIDE');
+    expect(finding?.label).toBe('Required update');
+    expect(finding?.evidence).toHaveLength(2);
+  });
+
+  test('does not treat a comparison as an override', async () => {
+    const result = await review({ 'dist/index.js': 'if (window.fetch === nativeFetch) start();' });
+    expect(find(result, 'SEC-NO-NATIVE-OVERRIDE')).toBeUndefined();
+  });
+
+  test('blocks inline event handlers and javascript: URIs', async () => {
+    const result = await review({
+      'dist/index.html': '<a href="javascript:void(0)">x</a><button onclick="go()">Go</button>'
+    });
+    const finding = find(result, 'SEC-CSP-INLINE');
+    expect(finding?.label).toBe('Security blocker');
+    expect(finding?.evidence.length).toBeGreaterThanOrEqual(2);
+  });
+
+  test('flags modifier-key shortcuts but not plain key handling', async () => {
+    const shortcut = await review({ 'dist/index.js': 'if (e.metaKey && e.key === "k") openPalette();' });
+    expect(find(shortcut, 'UX-NO-KEYBOARD-SHORTCUTS')?.label).toBe('Required update');
+
+    const enter = await review({ 'dist/index.js': 'if (e.key === "Enter") submit();' });
+    expect(find(enter, 'UX-NO-KEYBOARD-SHORTCUTS')).toBeUndefined();
+  });
+
+  test('flags private network and cloud metadata URLs, and asks about staging hosts', async () => {
+    const result = await review({
+      'dist/index.js': [
+        'const lan = "https://192.168.1.20:8443/api";',
+        'const meta = "http://169.254.169.254/latest";',
+        'const stg = "https://staging.example-app.com/api";'
+      ].join('\n')
+    });
+    expect(find(result, 'PROD-NO-LOCALHOST')?.label).toBe('Required update');
+    expect(find(result, 'PROD-STAGING-HOST')?.label).toBe('Suggested update');
+  });
+
+  test('asks about runtime base64 decoding without blocking', async () => {
+    const result = await review({ 'dist/index.js': 'const claims = JSON.parse(atob(token.split(".")[1]));' });
+    expect(find(result, 'SEC-RUNTIME-DECODING')?.label).toBe('Suggested update');
+    expect(result.summary.readiness).toBe('ready');
+  });
+
+  test('flags bundles over the 5MB upload limit', async () => {
+    const zip = new JSZip();
+    zip.file('webflow.json', JSON.stringify({ name: 'Checkout App', apiVersion: '2', publicDir: 'dist' }));
+    zip.file('dist/index.js', 'export const ok = true;');
+    // Random bytes do not compress, so the archive itself exceeds 5MB.
+    const noise = new Uint8Array(5.5 * 1024 * 1024);
+    for (let offset = 0; offset < noise.length; offset += 65536) {
+      crypto.getRandomValues(noise.subarray(offset, offset + 65536));
+    }
+    zip.file('dist/noise.bin', noise);
+    const bundle = await zip.generateAsync({ type: 'arraybuffer', compression: 'STORE' });
+    const result = await createBundleReview({ fileName: 'bundle.zip', bundle });
+
+    expect(find(result, 'BUNDLE-SIZE-LIMIT')?.label).toBe('Required update');
+  });
+});

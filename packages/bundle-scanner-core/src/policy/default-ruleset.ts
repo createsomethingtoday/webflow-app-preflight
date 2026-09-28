@@ -10,7 +10,7 @@ import type { Ruleset } from '../types';
  */
 export const defaultRuleset: Ruleset = {
   schemaVersion: 'wf-marketplace-scanner-ruleset@1.0.0',
-  rulesetVersion: '1.3.0-checklist-complete',
+  rulesetVersion: '1.4.0-guidelines-2026-09-28',
   generatedAt: '2026-01-16T14:00:00Z',
   rules: [
     // ========================================================================
@@ -338,10 +338,11 @@ export const defaultRuleset: Ruleset = {
       ruleId: 'NET-EXTERNAL-EGRESS',
       name: 'External API Calls',
       category: 'NETWORK',
-      reviewBucket: 'NEEDS_EXPLANATION',
-      severity: 'MEDIUM',
+      reviewBucket: 'INFO',
+      severity: 'INFO',
       disposition: 'INFO',
-      description: 'Review third-party data egress.',
+      description:
+        'Network calls found. Every endpoint must use HTTPS and point to production, and credential headers must never go to non-Webflow domains.',
       matchers: [
         {
           id: 'fetch-xhr',
@@ -466,10 +467,11 @@ export const defaultRuleset: Ruleset = {
       ruleId: 'SEC-WEBRTC-HARDWARE',
       name: 'Hardware Access (Mic/Cam)',
       category: 'PRIVACY',
-      reviewBucket: 'AUTO_REJECT',
-      severity: 'BLOCKER',
-      disposition: 'REJECTED',
-      description: 'Accessing microphone, camera, or screen capture in Designer is prohibited.',
+      reviewBucket: 'NEEDS_EXPLANATION',
+      severity: 'LOW',
+      disposition: 'INFO',
+      description:
+        'Camera, microphone, and screen capture may start only on direct user interaction, after clear disclosure UI. Confirm both.',
       matchers: [
         {
           id: 'get-user-media',
@@ -494,31 +496,22 @@ export const defaultRuleset: Ruleset = {
 
     {
       ruleId: 'PRIV-NO-FINGERPRINTING',
-      name: 'Fingerprinting & Session Replay',
+      name: 'Session Replay',
       category: 'PRIVACY',
-      reviewBucket: 'AUTO_REJECT',
-      severity: 'BLOCKER',
-      disposition: 'REJECTED',
-      description: 'Session replay (rrweb, FullStory) and fingerprinting are prohibited.',
+      reviewBucket: 'NEEDS_EXPLANATION',
+      severity: 'LOW',
+      disposition: 'INFO',
+      description:
+        'Session replay found. Data collection must be disclosed clearly in the listing, and visitor data must never go beyond what the listing states.',
       matchers: [
         {
           id: 'replay-libs',
           type: 'regex',
-          pattern: '\\b(rrweb|FullStory|LogRocket|Hotjar|mixpanel)\\b',
+          pattern: '\\b(rrweb|FullStory|LogRocket|Hotjar)\\b',
           flags: 'i',
           fileGlobs: ['**/*.{js,ts,jsx,tsx,mjs,cjs,json}'],
           triggerTokens: ['rrweb', 'FullStory'],
           confidence: 'MEDIUM'
-        },
-        {
-          id: 'canvas-readback',
-          type: 'regex',
-          pattern: '(toDataURL|getImageData|toBlob)',
-          flags: 'g',
-          fileGlobs: ['**/*.{js,ts,jsx,tsx,mjs,cjs}'],
-          triggerTokens: ['toDataURL', 'getImageData'],
-          confidence: 'LOW',
-          notes: 'Verify this is not used for persistent ID generation.'
         }
       ]
     },
@@ -531,10 +524,11 @@ export const defaultRuleset: Ruleset = {
       ruleId: 'UX-NO-SILENT-MUTATIONS',
       name: 'Silent Canvas Mutations',
       category: 'UX',
-      reviewBucket: 'ACTION_REQUIRED',
-      severity: 'MEDIUM',
-      disposition: 'ACTION_REQUIRED',
-      description: 'Modifications must be user-initiated. No background loops/observers writing to canvas.',
+      reviewBucket: 'NEEDS_EXPLANATION',
+      severity: 'LOW',
+      disposition: 'INFO',
+      description:
+        'Every state-changing action must trace to a direct user interaction. Confirm this observer does not write to the site on its own.',
       matchers: [
         {
           id: 'mutation-observer',
@@ -552,10 +546,11 @@ export const defaultRuleset: Ruleset = {
       ruleId: 'UX-NO-POPUPS',
       name: 'Prohibited Popups',
       category: 'UX',
-      reviewBucket: 'AUTO_REJECT',
-      severity: 'BLOCKER',
-      disposition: 'REJECTED',
-      description: 'Do not spawn new windows/popups. Use in-panel modals.',
+      reviewBucket: 'NEEDS_EXPLANATION',
+      severity: 'LOW',
+      disposition: 'INFO',
+      description:
+        'Popups and new windows are allowed only on direct user interaction, never on load or a timer. Confirm this opens from a click or other user action.',
       matchers: [
         {
           id: 'window-open',
@@ -581,7 +576,8 @@ export const defaultRuleset: Ruleset = {
       reviewBucket: 'ACTION_REQUIRED',
       severity: 'MEDIUM',
       disposition: 'ACTION_REQUIRED',
-      description: 'Remove localhost, 127.0.0.1, and tunnels from production code.',
+      description:
+        'Every embedded URL must point to production. Remove localhost, loopback, private network, cloud metadata, and tunnel references.',
       matchers: [
         {
           id: 'localhost-url',
@@ -590,6 +586,15 @@ export const defaultRuleset: Ruleset = {
           flags: 'i',
           fileGlobs: ['**/*.{js,ts,jsx,tsx,mjs,cjs,json}'],
           triggerTokens: ['localhost', '127.0.0.1', 'ngrok'],
+          confidence: 'HIGH'
+        },
+        {
+          id: 'private-network-or-metadata',
+          type: 'regex',
+          pattern: 'https?:\\/\\/(10\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}|192\\.168\\.\\d{1,3}\\.\\d{1,3}|172\\.(1[6-9]|2\\d|3[01])\\.\\d{1,3}\\.\\d{1,3}|169\\.254\\.\\d{1,3}\\.\\d{1,3}|\\[::1\\]|metadata\\.google\\.internal)',
+          flags: 'gi',
+          fileGlobs: ['**/*.{js,ts,jsx,tsx,mjs,cjs,json,html}'],
+          triggerTokens: ['10.', '192.168.', '172.', '169.254.', '[::1]'],
           confidence: 'HIGH'
         }
       ]
@@ -662,7 +667,7 @@ export const defaultRuleset: Ruleset = {
       name: 'Site Mutation Without User Action',
       category: 'UX',
       reviewBucket: 'NEEDS_EXPLANATION',
-      severity: 'MEDIUM',
+      severity: 'LOW',
       disposition: 'INFO',
       description:
         'Creating or removing site resources (styles, variables, assets, components) must follow a deliberate user action — opening the extension must not mutate the site. If these calls only run after an explicit user choice, explain that in your review notes (Marketplace Guidelines: user interaction).',
@@ -674,6 +679,163 @@ export const defaultRuleset: Ruleset = {
           flags: 'g',
           fileGlobs: ['**/*.{js,ts,jsx,tsx,mjs,cjs}'],
           triggerTokens: ['webflow.create', 'webflow.remove'],
+          confidence: 'MEDIUM'
+        }
+      ]
+    },
+
+    // ========================================================================
+    // MARKETPLACE GUIDELINES ALIGNMENT (developers.webflow.com, read 2026-09-28)
+    // ========================================================================
+
+    {
+      ruleId: 'PROD-STAGING-HOST',
+      name: 'Possible Staging or Development Host',
+      category: 'PRODUCTION_READINESS',
+      reviewBucket: 'NEEDS_EXPLANATION',
+      severity: 'LOW',
+      disposition: 'INFO',
+      description:
+        'This URL looks like a staging or development host. Every embedded URL must point to production, so confirm it does or remove it.',
+      matchers: [
+        {
+          id: 'staging-or-dev-host',
+          type: 'regex',
+          pattern: 'https?:\\/\\/([a-z0-9-]+\\.)*(staging|stage|stg|dev|qa|uat)[.-][a-z0-9.-]*[a-z0-9]',
+          flags: 'gi',
+          fileGlobs: ['**/*.{js,ts,jsx,tsx,mjs,cjs,json,html}'],
+          triggerTokens: ['staging', 'stage', 'dev', 'qa', 'uat'],
+          confidence: 'LOW'
+        }
+      ]
+    },
+
+    {
+      ruleId: 'SEC-MESSAGE-ORIGIN',
+      name: 'Unvalidated message Handler',
+      category: 'SECURITY',
+      reviewBucket: 'ACTION_REQUIRED',
+      severity: 'HIGH',
+      disposition: 'ACTION_REQUIRED',
+      description:
+        'Every message event handler in the extension UI must check event.origin against an explicit allowlist before processing the message.',
+      matchers: [
+        {
+          id: 'message-listener-without-origin',
+          type: 'regex',
+          pattern: '(addEventListener\\s*\\(\\s*[\'"`]message[\'"`]|\\bonmessage\\s*=(?!=))',
+          flags: 'g',
+          fileGlobs: ['**/*.{js,ts,jsx,tsx,mjs,cjs,html}'],
+          triggerTokens: ['message', 'onmessage'],
+          confidence: 'MEDIUM',
+          // The allowlist is tested against the match plus three lines of
+          // context, so a handler that reads .origin nearby is not flagged.
+          allowlistPatterns: ['\\.origin\\b']
+        }
+      ]
+    },
+
+    {
+      ruleId: 'SEC-NO-NATIVE-OVERRIDE',
+      name: 'Native Function Override',
+      category: 'SECURITY',
+      reviewBucket: 'ACTION_REQUIRED',
+      severity: 'HIGH',
+      disposition: 'ACTION_REQUIRED',
+      description:
+        'Do not override, proxy, or reassign native browser functions, native prototypes, or Webflow globals.',
+      matchers: [
+        {
+          id: 'prototype-assignment',
+          type: 'regex',
+          pattern: '\\b(Array|Object|String|Function|Promise|Element|HTMLElement|Node|EventTarget|Document|Window|XMLHttpRequest)\\.prototype\\.[A-Za-z_$][\\w$]*\\s*=(?!=)',
+          flags: 'g',
+          fileGlobs: ['**/*.{js,ts,jsx,tsx,mjs,cjs}'],
+          triggerTokens: ['.prototype.'],
+          confidence: 'MEDIUM'
+        },
+        {
+          id: 'global-function-assignment',
+          type: 'regex',
+          pattern: '\\b(window|globalThis|self)\\.(fetch|XMLHttpRequest|open|postMessage|setTimeout|setInterval|addEventListener|webflow)\\s*=(?!=)',
+          flags: 'g',
+          fileGlobs: ['**/*.{js,ts,jsx,tsx,mjs,cjs}'],
+          triggerTokens: ['window.', 'globalThis.'],
+          confidence: 'HIGH'
+        }
+      ]
+    },
+
+    {
+      ruleId: 'SEC-CSP-INLINE',
+      name: 'CSP-Incompatible Markup',
+      category: 'SECURITY',
+      reviewBucket: 'AUTO_REJECT',
+      severity: 'BLOCKER',
+      disposition: 'REJECTED',
+      description:
+        'Inline event handler attributes and javascript: URIs are incompatible with the Designer Content Security Policy and will not pass review.',
+      matchers: [
+        {
+          id: 'inline-event-handler',
+          type: 'regex',
+          pattern: '<[a-zA-Z][^>]*\\son[a-z]+\\s*=\\s*[\'"]',
+          flags: 'g',
+          fileGlobs: ['**/*.{html,htm}'],
+          triggerTokens: ['on'],
+          confidence: 'HIGH'
+        },
+        {
+          id: 'javascript-uri',
+          type: 'regex',
+          pattern: '[\'"`]\\s*javascript:',
+          flags: 'gi',
+          fileGlobs: ['**/*.{js,ts,jsx,tsx,mjs,cjs,html,htm}'],
+          triggerTokens: ['javascript:'],
+          confidence: 'HIGH'
+        }
+      ]
+    },
+
+    {
+      ruleId: 'SEC-RUNTIME-DECODING',
+      name: 'Runtime Base64 Decoding',
+      category: 'SECURITY',
+      reviewBucket: 'NEEDS_EXPLANATION',
+      severity: 'LOW',
+      disposition: 'INFO',
+      description:
+        'Decoding code at runtime with atob or btoa counts as obfuscation. Confirm this decodes data, such as a token payload or image, and never code.',
+      matchers: [
+        {
+          id: 'atob-btoa',
+          type: 'regex',
+          pattern: '\\b(atob|btoa)\\s*\\(',
+          flags: 'g',
+          fileGlobs: ['**/*.{js,ts,jsx,tsx,mjs,cjs}'],
+          triggerTokens: ['atob', 'btoa'],
+          confidence: 'LOW'
+        }
+      ]
+    },
+
+    {
+      ruleId: 'UX-NO-KEYBOARD-SHORTCUTS',
+      name: 'Keyboard Shortcut',
+      category: 'UX',
+      reviewBucket: 'ACTION_REQUIRED',
+      severity: 'HIGH',
+      disposition: 'ACTION_REQUIRED',
+      description:
+        'Do not use keyboard shortcuts to invoke the app or any of its functionality.',
+      matchers: [
+        {
+          id: 'modifier-plus-key',
+          type: 'regex',
+          pattern: '(\\b(metaKey|ctrlKey|altKey)\\s*&&\\s*[\\w$.]*\\.(key|code|keyCode)\\s*===?\\s*[\'"`\\d]|\\.(key|code)\\s*===?\\s*[\'"`][^\'"`]{1,12}[\'"`]\\s*&&\\s*[\\w$.]*\\.(metaKey|ctrlKey|altKey)\\b)',
+          flags: 'g',
+          fileGlobs: ['**/*.{js,ts,jsx,tsx,mjs,cjs}'],
+          triggerTokens: ['metaKey', 'ctrlKey', 'altKey'],
           confidence: 'MEDIUM'
         }
       ]

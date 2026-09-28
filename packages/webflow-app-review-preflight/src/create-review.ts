@@ -295,6 +295,29 @@ const PACKAGE_MANIFEST_NAMES = new Set(['package.json']);
 const LOCKFILE_NAMES = new Set(['pnpm-lock.yaml', 'package-lock.json', 'yarn.lock', 'bun.lockb', 'bun.lock']);
 
 /**
+ * Webflow rejects Designer Extension uploads over 5MB
+ * (developers.webflow.com/apps/docs/publishing-your-app). Catch it here so
+ * the developer learns before the Workspace upload fails.
+ */
+const MAX_DESIGNER_EXTENSION_BUNDLE_BYTES = 5 * 1024 * 1024;
+
+export function bundleSizeGuidance(compressedBytes: number): ReviewGuidance | null {
+  if (compressedBytes <= MAX_DESIGNER_EXTENSION_BUNDLE_BYTES) return null;
+  const megabytes = (compressedBytes / (1024 * 1024)).toFixed(1);
+  return {
+    id: 'BUNDLE-SIZE-LIMIT',
+    label: 'Required update',
+    title: 'Bundle is over the 5MB upload limit',
+    explanation: `This bundle is ${megabytes}MB. Webflow does not accept Designer Extension bundles larger than 5MB.`,
+    nextMove:
+      'Remove unused assets and dependencies, keep source maps out of the public bundle, and rebuild with webflow extension bundle.',
+    severity: 'HIGH',
+    confidence: 'HIGH',
+    evidence: []
+  } satisfies ReviewGuidance;
+}
+
+/**
  * The Marketplace submission-artifacts docs ask for the package manifest and
  * lockfile alongside compiled bundles so review can reconcile the artifact
  * with its dependencies. Absence is a suggestion, not a gate — the submission
@@ -413,11 +436,13 @@ export async function createBundleReview(
   const sourceMapFinding = sourceMapGuidance(sourceMapSummary);
   const identityFinding = manifestIdentityGuidance(artifactScope);
   const packagePresenceFinding = manifestPresenceGuidance(inventory);
+  const sizeFinding = bundleSizeGuidance(input.bundle.byteLength);
   const guidance = [
     ...toGuidance(report.findings),
     ...(sourceMapFinding ? [sourceMapFinding] : []),
     ...(identityFinding ? [identityFinding] : []),
-    ...(packagePresenceFinding ? [packagePresenceFinding] : [])
+    ...(packagePresenceFinding ? [packagePresenceFinding] : []),
+    ...(sizeFinding ? [sizeFinding] : [])
   ].sort(compareGuidance);
   const securityBlockers = guidance.filter((item) => item.label === 'Security blocker').length;
   const requiredUpdates = guidance.filter((item) => item.label === 'Required update').length;
