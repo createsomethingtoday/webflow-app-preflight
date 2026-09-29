@@ -46,10 +46,9 @@ describe('API-ELEMENT-TYPE-DISCRIMINATOR', () => {
     ['minified strict equality', 'e.type==="Section"&&r(e)'],
     ['loose equality', 'if (ztsContainer.type == "Section") {}'],
     ['negated comparison', "if (el.type !== 'Section') return;"],
-    ['yoda comparison', '"Container"===t.type&&n(t)'],
-    ['another tag-bearing block type', "el.type === 'VFlex'"],
+    ['yoda comparison', '"Section"===t.type&&n(t)'],
     ['optional chaining', "if (selected?.type === 'Section') {}"]
-  ])('flags a %s on a tag-bearing block type', (_label, code) => {
+  ])('flags a %s against Section', (_label, code) => {
     const findings = findingsFor(RULE, code);
     expect(findings).toHaveLength(1);
     expect(findings[0]?.ruleId).toBe(RULE);
@@ -62,6 +61,7 @@ describe('API-ELEMENT-TYPE-DISCRIMINATOR', () => {
     ['comparison against Block, which is what the runtime returns', "el.type === 'Block'"],
     ['object literal property', "const preset = { type: 'Section', tag: 'section' };"],
     ['non-structural element types', "el.type === 'Heading' || el.type === 'Paragraph'"],
+    ['div-tagged block types getTag() cannot distinguish', "el.type === 'Container' || e.type==='VFlex' || t.type === 'Column'"],
     ['bare string literal', "const label = 'Section';"]
   ])('stays quiet on %s', (_label, code) => {
     expect(findingsFor(RULE, code)).toHaveLength(0);

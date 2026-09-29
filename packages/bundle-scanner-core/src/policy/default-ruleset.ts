@@ -700,19 +700,19 @@ export const defaultRuleset: Ruleset = {
 
     {
       ruleId: 'API-ELEMENT-TYPE-DISCRIMINATOR',
-      name: 'Structural Element Identified by element.type',
+      name: 'Section Identified by element.type',
       category: 'API_COMPATIBILITY',
       reviewBucket: 'NEEDS_EXPLANATION',
       severity: 'LOW',
       disposition: 'INFO',
       description:
-        "element.type is not a stable way to recognise a section or other tag-bearing block. A section added through webflow.elementPresets.Section reports type 'Block' with tag 'section', while one added by hand in the Designer reports type 'Section' — so a type check works in testing and fails for real users (Designer API engineering, September 2026). Identify these elements by the tag the element carries: await element.getTag() returns 'section' whichever way the element was created.",
+        "element.type is not a stable way to recognise a section. A section added through webflow.elementPresets.Section reports type 'Block' with tag 'section', while one added by hand in the Designer reports type 'Section' — so a type check works in testing and fails for real users (Designer API engineering, September 2026). Identify sections by the tag they carry: await element.getTag() returns 'section' whichever way the element was created. This applies to sections only — the section tag is unique to them, while Container, VFlex, HFlex, Row, Column and plain Div Blocks all carry the div tag, so getTag() cannot tell those apart.",
       matchers: [
         {
-          id: 'element-type-equals-block-kind',
+          id: 'element-type-equals-section',
           type: 'regex',
           pattern:
-            '(?:\\.type\\s*[!=]==?\\s*[\'"`](?:Section|Container|BlockContainer|VFlex|HFlex|Row|Column|RichText|Slot|NavbarContainer|TabsContent)[\'"`]|[\'"`](?:Section|Container|BlockContainer|VFlex|HFlex|Row|Column|RichText|Slot|NavbarContainer|TabsContent)[\'"`]\\s*[!=]==?\\s*[\\w$]+(?:\\?\\.|\\.)type\\b)',
+            '(?:\\.type\\s*[!=]==?\\s*[\'"`]Section[\'"`]|[\'"`]Section[\'"`]\\s*[!=]==?\\s*[\\w$]+(?:\\?\\.|\\.)type\\b)',
           flags: 'g',
           fileGlobs: ['**/*.{js,ts,jsx,tsx,mjs,cjs}'],
           triggerTokens: ['.type'],
