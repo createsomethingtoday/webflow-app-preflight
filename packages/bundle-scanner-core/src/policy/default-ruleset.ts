@@ -700,7 +700,7 @@ export const defaultRuleset: Ruleset = {
 
     {
       ruleId: 'API-ELEMENT-TYPE-DISCRIMINATOR',
-      name: 'Section Identified by element.type',
+      name: 'Structural Element Identified by element.type',
       category: 'API_COMPATIBILITY',
       reviewBucket: 'NEEDS_EXPLANATION',
       severity: 'LOW',
