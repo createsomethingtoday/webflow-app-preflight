@@ -766,3 +766,45 @@ describe('Marketplace Guidelines alignment: real-bundle false positives', () => 
     expect(find(result, 'SEC-SCRIPT-INJECTION')?.label).toBe('Security blocker');
   });
 });
+
+describe('Designer API contract fragility (Zeltac, ZD 1193976)', () => {
+  async function bundleWith(files: Record<string, string>): Promise<ArrayBuffer> {
+    const zip = new JSZip();
+    zip.file('webflow.json', JSON.stringify({ name: 'Slider App', apiVersion: '2', publicDir: 'dist' }));
+    zip.file('package.json', '{}');
+    zip.file('pnpm-lock.yaml', 'lockfileVersion: 9');
+    for (const [path, content] of Object.entries(files)) zip.file(path, content);
+    return zip.generateAsync({ type: 'arraybuffer' });
+  }
+  const review = async (files: Record<string, string>) =>
+    createBundleReview({ fileName: 'bundle.zip', bundle: await bundleWith(files) });
+  const find = (result: Awaited<ReturnType<typeof review>>, id: string) =>
+    result.guidance.find((item) => item.id === id);
+
+  test('identifying a section by element.type is a suggested update that points at getTag()', async () => {
+    const result = await review({
+      'dist/extension.js': [
+        'const el = await selected.append(webflow.elementPresets.Section);',
+        "if (el.type === 'Section') { await buildSlider(el); }"
+      ].join('\n')
+    });
+
+    const finding = find(result, 'API-ELEMENT-TYPE-DISCRIMINATOR');
+    expect(finding?.label).toBe('Suggested update');
+    expect(finding?.nextMove).toContain('getTag()');
+    expect(finding?.evidence[0]?.line).toBe(2);
+    expect(result.summary.readiness).toBe('ready');
+  });
+
+  test('identifying a section by getTag() is not flagged', async () => {
+    const result = await review({
+      'dist/extension.js': [
+        'const el = await selected.append(webflow.elementPresets.Section);',
+        "if ((await el.getTag()) === 'section') { await buildSlider(el); }"
+      ].join('\n')
+    });
+
+    expect(find(result, 'API-ELEMENT-TYPE-DISCRIMINATOR')).toBeUndefined();
+    expect(result.summary.readiness).toBe('ready');
+  });
+});

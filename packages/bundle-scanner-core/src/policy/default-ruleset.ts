@@ -10,7 +10,7 @@ import type { Ruleset } from '../types';
  */
 export const defaultRuleset: Ruleset = {
   schemaVersion: 'wf-marketplace-scanner-ruleset@1.0.0',
-  rulesetVersion: '1.4.0-guidelines-2026-09-28',
+  rulesetVersion: '1.5.0-designer-api-2026-09-29',
   generatedAt: '2026-01-16T14:00:00Z',
   rules: [
     // ========================================================================
@@ -689,6 +689,33 @@ export const defaultRuleset: Ruleset = {
           flags: 'g',
           fileGlobs: ['**/*.{js,ts,jsx,tsx,mjs,cjs}'],
           triggerTokens: ['webflow.create', 'webflow.remove'],
+          confidence: 'MEDIUM'
+        }
+      ]
+    },
+
+    // ========================================================================
+    // DESIGNER API CONTRACT
+    // ========================================================================
+
+    {
+      ruleId: 'API-ELEMENT-TYPE-DISCRIMINATOR',
+      name: 'Section Identified by element.type',
+      category: 'API_COMPATIBILITY',
+      reviewBucket: 'NEEDS_EXPLANATION',
+      severity: 'LOW',
+      disposition: 'INFO',
+      description:
+        "element.type is not a stable way to recognise a section. A section added through webflow.elementPresets.Section reports type 'Block' with tag 'section', while one added by hand in the Designer reports type 'Section' — so a type check works in testing and fails for real users (Designer API engineering, September 2026). Identify sections by the tag they carry: await element.getTag() returns 'section' whichever way the element was created. This applies to sections only — the section tag is unique to them, while Container, VFlex, HFlex, Row, Column and plain Div Blocks all carry the div tag, so getTag() cannot tell those apart.",
+      matchers: [
+        {
+          id: 'element-type-equals-section',
+          type: 'regex',
+          pattern:
+            '(?:\\.type\\s*[!=]==?\\s*[\'"`]Section[\'"`]|[\'"`]Section[\'"`]\\s*[!=]==?\\s*[\\w$]+(?:\\?\\.|\\.)type\\b)',
+          flags: 'g',
+          fileGlobs: ['**/*.{js,ts,jsx,tsx,mjs,cjs}'],
+          triggerTokens: ['.type'],
           confidence: 'MEDIUM'
         }
       ]
