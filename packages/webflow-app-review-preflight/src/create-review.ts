@@ -73,7 +73,9 @@ const NEXT_MOVES: Record<string, string> = {
   'PROD-NO-DEBUG-RESIDUE':
     'Remove the debug routes and bypass flags from the production build, rebuild the exact artifact you will ship, and rescan.',
   'UX-NO-MUTATION-ON-LOAD':
-    'Tie site-mutating Designer API calls to a deliberate user action (a button, not extension mount). If they already are, say so in your review notes so the reviewer can verify quickly.'
+    'Tie site-mutating Designer API calls to a deliberate user action (a button, not extension mount). If they already are, say so in your review notes so the reviewer can verify quickly.',
+  'API-ELEMENT-TYPE-DISCRIMINATOR':
+    "Replace the element.type comparison with a tag check: (await element.getTag()) === 'section'. It returns the same value for preset-created and hand-added sections, so the app keeps working when the type label differs. A Div Block retagged to section also passes this check — add a guard if your app removes or rewrites what it identifies."
 };
 
 const MAX_EVIDENCE_SNIPPET_LENGTH = 500;
