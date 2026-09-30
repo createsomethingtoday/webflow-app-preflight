@@ -18,9 +18,26 @@ export interface ReviewCoverage {
   detail: string;
 }
 
+/**
+ * Developer-facing weight of a finding.
+ *
+ * - `Security blocker` / `Required update`: the bundle needs changes before
+ *   submission (readiness `changes_required`).
+ * - `Manual review`: preflight could not evaluate this part of the artifact
+ *   (an unscanned executable, an unscanned hosted runtime). Zero findings
+ *   there mean "not evaluated", never "clean"; readiness becomes
+ *   `needs_review` so the run is not presented as a pass.
+ * - `Suggested update`: advisory; never affects readiness.
+ */
+export type ReviewGuidanceLabel =
+  | 'Security blocker'
+  | 'Required update'
+  | 'Manual review'
+  | 'Suggested update';
+
 export interface ReviewGuidance {
   id: string;
-  label: 'Security blocker' | 'Required update' | 'Suggested update';
+  label: ReviewGuidanceLabel;
   title: string;
   explanation: string;
   nextMove: string;
@@ -92,10 +109,19 @@ export interface BundleReview {
     manualVerificationRequired: boolean;
   };
   summary: {
-    readiness: 'ready' | 'changes_required';
+    /**
+     * `changes_required`: at least one blocker or Required update.
+     * `needs_review`: nothing to fix, but part of the artifact was not
+     * evaluated (see `Manual review` findings) — not a pass.
+     * `ready`: every executable input was scanned and nothing requires a
+     * change. Never an approval; the human review remains the decision.
+     */
+    readiness: 'ready' | 'needs_review' | 'changes_required';
     securityBlockers: number;
     requiredUpdates: number;
     suggestedUpdates: number;
+    /** Count of `Manual review` findings. Absent on reviews created before it existed. */
+    manualReviews?: number;
   };
   guidance: ReviewGuidance[];
   policySnapshot: {

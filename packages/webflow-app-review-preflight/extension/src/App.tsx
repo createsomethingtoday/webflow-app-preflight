@@ -17,6 +17,7 @@ import { PreflightAuthenticationError } from './api';
 function statusLabel(item: ReviewGuidance): string {
   if (item.label === 'Security blocker') return 'Blocker';
   if (item.label === 'Required update') return 'Required';
+  if (item.label === 'Manual review') return 'Review';
   return 'Suggested';
 }
 
@@ -496,15 +497,20 @@ function History({
               coverage.surface === 'production_runtime' &&
               coverage.status === 'needs_verification'
           );
+          // `needs_review` (part of the artifact was not evaluated) shares
+          // the pending visual state; the runtime test stays the named next
+          // step when one is still outstanding.
           const status = item.readiness === 'changes_required'
             ? 'changes_required'
-            : runtimePending
+            : runtimePending || item.readiness === 'needs_review'
               ? 'needs_verification'
               : 'ready';
           const statusLabel = status === 'changes_required'
             ? 'Changes needed'
             : status === 'needs_verification'
-              ? 'Runtime test needed'
+              ? runtimePending
+                ? 'Runtime test needed'
+                : 'Manual review needed'
               : 'Ready for review';
           return (
             <button
@@ -1434,9 +1440,11 @@ function ReviewDetail({
   const [revisionSourceMaps, setRevisionSourceMaps] = useState<File | null>(null);
   const blockerText = result.summary.securityBlockers === 1 ? 'blocker' : 'blockers';
   const readinessMessage = runtimeOnly
-    ? 'Script list saved. Set up a Webflow test to observe the published runtime.'
+    ? 'Script list saved. The hosted runtime has not been scanned — set up a Webflow test to observe the published runtime.'
     : result.summary.securityBlockers > 0
     ? `Fix ${result.summary.securityBlockers} ${blockerText} before review.`
+    : result.summary.readiness === 'needs_review'
+      ? 'Part of this bundle could not be scanned. A reviewer must inspect the listed files.'
     : result.runtime.status === 'discovered_unverified'
       ? 'Bundle scan finished. Test the production runtime next.'
       : 'Preflight checks complete. Send the evidence to a human reviewer.';

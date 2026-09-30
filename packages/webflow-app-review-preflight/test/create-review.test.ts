@@ -6,7 +6,12 @@ import {
   HostedRuntimeReviewInputError,
   SourceMapArtifactError
 } from '../src/index';
-import { boundedEvidenceSnippet } from '../src/create-review';
+import {
+  boundedEvidenceSnippet,
+  effectiveFindingSeverity,
+  guidanceSeverity
+} from '../src/create-review';
+import { defaultRuleset, type FindingGroup } from '@create-something/bundle-scanner-core';
 
 async function createDesignerExtensionFixture(): Promise<ArrayBuffer> {
   const zip = new JSZip();
@@ -149,6 +154,37 @@ describe('createBundleReview', () => {
       'node_modules/helper/index.js'
     ]);
     expect(coverage.manualReviewRequired).toBe(true);
+
+    // The gap is a developer-visible finding and readiness is not `ready`.
+    const finding = review.guidance.find((item) => item.id === 'SCAN-UNSCANNED-EXECUTABLE');
+    expect(finding?.label).toBe('Manual review');
+    expect(finding?.evidence.map((item) => item.filePath)).toEqual([
+      'dist/module.wasm',
+      'node_modules/helper/index.js'
+    ]);
+    expect(review.summary.manualReviews).toBe(1);
+    expect(review.summary.securityBlockers).toBe(0);
+    expect(review.summary.readiness).toBe('needs_review');
+  });
+
+  test('rejected zip-slip entries are a required update, not a silent skip', async () => {
+    const zip = new JSZip();
+    zip.file('webflow.json', JSON.stringify({ name: 'Slip', apiVersion: '2', publicDir: 'dist' }));
+    zip.file('dist/index.js', 'export const ok = true;');
+    // JSZip collapses forward-slash `../`; backslash names survive and are
+    // normalized back into traversal paths by the extractor.
+    zip.file('dist\\..\\..\\evil.js', 'eval("x")');
+
+    const review = await createBundleReview({
+      bundle: await zip.generateAsync({ type: 'arraybuffer' }),
+      fileName: 'slip.zip'
+    });
+
+    expect(review.scanCoverage?.unsafeEntryPaths).toEqual(['dist/../../evil.js']);
+    const finding = review.guidance.find((item) => item.id === 'BUNDLE-UNSAFE-ENTRY');
+    expect(finding?.label).toBe('Required update');
+    expect(finding?.evidence[0]?.filePath).toBe('dist/../../evil.js');
+    expect(review.summary.readiness).toBe('changes_required');
   });
 
   test('reports full coverage when every executable file is scanned', async () => {
@@ -161,6 +197,8 @@ describe('createBundleReview', () => {
     expect(review.scanCoverage?.skippedExecutablePaths).toEqual([]);
     expect(review.scanCoverage?.unsafeEntryPaths).toEqual([]);
     expect(review.scanCoverage?.manualReviewRequired).toBe(false);
+    expect(review.guidance.find((item) => item.id === 'SCAN-UNSCANNED-EXECUTABLE')).toBeUndefined();
+    expect(review.summary.manualReviews).toBe(0);
   });
 
   test('flags a minified bundle with no source maps as not traceable to source', async () => {
@@ -183,7 +221,7 @@ describe('createBundleReview', () => {
     expect(review.summary.readiness).toBe('changes_required');
   });
 
-  test('accepts a minified bundle whose source map matches the generated file', async () => {
+  test('a map shipped inside the public bundle satisfies correspondence but is itself a required update', async () => {
     const zip = new JSZip();
     zip.file(
       'webflow.json',
@@ -202,7 +240,32 @@ describe('createBundleReview', () => {
 
     expect(review.sourceMapSummary?.status).toBe('matched');
     expect(review.sourceMapSummary?.artifactProvided).toBe(true);
+    expect(review.sourceMapSummary?.publicExposure).toBe(true);
     expect(review.guidance.find((item) => item.id === 'SRC-MAP-CORRESPONDENCE')).toBeUndefined();
+
+    // Maps belong in the private source-map upload, not the public artifact.
+    const exposure = review.guidance.find((item) => item.id === 'SRC-MAP-PUBLIC-EXPOSURE');
+    expect(exposure?.label).toBe('Required update');
+    expect(exposure?.evidence.map((item) => item.filePath)).toEqual(['public/app.min.js.map']);
+    expect(review.summary.readiness).toBe('changes_required');
+  });
+
+  test('an inline data: source map counts as public exposure', async () => {
+    const zip = new JSZip();
+    zip.file('webflow.json', JSON.stringify({ name: 'Inline', apiVersion: '2', publicDir: 'dist' }));
+    zip.file(
+      'dist/index.js',
+      'export const ok=true;//# sourceMappingURL=data:application/json;base64,eyJ2ZXJzaW9uIjozfQ=='
+    );
+
+    const review = await createBundleReview({
+      bundle: await zip.generateAsync({ type: 'arraybuffer' }),
+      fileName: 'inline.zip'
+    });
+
+    const exposure = review.guidance.find((item) => item.id === 'SRC-MAP-PUBLIC-EXPOSURE');
+    expect(exposure?.label).toBe('Required update');
+    expect(exposure?.evidence[0]?.filePath).toBe('dist/index.js');
   });
 
   test('reconciles a privately uploaded source-map artifact against the bundle', async () => {
@@ -230,6 +293,8 @@ describe('createBundleReview', () => {
 
     expect(review.sourceMapSummary?.status).toBe('matched');
     expect(review.guidance.find((item) => item.id === 'SRC-MAP-CORRESPONDENCE')).toBeUndefined();
+    expect(review.guidance.find((item) => item.id === 'SRC-MAP-PUBLIC-EXPOSURE')).toBeUndefined();
+    expect(review.summary.readiness).toBe('ready');
     expect(review.artifact.sourceMaps?.fileName).toBe('mapped-app-maps.zip');
     expect(review.artifact.sourceMaps?.sha256).toMatch(/^[a-f0-9]{64}$/);
     expect(review.artifact.sourceMaps?.mapFileCount).toBe(1);
@@ -354,6 +419,26 @@ describe('createHostedRuntimeReviewArtifact', () => {
     });
     expect(artifact.review.runtime.references).toEqual(runtimeUrls);
     expect(artifact.review.officialDecision).toBeNull();
+  });
+
+  test('never reports an unscanned hosted runtime as ready', async () => {
+    const { review } = await createHostedRuntimeReviewArtifact({
+      appName: 'Website Speedy',
+      runtimeUrls: ['https://cdn.example.com/runtime-v1.js']
+    });
+
+    expect(review.summary.readiness).toBe('needs_review');
+    expect(review.summary.manualReviews).toBe(1);
+    expect(review.guidance).toEqual([
+      expect.objectContaining({
+        id: 'RUNTIME-NOT-EVALUATED',
+        label: 'Manual review',
+        explanation: expect.stringContaining('did not download or scan')
+      })
+    ]);
+    expect(
+      review.coverage.find((item) => item.surface === 'production_runtime')?.detail
+    ).toContain('not been scanned');
   });
 
   test('keeps every runtime URL in a larger execution scenario', async () => {
@@ -741,6 +826,55 @@ describe('Marketplace Guidelines alignment: real-bundle false positives', () => 
     expect(find(result, 'SEC-NO-DCE')?.label).toBe('Security blocker');
   });
 
+  test('a commented-out match never masks a live match of the same rule', async () => {
+    // Regression: severity used to come from the FIRST match only, so the
+    // comment on line 1 downgraded the whole rule and readiness read `ready`.
+    const result = await review({ 'dist/index.js': '// eval("x")\neval(y);' });
+    const finding = find(result, 'SEC-NO-DCE');
+    expect(finding?.label).toBe('Security blocker');
+    expect(finding?.severity).toBe('BLOCKER');
+    // The live match leads the evidence, not the comment.
+    expect(finding?.evidence[0]?.line).toBe(2);
+    expect(result.summary.securityBlockers).toBe(1);
+    expect(result.summary.readiness).toBe('changes_required');
+  });
+
+  test('a bare localhost literal in library code is a suggestion, a dev endpoint stays required', async () => {
+    // react-router's production build carries `new URL(p, "http://localhost")`
+    // as a URL-parsing fallback; the skill says that is not dev residue.
+    const library = await review({
+      'dist/router.js': 'function parsePath(p){ return new URL(p, "http://localhost"); }'
+    });
+    expect(find(library, 'PROD-NO-LOCALHOST')?.label).toBe('Suggested update');
+    expect(library.summary.readiness).toBe('ready');
+
+    const blocklist = await review({
+      'dist/app.js': "const blocked = ['http://localhost/', 'http://127.0.0.1'];"
+    });
+    expect(find(blocklist, 'PROD-NO-LOCALHOST')?.label).toBe('Suggested update');
+
+    const devServer = await review({
+      'dist/app.js': 'fetch("http://localhost:3000/api/session");'
+    });
+    expect(find(devServer, 'PROD-NO-LOCALHOST')?.label).toBe('Required update');
+    expect(devServer.summary.readiness).toBe('changes_required');
+
+    const tunnel = await review({ 'dist/app.js': 'const api = "https://abc.ngrok.io";' });
+    expect(find(tunnel, 'PROD-NO-LOCALHOST')?.label).toBe('Required update');
+  });
+
+  test('a dev endpoint next to a bare localhost literal is not downgraded with it', async () => {
+    const result = await review({
+      'dist/app.js': [
+        'const base = new URL(path, "http://localhost");',
+        'fetch("http://localhost:5173/__vite_hmr");'
+      ].join('\n')
+    });
+    const finding = find(result, 'PROD-NO-LOCALHOST');
+    expect(finding?.label).toBe('Required update');
+    expect(finding?.evidence[0]?.line).toBe(2);
+  });
+
   test('framework-internal innerHTML is a confirmation, not a required update', async () => {
     const result = await review({
       'dist/index.js': 'function setInnerHTML(node, html) {\n  node.innerHTML = html;\n}\nel.insertAdjacentHTML("beforeend", markup);'
@@ -806,5 +940,78 @@ describe('Designer API contract fragility (Zeltac, ZD 1193976)', () => {
 
     expect(find(result, 'API-ELEMENT-TYPE-DISCRIMINATOR')).toBeUndefined();
     expect(result.summary.readiness).toBe('ready');
+  });
+});
+
+describe('review correctness: severity, buckets, and labels agree', () => {
+  test('every AUTO_REJECT rule is a BLOCKER and vice versa', () => {
+    // The developer label is derived from severity AND bucket; a split rule
+    // (HIGH + AUTO_REJECT) used to show as Required while the scanner
+    // verdict counted it as a blocker.
+    const split = defaultRuleset.rules.filter(
+      (rule) => (rule.reviewBucket === 'AUTO_REJECT') !== (rule.severity === 'BLOCKER')
+    );
+    expect(split.map((rule) => rule.ruleId)).toEqual([]);
+  });
+
+  test('NET-URL-HYGIENE and IFRAME-EXTERNAL-SRC are Required updates by bucket and severity', () => {
+    for (const id of ['NET-URL-HYGIENE', 'IFRAME-EXTERNAL-SRC']) {
+      const rule = defaultRuleset.rules.find((item) => item.ruleId === id);
+      expect(rule).toMatchObject({
+        reviewBucket: 'ACTION_REQUIRED',
+        severity: 'HIGH',
+        disposition: 'ACTION_REQUIRED'
+      });
+    }
+  });
+
+  test('an AUTO_REJECT match is a blocker even when its severity field says HIGH', () => {
+    const rule = {
+      ruleId: 'X',
+      name: 'x',
+      category: 'SECURITY',
+      reviewBucket: 'ACTION_REQUIRED' as const,
+      severity: 'HIGH' as const,
+      disposition: 'ACTION_REQUIRED' as const,
+      description: '',
+      matchers: []
+    };
+    const base = {
+      ruleId: 'X',
+      matcherId: 'm',
+      filePath: 'a.js',
+      col: 1,
+      snippet: '',
+      triggerToken: '',
+      locationType: 'CODE' as const
+    };
+    const group: FindingGroup = {
+      rule,
+      count: 3,
+      items: [
+        { ...base, line: 1, confidence: 'LOW', severity: 'LOW', reviewBucket: 'INFO' },
+        { ...base, line: 2, confidence: 'MEDIUM' },
+        { ...base, line: 3, confidence: 'HIGH', reviewBucket: 'AUTO_REJECT' }
+      ]
+    };
+
+    expect(effectiveFindingSeverity(group.items[2]!, rule)).toBe('BLOCKER');
+    const derived = guidanceSeverity(group);
+    expect(derived.severity).toBe('BLOCKER');
+    expect(derived.confidence).toBe('HIGH');
+    expect(derived.items.map((item) => item.line)).toEqual([3, 2, 1]);
+  });
+
+  test('an external iframe in live code is a Required update', async () => {
+    const zip = new JSZip();
+    zip.file('webflow.json', JSON.stringify({ name: 'Embed', apiVersion: '2', publicDir: 'dist' }));
+    zip.file('dist/index.html', '<iframe src="https://widgets.example.com/ui"></iframe>');
+    const review = await createBundleReview({
+      bundle: await zip.generateAsync({ type: 'arraybuffer' }),
+      fileName: 'embed.zip'
+    });
+    const finding = review.guidance.find((item) => item.id === 'IFRAME-EXTERNAL-SRC');
+    expect(finding?.label).toBe('Required update');
+    expect(review.summary.readiness).toBe('changes_required');
   });
 });

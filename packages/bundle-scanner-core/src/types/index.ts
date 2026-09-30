@@ -87,6 +87,13 @@ export interface ConditionalOverride {
   /** Regex pattern to match against the snippet */
   pattern: string;
   flags?: string;
+  /**
+   * What `pattern` is tested against. `snippet` (default) is the match plus
+   * ±3 lines of context. `from_match` is the text starting exactly at the
+   * match (capped at 200 chars), for overrides that must inspect what
+   * immediately follows the matched token rather than nearby lines.
+   */
+  scope?: 'snippet' | 'from_match';
   newSeverity?: Severity;
   newReviewBucket?: ReviewBucket;
   newDisposition?: Disposition;

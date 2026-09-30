@@ -24,6 +24,7 @@ export type {
   CreateHostedRuntimeReviewInput,
   ReviewCoverage,
   ReviewGuidance,
+  ReviewGuidanceLabel,
   RuntimeArtifactPin,
   RuntimeEvidenceTrust,
   RuntimeLifecycleContract,
