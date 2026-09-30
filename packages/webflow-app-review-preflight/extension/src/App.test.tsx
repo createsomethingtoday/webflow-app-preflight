@@ -713,7 +713,7 @@ describe('App Review Preflight extension', () => {
     expect(screen.getByText('Production runtime observed')).toBeVisible();
     expect(screen.queryByText('Production runtime not yet verified')).not.toBeInTheDocument();
     expect(
-      screen.getByText(/Recommended-practice findings for published-site code are in the result below/i)
+      screen.getByText(/Blocking findings for published-site code are listed in the result below/i)
     ).toBeVisible();
     expect(screen.getByText('4 checks need attention')).toBeVisible();
     expect(screen.getByText('Ready signal not found')).toBeVisible();
@@ -721,7 +721,7 @@ describe('App Review Preflight extension', () => {
     expect(screen.getByText('New script elements were created')).toBeVisible();
     expect(screen.getByText('Unreviewed scripts loaded')).toBeVisible();
     expect(screen.getAllByText('debugger.js')).toHaveLength(2);
-    expect(screen.getByText(/Address them, publish the test site, then run the test again/i))
+    expect(screen.getByText(/Fix each one, publish the test site, then run the test again/i))
       .toBeVisible();
     expect(screen.getByText('Proxy canary blocked')).toBeVisible();
     expect(screen.getByText('2 declared runtime files observed · 1 evidence artifact')).toBeVisible();
@@ -1386,6 +1386,7 @@ describe('runtimeSecuritySummary', () => {
     const summary = runtimeSecuritySummary('blocked', 4);
     expect(summary.tone).toBe('fail');
     expect(summary.title).toBe('4 checks need attention');
-    expect(summary.detail).toContain('do not block submission');
+    expect(summary.detail).toContain('Preflight reports these as blockers');
+    expect(summary.detail).not.toContain('do not block submission');
   });
 });
