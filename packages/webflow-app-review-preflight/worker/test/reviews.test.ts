@@ -914,6 +914,52 @@ describe('review API', () => {
     expect(review.status).toBe(404);
   });
 
+  test('a receipt for a changes_required run says so; it never reads as a pass', async () => {
+    const form = new FormData();
+    form.set('name', 'Blocked run');
+    form.set(
+      'bundle',
+      new File([await createBundle()], 'consent-pro.zip', { type: 'application/zip' })
+    );
+    const createResponse = await exports.default.fetch(
+      new Request('https://preflight.test/v1/reviews', {
+        method: 'POST',
+        headers: { authorization: 'Bearer test-token', origin: 'http://localhost:1337' },
+        body: form
+      })
+    );
+    expect(createResponse.status).toBe(201);
+    const created = await createResponse.json<{
+      review: { latestVersion: { result: { summary: { readiness: string } } } };
+      submissionReceipt: { code: string };
+    }>();
+    expect(created.review.latestVersion.result.summary.readiness).toBe('changes_required');
+    // Receipts are still issued (the form reads readiness from them)...
+    expect(created.submissionReceipt.code).toMatch(/^wfpre_[a-f0-9]{32}$/);
+
+    const verifyResponse = await exports.default.fetch(
+      new Request('https://preflight.test/v1/submission-receipts/verify', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ code: created.submissionReceipt.code })
+      })
+    );
+    const verified = await verifyResponse.json<{ valid: boolean; receipt: Record<string, unknown> }>();
+    // ...and the payload carries the readiness the form must honor, with no
+    // field that could be mistaken for an approval.
+    expect(verified.receipt.readiness).toBe('changes_required');
+    expect(Object.keys(verified.receipt).sort()).toEqual([
+      'appName',
+      'bundleSha256',
+      'createdAt',
+      'readiness',
+      'reviewId',
+      'runtimeSecurityStatus',
+      'sourceMapArtifactSha256',
+      'sourceMapStatus'
+    ]);
+  });
+
   test('stamps a preflight run with a submission receipt the form can trace', async () => {
     const zip = new JSZip();
     zip.file(

@@ -222,7 +222,7 @@ describe('App Review Preflight extension', () => {
       runtimeUrls: created.latestVersion.result.runtime.references
     }));
     expect(await screen.findByRole('heading', { name: 'Website Speedy' })).toBeVisible();
-    expect(screen.getByText('Script list saved. Set up a Webflow test to observe the published runtime.')).toBeVisible();
+    expect(screen.getByText('Script list saved. The hosted runtime has not been scanned — set up a Webflow test to observe the published runtime.')).toBeVisible();
     expect(screen.getByRole('heading', { name: 'Test the published runtime' })).toBeVisible();
     expect(screen.queryByRole('heading', { name: 'Runtime review' })).not.toBeInTheDocument();
     expect(screen.getByLabelText('Versioned runtime URL')).toHaveValue(
@@ -276,6 +276,69 @@ describe('App Review Preflight extension', () => {
     expect(await screen.findByText('Runtime test needed')).toBeVisible();
     expect(screen.getByText('Changes needed')).toBeVisible();
     expect(screen.getByText('Ready for review')).toBeVisible();
+  });
+
+  test('a run with unscanned files is presented as needing manual review, not as ready', async () => {
+    const review = consentProReview();
+    review.id = 'review-needs-review';
+    review.name = 'Wasm app preflight';
+    review.latestVersion.result.coverage = review.latestVersion.result.coverage.map(
+      (item) => ({ ...item, status: 'reviewed' as const })
+    );
+    review.latestVersion.result.runtime = {
+      references: [],
+      status: 'not_discovered',
+      manualVerificationRequired: true
+    };
+    review.latestVersion.result.summary = {
+      readiness: 'needs_review',
+      securityBlockers: 0,
+      requiredUpdates: 0,
+      suggestedUpdates: 0,
+      manualReviews: 1
+    };
+    review.latestVersion.result.guidance = [
+      {
+        id: 'SCAN-UNSCANNED-EXECUTABLE',
+        label: 'Manual review',
+        title: 'Executable files were not scanned',
+        explanation: 'One executable-looking file was not scanned.',
+        nextMove: 'Include the readable source in your review notes.',
+        severity: 'MEDIUM',
+        confidence: 'HIGH',
+        evidence: [{ filePath: 'dist/module.wasm', line: 1, snippet: 'Not scanned.' }]
+      }
+    ];
+    const needsReviewApi: PreflightApi = {
+      ...api,
+      listReviews: async () => [
+        {
+          id: review.id,
+          name: review.name,
+          updatedAt: review.updatedAt,
+          latestSequence: 1,
+          readiness: 'needs_review',
+          reviewType: 'bundle',
+          appName: review.latestVersion.result.artifactScope.appName,
+          coverage: review.latestVersion.result.coverage
+        }
+      ],
+      getReview: async () => review
+    };
+
+    render(<App api={needsReviewApi} />);
+
+    expect(await screen.findByText('Manual review needed')).toBeVisible();
+    expect(screen.queryByText('Ready for review')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByText('Wasm app preflight'));
+
+    expect(
+      await screen.findByText(/Part of this bundle could not be scanned/)
+    ).toBeVisible();
+    expect(screen.getByText('Executable files were not scanned')).toBeVisible();
+    expect(screen.getByText('Review')).toBeVisible();
+    expect(screen.queryByText(/Preflight checks complete/)).not.toBeInTheDocument();
   });
 
   test('starts with two clear paths based on what the app ships', async () => {

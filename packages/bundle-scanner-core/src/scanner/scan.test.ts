@@ -170,6 +170,47 @@ describe('runScan', () => {
     expect(f?.confidenceReason).toBe('escalated');
   });
 
+  it('tests a from_match override against the text at the match, not the surrounding snippet', () => {
+    // Two matches within one ±3-line snippet: a bare placeholder and a dev
+    // endpoint with a port. A snippet-scoped override would downgrade both;
+    // a from_match override must only touch the bare literal.
+    const inventory = [
+      file({
+        path: 'app.js',
+        content: 'const base = new URL(path, "http://localhost");\nfetch("http://localhost:3000/api");'
+      })
+    ];
+    const rs = ruleset([
+      rule({
+        ruleId: 'R',
+        severity: 'MEDIUM',
+        matchers: [
+          {
+            id: 'm',
+            type: 'regex',
+            pattern: 'https?:\\/\\/localhost',
+            fileGlobs: [],
+            conditionalOverrides: [
+              {
+                scope: 'from_match',
+                pattern: '^https?:\\/\\/localhost\\/?["\']',
+                newSeverity: 'LOW',
+                note: 'bare'
+              }
+            ]
+          }
+        ]
+      })
+    ]);
+
+    const findings = runScan(inventory, rs, defaultConfig, noop);
+    expect(findings.map((f) => [f.line, f.severity])).toEqual([
+      [1, 'LOW'],
+      [2, undefined]
+    ]);
+    expect(findings[0]?.confidenceReason).toBe('bare');
+  });
+
   it('redacts long matches in SECURITY snippets', () => {
     const secret = 'sk_live_ABCDEFGHIJKLMNOP';
     const inventory = [file({ path: 'app.js', content: `const key = "${secret}";` })];

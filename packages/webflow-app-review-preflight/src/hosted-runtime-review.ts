@@ -111,7 +111,8 @@ export async function createHostedRuntimeReviewArtifact(
           surface: 'production_runtime',
           status: 'needs_verification',
           label: 'Production runtime not yet verified',
-          detail: 'The hosted runtime is declared but has not been observed by Webflow.'
+          detail:
+            'The hosted runtime is declared but has not been scanned or observed by Webflow.'
         }
       ],
       runtime: {
@@ -119,13 +120,29 @@ export async function createHostedRuntimeReviewArtifact(
         status: 'discovered_unverified',
         manualVerificationRequired: true
       },
+      // Nothing was evaluated: this review records declared URLs only. It
+      // must not read as `ready` — a hosted runtime that was never scanned
+      // is "not evaluated", not "clean".
       summary: {
-        readiness: 'ready',
+        readiness: 'needs_review',
         securityBlockers: 0,
         requiredUpdates: 0,
-        suggestedUpdates: 0
+        suggestedUpdates: 0,
+        manualReviews: 1
       },
-      guidance: [],
+      guidance: [
+        {
+          id: 'RUNTIME-NOT-EVALUATED',
+          label: 'Manual review',
+          title: 'Hosted runtime was not scanned',
+          explanation: `This review records the ${normalized.runtimeUrls.length} declared runtime URL${normalized.runtimeUrls.length === 1 ? '' : 's'} only. Preflight did not download or scan the hosted code, so the absence of findings here means "not evaluated", not "clean". The runtime still needs Webflow observation and a reviewer's inspection.`,
+          nextMove:
+            'Set up a Webflow runtime test so the published runtime is observed against its pinned bytes, and include readable source or source maps for the hosted files in your review notes.',
+          severity: 'MEDIUM',
+          confidence: 'HIGH',
+          evidence: []
+        }
+      ],
       policySnapshot: {
         rulesetVersion: defaultRuleset.rulesetVersion,
         configVersion: defaultConfig.configVersion

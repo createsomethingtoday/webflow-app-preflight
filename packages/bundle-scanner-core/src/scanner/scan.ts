@@ -62,6 +62,9 @@ function getContextualSnippet(
   return content.substring(start, end);
 }
 
+/** Characters a `scope: 'from_match'` override may inspect after the match. */
+const OVERRIDE_FROM_MATCH_WINDOW = 200;
+
 /**
  * Pre-compiled matcher for performance
  */
@@ -239,7 +242,11 @@ export function runScan(
         if (cm.matcher.conditionalOverrides) {
           for (const override of cm.matcher.conditionalOverrides) {
             try {
-              if (new RegExp(override.pattern, override.flags ?? 'i').test(snippet)) {
+              const subject =
+                override.scope === 'from_match'
+                  ? content.slice(index, index + OVERRIDE_FROM_MATCH_WINDOW)
+                  : snippet;
+              if (new RegExp(override.pattern, override.flags ?? 'i').test(subject)) {
                 if (override.newSeverity) severity = override.newSeverity;
                 if (override.newReviewBucket) reviewBucket = override.newReviewBucket;
                 if (override.newDisposition) disposition = override.newDisposition;

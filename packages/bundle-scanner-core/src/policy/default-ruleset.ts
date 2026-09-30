@@ -6,11 +6,15 @@ import type { Ruleset } from '../types';
  * This ruleset covers security, network, privacy, and UX concerns
  * for Webflow App bundles submitted to the Marketplace.
  *
- * Version: 1.3.0-checklist-complete
+ * Version: 1.5.1-review-correctness-2026-09-30
+ *
+ * Invariant (enforced by test): a rule is in the AUTO_REJECT bucket if and
+ * only if its severity is BLOCKER. The developer-facing label is derived from
+ * both, so the two must never disagree.
  */
 export const defaultRuleset: Ruleset = {
   schemaVersion: 'wf-marketplace-scanner-ruleset@1.0.0',
-  rulesetVersion: '1.5.0-designer-api-2026-09-29',
+  rulesetVersion: '1.5.1-review-correctness-2026-09-30',
   generatedAt: '2026-01-16T14:00:00Z',
   rules: [
     // ========================================================================
@@ -370,9 +374,12 @@ export const defaultRuleset: Ruleset = {
       ruleId: 'NET-URL-HYGIENE',
       name: 'Insecure Protocols',
       category: 'NETWORK',
-      reviewBucket: 'AUTO_REJECT',
+      // Required, not auto-reject: the matcher is MEDIUM confidence and has
+      // legitimate exceptions (namespace URIs, allowlisted hosts). Bucket and
+      // severity were previously split (AUTO_REJECT + HIGH); they now agree.
+      reviewBucket: 'ACTION_REQUIRED',
       severity: 'HIGH',
-      disposition: 'REJECTED',
+      disposition: 'ACTION_REQUIRED',
       description: 'Disallow http://, ws://, javascript: protocols. Exception for W3C/Schema URIs.',
       matchers: [
         {
@@ -401,9 +408,12 @@ export const defaultRuleset: Ruleset = {
       ruleId: 'IFRAME-EXTERNAL-SRC',
       name: 'Externally Hosted Iframe',
       category: 'SECURITY',
-      reviewBucket: 'AUTO_REJECT',
+      // Required, not auto-reject: external iframes are permitted for auth
+      // flows, so a reviewer must judge the purpose. Bucket and severity were
+      // previously split (AUTO_REJECT + HIGH); they now agree.
+      reviewBucket: 'ACTION_REQUIRED',
       severity: 'HIGH',
-      disposition: 'REJECTED',
+      disposition: 'ACTION_REQUIRED',
       description: 'External iframes are allowed for Auth only. Remote UI loading is prohibited.',
       matchers: [
         {
@@ -596,7 +606,27 @@ export const defaultRuleset: Ruleset = {
           flags: 'i',
           fileGlobs: ['**/*.{js,ts,jsx,tsx,mjs,cjs,json}'],
           triggerTokens: ['localhost', '127.0.0.1', 'ngrok'],
-          confidence: 'HIGH'
+          confidence: 'HIGH',
+          conditionalOverrides: [
+            {
+              // A bare "http://localhost" / "http://127.0.0.1" literal (no
+              // port, no path, closed immediately by a quote) is the shape
+              // of a library URL-parsing fallback (`new URL(p, "http://localhost")`,
+              // shipped in react-router's production build) or a hostname
+              // blocklist, not a request destination. Development residue
+              // carries a port or a path (`http://localhost:3000/api`) and
+              // stays Required. Tested against the text from the match, not
+              // the ±3-line snippet, so a nearby dev URL cannot borrow it.
+              scope: 'from_match',
+              pattern: '^https?:\\/\\/(localhost|127\\.0\\.0\\.1)\\/?[\'"`]',
+              flags: 'i',
+              newSeverity: 'LOW',
+              newReviewBucket: 'NEEDS_EXPLANATION',
+              newDisposition: 'INFO',
+              note:
+                'Bare localhost literal: matches a library URL fallback or hostname blocklist, not a dev endpoint. Confirm it is never used as a request destination.'
+            }
+          ]
         },
         {
           id: 'private-network-or-metadata',
