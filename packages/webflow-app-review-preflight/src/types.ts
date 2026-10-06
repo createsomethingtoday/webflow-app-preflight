@@ -94,6 +94,10 @@ export interface BundleReview {
       fileName: string;
       sha256: string;
       mapFileCount: number;
+      /** Which accepted review-ZIP shape was supplied. */
+      shape: 'source-maps' | 'unchanged-source';
+      /** Source files found in an unchanged-source ZIP (0 for source maps). */
+      sourceFileCount: number;
     };
   };
   artifactScope: {

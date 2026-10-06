@@ -291,17 +291,18 @@ function UploadCard({
       />
       <ArtifactFileField
         id={`${id}-maps`}
-        label="Source-map ZIP (maps, package.json, lockfile)"
-        buttonLabel="Choose source-map ZIP"
+        label="Review ZIP (source maps + build files, or unchanged source)"
+        buttonLabel="Choose review ZIP"
         accept=".zip,application/zip"
         file={sourceMaps}
         disabled={busy}
         onChange={setSourceMaps}
       />
       <p className="artifact-field-note">
-        Upload the same private ZIP you will submit through the official form:
-        source maps, package.json, and lockfile from this exact build. Keep
-        them out of the production bundle. It is never published.
+        Upload the same private ZIP you will submit through the official form.
+        Built code: source maps, package.json, and lockfile from this exact
+        build. Source shipped unchanged: the source files plus a short README.
+        Keep maps out of the production bundle. It is never published.
       </p>
       <button
         className="button button-primary"
@@ -1554,8 +1555,8 @@ function ReviewDetail({
         />
         <ArtifactFileField
           id={`${revisionId}-maps`}
-          label="Source-map ZIP (maps, package.json, lockfile)"
-          buttonLabel="Choose source-map ZIP"
+          label="Review ZIP (source maps + build files, or unchanged source)"
+          buttonLabel="Choose review ZIP"
           accept=".zip,application/zip"
           file={revisionSourceMaps}
           disabled={busy}

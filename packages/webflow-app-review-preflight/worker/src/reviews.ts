@@ -45,8 +45,9 @@ function toHex(bytes: ArrayBuffer): string {
 /**
  * Parse the optional private source-map artifact from the multipart form.
  * The artifact is the same one the developer attaches to the official
- * submission form, so validation mirrors it: one .zip holding the source maps,
- * package.json, and lockfile (contents are checked in createBundleReview).
+ * submission form, so validation mirrors it: one .zip holding either the source
+ * maps, package.json, and lockfile, or unchanged source plus a README
+ * (contents are checked in createBundleReview).
  */
 async function parseSourceMapUpload(
   form: FormData
@@ -59,7 +60,7 @@ async function parseSourceMapUpload(
   const lowerName = entry.name.toLowerCase();
   if (!lowerName.endsWith('.zip')) {
     throw new ReviewInputError(
-      'Upload one .zip containing the source maps, package.json, and lockfile from this build.'
+      'Upload one .zip: the source maps, package.json, and lockfile from this build, or the unchanged source files plus a README.'
     );
   }
   const extension = 'zip' as const;

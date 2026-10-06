@@ -1118,7 +1118,8 @@ describe('review API', () => {
     expect(response.status).toBe(400);
     const body = await response.json<{ error: string; message: string }>();
     expect(body.error).toBe('invalid_bundle');
-    expect(body.message).toContain('one .zip containing the source maps, package.json, and lockfile');
+    expect(body.message).toContain('source maps, package.json, and lockfile');
+    expect(body.message).toContain('unchanged source');
   });
 
   test('creates a durable Data Client review from hosted runtime URLs without a bundle', async () => {
