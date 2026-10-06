@@ -122,30 +122,52 @@ const LOCKFILE_NAMES = new Set([
   'bun.lock'
 ]);
 
-/** The uploaded source-map artifact cannot be used as review input. */
+/** The uploaded review artifact cannot be used as review input. */
 export class SourceMapArtifactError extends Error {}
 
+const README_PATTERN = /^readme(\.(md|txt|markdown))?$/;
+const SOURCE_FILE_PATTERN = /\.(js|mjs|cjs|jsx|ts|tsx|html|css|vue|svelte)$/;
+const REVIEW_FILE_MATCH_EVIDENCE_LIMIT = 3;
+
+export type ReviewArtifactShape = 'source-maps' | 'unchanged-source';
+
+interface ReviewArtifact {
+  shape: ReviewArtifactShape;
+  /** Version-3 maps (empty for the unchanged-source shape). */
+  maps: UnzippedFile[];
+  /** Source files as shipped (empty for the source-maps shape). */
+  sourceFiles: UnzippedFile[];
+}
+
+const REVIEW_ZIP_SHAPES_MESSAGE =
+  'Upload one .zip in one of two shapes: the source maps, package.json, and lockfile from the build that produced this bundle; or, for an app that ships its source unchanged, the source files plus a short README explaining how the bundle is packaged.';
+
 /**
- * Expand the privately uploaded source-map artifact into individual map
- * files. The artifact is one `.zip` holding the source maps, package.json,
- * and lockfile from the build that produced the bundle — the same ZIP the
- * submission form requires (developers.webflow.com submitting-your-app →
- * Submission artifacts). An incomplete artifact is an input error, not a
- * silent "missing": the developer believes they supplied it, so tell them
- * why the upload did not count.
+ * Expand the privately uploaded review artifact. It is one `.zip` — the same
+ * ZIP the submission form requires (developers.webflow.com
+ * submitting-your-app → Submission artifacts) — in one of two shapes:
+ *
+ * - source maps: the version-3 maps, package.json, and lockfile from the
+ *   build that produced the bundle;
+ * - unchanged source: for apps with no build or transform step, the source
+ *   files exactly as they ship plus a short README on how the bundle is
+ *   packaged (package.json and lockfile only when the app uses them).
+ *
+ * An incomplete artifact is an input error, not a silent "missing": the
+ * developer believes they supplied it, so tell them why the upload did not
+ * count. Missing maps for a generated bundle are not an "unchanged source"
+ * case; analyzeSourceMaps still reports those as missing.
  */
-async function extractSourceMapArtifact(artifact: {
+async function extractReviewArtifact(artifact: {
   fileName: string;
   bytes: ArrayBuffer;
-}): Promise<UnzippedFile[]> {
+}): Promise<ReviewArtifact> {
   const lowerName = artifact.fileName.toLowerCase();
   if (artifact.bytes.byteLength === 0) {
-    throw new SourceMapArtifactError('The source-map upload is empty.');
+    throw new SourceMapArtifactError('The review ZIP upload is empty.');
   }
   if (!lowerName.endsWith('.zip')) {
-    throw new SourceMapArtifactError(
-      'Upload one .zip containing the source maps, package.json, and lockfile from this build.'
-    );
+    throw new SourceMapArtifactError(REVIEW_ZIP_SHAPES_MESSAGE);
   }
   let entries: UnzippedFile[];
   try {
@@ -156,24 +178,90 @@ async function extractSourceMapArtifact(artifact: {
     ));
   } catch {
     throw new SourceMapArtifactError(
-      'We could not read the source-map zip. Re-export the archive and try again.'
+      'We could not read the review ZIP. Re-export the archive and try again.'
     );
   }
-  const maps = entries.filter((file) => file.path.toLowerCase().endsWith('.map'));
-  const baseNames = new Set(
-    entries.map((file) => file.path.split('/').pop()?.toLowerCase() ?? '')
-  );
-  const missing = [
-    ...(maps.length > 0 ? [] : ['source maps (.map files)']),
-    ...([...PACKAGE_MANIFEST_NAMES].some((name) => baseNames.has(name)) ? [] : ['package.json']),
-    ...([...LOCKFILE_NAMES].some((name) => baseNames.has(name)) ? [] : ['a lockfile'])
-  ];
-  if (missing.length > 0) {
+  const base = (file: UnzippedFile) => file.path.split('/').pop()?.toLowerCase() ?? '';
+  const maps = entries.filter((file) => base(file).endsWith('.map'));
+  const baseNames = new Set(entries.map(base));
+  const hasManifest = [...PACKAGE_MANIFEST_NAMES].some((name) => baseNames.has(name));
+  const hasLockfile = [...LOCKFILE_NAMES].some((name) => baseNames.has(name));
+
+  if (maps.length > 0) {
+    const missing = [
+      ...(hasManifest ? [] : ['package.json']),
+      ...(hasLockfile ? [] : ['a lockfile'])
+    ];
+    if (missing.length > 0) {
+      throw new SourceMapArtifactError(
+        `The review ZIP has source maps but is missing ${missing.join(' and ')}. Include them from the exact build that produced this bundle.`
+      );
+    }
+    return { shape: 'source-maps', maps, sourceFiles: [] };
+  }
+
+  const sourceFiles = entries.filter((file) => SOURCE_FILE_PATTERN.test(base(file)));
+  const hasReadme = [...baseNames].some((name) => README_PATTERN.test(name));
+  if (sourceFiles.length > 0 && hasReadme) {
+    return { shape: 'unchanged-source', maps: [], sourceFiles };
+  }
+  if (sourceFiles.length > 0) {
     throw new SourceMapArtifactError(
-      `The source-map zip is missing ${missing.join(', ')}. Include them from the exact build that produced this bundle.`
+      'The review ZIP has no source maps and no README. If your app ships its source unchanged, add a short README that explains how the bundle is packaged. Otherwise include the .map files, package.json, and lockfile from the build that produced the bundle.'
     );
   }
-  return maps;
+  throw new SourceMapArtifactError(`The review ZIP has no source maps. ${REVIEW_ZIP_SHAPES_MESSAGE}`);
+}
+
+function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.byteLength !== b.byteLength) return false;
+  for (let index = 0; index < a.byteLength; index += 1) {
+    if (a[index] !== b[index]) return false;
+  }
+  return true;
+}
+
+/**
+ * For the unchanged-source shape, the review files must be the bytes that
+ * ship: every executable in the bundle needs a byte-identical file of the
+ * same name in the review ZIP. A bundle whose code differs from the supplied
+ * source is not reviewable from that source (the review team verifies the
+ * review files match what ships).
+ */
+export function reviewFileMatchGuidance(
+  bundleFiles: ReadonlyArray<UnzippedFile>,
+  artifact: ReviewArtifact | null
+): ReviewGuidance | null {
+  if (!artifact || artifact.shape !== 'unchanged-source') return null;
+  const base = (path: string) => path.split('/').pop()?.toLowerCase() ?? '';
+  const executables = bundleFiles.filter((file) => {
+    const name = base(file.path);
+    const dot = name.lastIndexOf('.');
+    return dot >= 0 && EXECUTABLE_EXTENSIONS.has(name.slice(dot)) && !name.endsWith('.wasm');
+  });
+  const unmatched = executables.filter(
+    (file) =>
+      !artifact.sourceFiles.some(
+        (candidate) => base(candidate.path) === base(file.path) && bytesEqual(candidate.data, file.data)
+      )
+  );
+  if (executables.length === 0 || unmatched.length === 0) return null;
+
+  return {
+    id: 'SRC-REVIEW-FILES-MISMATCH',
+    label: 'Required update',
+    title: 'Review ZIP source does not match the shipped bundle',
+    explanation: `The review ZIP was submitted as unchanged source, but ${unmatched.length} of ${executables.length} executable file${executables.length === 1 ? '' : 's'} in the bundle ${unmatched.length === 1 ? 'has' : 'have'} no byte-identical file of the same name in the ZIP. Unchanged source means the files in the ZIP are exactly the files that ship.`,
+    nextMove:
+      'If the bundle is built or transformed from this source, submit the source maps, package.json, and lockfile from that build instead. If it really ships unchanged, re-create the review ZIP from the same files that went into the bundle.',
+    severity: 'HIGH',
+    confidence: 'HIGH',
+    evidence: unmatched.slice(0, REVIEW_FILE_MATCH_EVIDENCE_LIMIT).map((file) => ({
+      filePath: file.path,
+      line: 1,
+      snippet: 'No byte-identical file with this name in the review ZIP.'
+    }))
+  } satisfies ReviewGuidance;
 }
 
 function findManifest(inventory: FileEntry[]): {
@@ -488,9 +576,9 @@ export function bundleSizeGuidance(compressedBytes: number): ReviewGuidance | nu
 }
 
 /**
- * The package manifest and lockfile travel in the private source-map ZIP, not
+ * The package manifest and lockfile travel in the private review ZIP, not
  * the bundle (Submission artifacts docs). A provided ZIP is validated in
- * extractSourceMapArtifact, so this only nudges when no ZIP was attached.
+ * extractReviewArtifact, so this only nudges when no ZIP was attached.
  * Absence is a suggestion, not a gate — the submission form is the
  * enforcement point.
  */
@@ -504,9 +592,9 @@ function manifestPresenceGuidance(
   return {
     id: 'PROD-PACKAGE-MANIFEST',
     label: 'Suggested update',
-    title: 'Attach the source-map ZIP with package.json and lockfile',
+    title: 'Attach the review ZIP (source maps, package.json, lockfile)',
     explanation:
-      'This bundle contains compiled executables, but no source-map ZIP was attached. The submission form requires one ZIP with the source maps, package.json, and lockfile from the exact build that produced the bundle, so review can reconcile the artifact with its dependencies.',
+      'This bundle contains executables, but no review ZIP was attached. The submission form requires one ZIP with the source maps, package.json, and lockfile from the exact build that produced the bundle (or, for an app that ships its source unchanged, the source files plus a short README), so review can reconcile the artifact with its dependencies.',
     nextMove:
       'Run Preflight again with that ZIP attached, and upload the same ZIP in the submission form\'s Source map artifact field. Keep these files out of the production bundle.',
     severity: 'LOW',
@@ -576,9 +664,10 @@ export async function createBundleReview(
   const bundledSourceMaps = unzipped.filter((file) =>
     file.path.toLowerCase().endsWith('.map')
   );
-  const externalSourceMaps = input.sourceMapArtifact
-    ? await extractSourceMapArtifact(input.sourceMapArtifact)
-    : [];
+  const reviewArtifact = input.sourceMapArtifact
+    ? await extractReviewArtifact(input.sourceMapArtifact)
+    : null;
+  const externalSourceMaps = reviewArtifact?.maps ?? [];
   const sourceMapFiles = [...bundledSourceMaps, ...externalSourceMaps];
   const sourceMapSummary = analyzeSourceMaps(
     inventory,
@@ -598,6 +687,7 @@ export async function createBundleReview(
     ...toGuidance(report.findings),
     sourceMapGuidance(sourceMapSummary),
     sourceMapExposureGuidance(sourceMapSummary),
+    reviewFileMatchGuidance(unzipped, reviewArtifact),
     manifestIdentityGuidance(artifactScope),
     manifestPresenceGuidance(inventory, Boolean(input.sourceMapArtifact)),
     bundleSizeGuidance(input.bundle.byteLength),
@@ -627,7 +717,9 @@ export async function createBundleReview(
             sourceMaps: {
               fileName: input.sourceMapArtifact.fileName,
               sha256: await sha256(input.sourceMapArtifact.bytes),
-              mapFileCount: externalSourceMaps.length
+              mapFileCount: externalSourceMaps.length,
+              shape: reviewArtifact?.shape ?? 'source-maps',
+              sourceFileCount: reviewArtifact?.sourceFiles.length ?? 0
             }
           }
         : {})

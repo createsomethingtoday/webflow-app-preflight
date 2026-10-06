@@ -348,7 +348,80 @@ describe('createBundleReview', () => {
     });
 
     await expect(attempt).rejects.toThrow(SourceMapArtifactError);
-    await expect(attempt).rejects.toThrow(/package\.json, a lockfile/);
+    await expect(attempt).rejects.toThrow(/package\.json and a lockfile/);
+  });
+
+  async function unchangedSourceFixture(zipSource: string, bundleSource = zipSource, bundleFile = 'public/app.js') {
+    const zip = new JSZip();
+    zip.file(
+      'webflow.json',
+      JSON.stringify({ name: 'Plain App', apiVersion: '2', publicDir: 'public' })
+    );
+    zip.file(bundleFile, bundleSource);
+    const review = new JSZip();
+    review.file(`src/${bundleFile.split('/').pop()}`, zipSource);
+    review.file('README.md', 'Shipped as-is: public/ is copied into the bundle without a build step.');
+    return {
+      bundle: await zip.generateAsync({ type: 'arraybuffer' }),
+      fileName: 'plain-app.zip',
+      sourceMapArtifact: {
+        fileName: 'review-source.zip',
+        bytes: await review.generateAsync({ type: 'arraybuffer' })
+      }
+    };
+  }
+
+  test('accepts unchanged source plus a README as the review ZIP when it matches the bundle', async () => {
+    const source = "export function ready() { return 'ok'; }\n";
+    const review = await createBundleReview(await unchangedSourceFixture(source));
+
+    expect(review.artifact.sourceMaps?.shape).toBe('unchanged-source');
+    expect(review.artifact.sourceMaps?.mapFileCount).toBe(0);
+    expect(review.artifact.sourceMaps?.sourceFileCount).toBe(1);
+    expect(review.guidance.find((item) => item.id === 'SRC-REVIEW-FILES-MISMATCH')).toBeUndefined();
+    expect(review.guidance.find((item) => item.id === 'PROD-PACKAGE-MANIFEST')).toBeUndefined();
+    expect(review.guidance.find((item) => item.id === 'SRC-MAP-CORRESPONDENCE')).toBeUndefined();
+    expect(review.summary.readiness).toBe('ready');
+  });
+
+  test('requires unchanged-source review files to be byte-identical to what ships', async () => {
+    const review = await createBundleReview(
+      await unchangedSourceFixture(
+        "export function ready() { return 'ok'; }\n",
+        "export function ready() { return 'changed'; }\n"
+      )
+    );
+
+    const finding = review.guidance.find((item) => item.id === 'SRC-REVIEW-FILES-MISMATCH');
+    expect(finding?.label).toBe('Required update');
+    expect(finding?.evidence[0]?.filePath).toBe('public/app.js');
+    expect(review.summary.readiness).toBe('changes_required');
+  });
+
+  test('does not let unchanged source stand in for the maps of a generated bundle', async () => {
+    const minified = 'export const ok=true;//# sourceMappingURL=app.min.js.map';
+    const review = await createBundleReview(
+      await unchangedSourceFixture(minified, minified, 'public/app.min.js')
+    );
+
+    expect(review.sourceMapSummary?.status).toBe('missing');
+    expect(review.guidance.find((item) => item.id === 'SRC-MAP-CORRESPONDENCE')?.label).toBe('Required update');
+  });
+
+  test('rejects a review ZIP with source files but no README', async () => {
+    const zip = new JSZip();
+    zip.file('webflow.json', JSON.stringify({ name: 'Plain App', apiVersion: '2', publicDir: 'public' }));
+    zip.file('public/app.js', 'export const ok = true;');
+    const review = new JSZip();
+    review.file('app.js', 'export const ok = true;');
+
+    await expect(
+      createBundleReview({
+        bundle: await zip.generateAsync({ type: 'arraybuffer' }),
+        fileName: 'plain-app.zip',
+        sourceMapArtifact: { fileName: 'review.zip', bytes: await review.generateAsync({ type: 'arraybuffer' }) }
+      })
+    ).rejects.toThrow(/no README/);
   });
 
   test('rejects a source-map artifact that contains no maps', async () => {
