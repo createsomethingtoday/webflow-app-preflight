@@ -7,7 +7,7 @@
   "scripts": {
     "build": "node scripts/build.mjs",
     "build:production": "PREFLIGHT_BUILD_MODE=production node scripts/build.mjs",
-    "bundle": "pnpm build:production && DO_NOT_TRACK=1 CI=1 webflow extension bundle --skip-update-check && node scripts/verify-production-bundle.mjs",
+    "bundle": "pnpm build:production && DO_NOT_TRACK=1 CI=1 webflow extension bundle --skip-update-check && node scripts/package-review-artifact.mjs && node scripts/verify-production-bundle.mjs",
     "check": "tsc --noEmit",
     "lint": "pnpm run check",
     "pretest": "pnpm --filter @create-something/webflow-app-review-preflight build",

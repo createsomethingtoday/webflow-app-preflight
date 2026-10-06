@@ -22,3 +22,5 @@ Thumbs.db
 output/
 
 packages/webflow-app-review-preflight/extension/bundle.zip
+packages/webflow-app-review-preflight/extension/review-artifact/
+packages/webflow-app-review-preflight/extension/review-artifact.zip

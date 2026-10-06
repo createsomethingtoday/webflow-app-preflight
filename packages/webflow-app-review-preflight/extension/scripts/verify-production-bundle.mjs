@@ -76,10 +76,54 @@ function findByBasename(entries, expected) {
   return [...entries.entries()].find(([name]) => basename(name) === expected);
 }
 
+function scanTextEntry(name, contents, label, problems) {
+  const text = contents.toString("utf8");
+  for (const { label: signature, pattern } of forbiddenSignatures) {
+    pattern.lastIndex = 0;
+    const matches = text.match(pattern) ?? [];
+    if (matches.length > 0) {
+      problems.push(
+        `${label} ${name} contains ${matches.length} ${signature} signature(s)`,
+      );
+    }
+  }
+  for (const origin of extractAbsoluteOrigins(text)) {
+    if (origin !== productionApiBase && !allowedInertOrigins.has(origin)) {
+      problems.push(
+        `${label} ${name} contains unexpected absolute origin ${origin}`,
+      );
+    }
+  }
+}
+
+function inspectSourceMap(mapEntry, label, problems) {
+  try {
+    const sourceMap = JSON.parse(mapEntry[1].toString("utf8"));
+    if (!Array.isArray(sourceMap.sources) || sourceMap.sources.length === 0) {
+      problems.push(`${label} bundle.js.map has no source paths`);
+    }
+    if (
+      !Array.isArray(sourceMap.sourcesContent) ||
+      sourceMap.sourcesContent.length !== sourceMap.sources.length ||
+      !sourceMap.sourcesContent.some(
+        (source) => typeof source === "string" && source.length > 0,
+      )
+    ) {
+      problems.push(
+        `${label} bundle.js.map does not contain reviewer-readable source content`,
+      );
+    }
+  } catch {
+    problems.push(`${label} bundle.js.map is not valid JSON`);
+  }
+}
+
+// The shipped payload: minified, pinned to the production API, and free of
+// source maps — a bundle that ships them is not accepted (Submission
+// artifacts docs; Preflight SRC-MAP-PUBLIC-EXPOSURE).
 export function inspectProductionEntries(entries, label) {
   const problems = [];
   const bundleEntry = findByBasename(entries, "bundle.js");
-  const mapEntry = findByBasename(entries, "bundle.js.map");
 
   if (!bundleEntry) {
     problems.push(`${label} is missing bundle.js`);
@@ -102,74 +146,56 @@ export function inspectProductionEntries(entries, label) {
     problems.push(`${label} bundle.js is not minified (${lineCount} lines)`);
   }
 
-  const sourceMapReference = bundle.match(
-    /\/\/#\s*sourceMappingURL=([^\s]+)/,
-  )?.[1];
-  if (!sourceMapReference) {
-    problems.push(`${label} bundle.js has no sourceMappingURL`);
-  } else if (basename(sourceMapReference) !== "bundle.js.map") {
-    problems.push(
-      `${label} bundle.js references unexpected source map ${sourceMapReference}`,
-    );
-  }
-
-  if (!mapEntry) {
-    problems.push(`${label} is missing bundle.js.map`);
-  } else {
-    try {
-      const sourceMap = JSON.parse(mapEntry[1].toString("utf8"));
-      if (!Array.isArray(sourceMap.sources) || sourceMap.sources.length === 0) {
-        problems.push(`${label} bundle.js.map has no source paths`);
-      }
-      if (
-        !Array.isArray(sourceMap.sourcesContent) ||
-        sourceMap.sourcesContent.length !== sourceMap.sources.length ||
-        !sourceMap.sourcesContent.some(
-          (source) => typeof source === "string" && source.length > 0,
-        )
-      ) {
-        problems.push(
-          `${label} bundle.js.map does not contain reviewer-readable source content`,
-        );
-      }
-    } catch {
-      problems.push(`${label} bundle.js.map is not valid JSON`);
-    }
+  // The trailing directive, not any mention: the extension's own scanner
+  // copy can legitimately contain the word.
+  if (/(?:^|\n)\s*\/\/[#@]\s*sourceMappingURL=\S+\s*$/.test(bundle)) {
+    problems.push(`${label} bundle.js references a source map`);
   }
 
   for (const [name, contents] of entries) {
-    if (!textFile.test(name)) continue;
-    const text = contents.toString("utf8");
-    for (const { label: signature, pattern } of forbiddenSignatures) {
-      pattern.lastIndex = 0;
-      const matches = text.match(pattern) ?? [];
-      if (matches.length > 0) {
-        problems.push(
-          `${label} ${name} contains ${matches.length} ${signature} signature(s)`,
-        );
-      }
+    if (name.toLowerCase().endsWith(".map")) {
+      problems.push(`${label} ships source map ${name}`);
     }
-    for (const origin of extractAbsoluteOrigins(text)) {
-      if (origin !== productionApiBase && !allowedInertOrigins.has(origin)) {
-        problems.push(
-          `${label} ${name} contains unexpected absolute origin ${origin}`,
-        );
-      }
-    }
+    if (textFile.test(name)) scanTextEntry(name, contents, label, problems);
   }
 
+  return problems;
+}
+
+const LOCKFILE_NAMES = ["pnpm-lock.yaml", "package-lock.json", "yarn.lock", "bun.lock"];
+
+// The private review ZIP: the readable source map plus package.json and a
+// lockfile, matching what the submission form and Preflight require.
+export function inspectReviewArtifactEntries(entries, label) {
+  const problems = [];
+  const mapEntry = findByBasename(entries, "bundle.js.map");
+  if (!mapEntry) {
+    problems.push(`${label} is missing bundle.js.map`);
+  } else {
+    inspectSourceMap(mapEntry, label, problems);
+    scanTextEntry(mapEntry[0], mapEntry[1], label, problems);
+  }
+  if (!findByBasename(entries, "package.json")) {
+    problems.push(`${label} is missing package.json`);
+  }
+  if (!LOCKFILE_NAMES.some((name) => findByBasename(entries, name))) {
+    problems.push(`${label} is missing a lockfile`);
+  }
   return problems;
 }
 
 export async function verifyProductionArtifacts({
   publicDirectory = resolve(root, "public"),
   archivePath = resolve(root, "bundle.zip"),
+  reviewArtifactPath = resolve(root, "review-artifact.zip"),
 } = {}) {
   const publicFiles = await directoryEntries(publicDirectory);
   const archivedFiles = await archiveEntries(archivePath);
+  const reviewFiles = await archiveEntries(reviewArtifactPath);
   const problems = [
     ...inspectProductionEntries(publicFiles, "Public payload"),
     ...inspectProductionEntries(archivedFiles, "Archive"),
+    ...inspectReviewArtifactEntries(reviewFiles, "Review artifact"),
   ];
 
   for (const required of ["webflow.json", "index.html", "styles.css"]) {
@@ -189,6 +215,7 @@ export async function verifyProductionArtifacts({
     archive: relative(process.cwd(), archivePath),
     archiveFiles: archivedFiles.size,
     publicFiles: publicFiles.size,
+    reviewArtifact: relative(process.cwd(), reviewArtifactPath),
   };
 }
 
@@ -199,6 +226,7 @@ if (
   const result = await verifyProductionArtifacts();
   console.log(
     `Production artifacts verified: ${result.publicFiles} public file(s), ` +
-      `${result.archiveFiles} archived file(s), archive ${result.archive}.`,
+      `${result.archiveFiles} archived file(s), archive ${result.archive}; ` +
+      `private review ZIP ${result.reviewArtifact}.`,
   );
 }
