@@ -45,7 +45,8 @@ function toHex(bytes: ArrayBuffer): string {
 /**
  * Parse the optional private source-map artifact from the multipart form.
  * The artifact is the same one the developer attaches to the official
- * submission form, so validation mirrors it: one .map file or one .zip.
+ * submission form, so validation mirrors it: one .zip holding the source maps,
+ * package.json, and lockfile (contents are checked in createBundleReview).
  */
 async function parseSourceMapUpload(
   form: FormData
@@ -56,16 +57,12 @@ async function parseSourceMapUpload(
     throw new ReviewInputError('Source maps must be uploaded as a file.');
   }
   const lowerName = entry.name.toLowerCase();
-  const extension = lowerName.endsWith('.map')
-    ? 'map'
-    : lowerName.endsWith('.zip')
-      ? 'zip'
-      : null;
-  if (!extension) {
+  if (!lowerName.endsWith('.zip')) {
     throw new ReviewInputError(
-      'Upload source maps as a single .map file or a .zip archive of .map files.'
+      'Upload one .zip containing the source maps, package.json, and lockfile from this build.'
     );
   }
+  const extension = 'zip' as const;
   if (entry.size === 0 || entry.size > MAX_SOURCE_MAP_BYTES) {
     throw new ReviewInputError('The source-map upload must be between 1 byte and 10 MB.');
   }

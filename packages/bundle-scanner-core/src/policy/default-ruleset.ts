@@ -6,7 +6,7 @@ import type { Ruleset } from '../types';
  * This ruleset covers security, network, privacy, and UX concerns
  * for Webflow App bundles submitted to the Marketplace.
  *
- * Version: 1.5.1-review-correctness-2026-09-30
+ * Version: 1.5.2-source-map-zip-2026-10-06
  *
  * Invariant (enforced by test): a rule is in the AUTO_REJECT bucket if and
  * only if its severity is BLOCKER. The developer-facing label is derived from
@@ -14,7 +14,7 @@ import type { Ruleset } from '../types';
  */
 export const defaultRuleset: Ruleset = {
   schemaVersion: 'wf-marketplace-scanner-ruleset@1.0.0',
-  rulesetVersion: '1.5.1-review-correctness-2026-09-30',
+  rulesetVersion: '1.5.2-source-map-zip-2026-10-06',
   generatedAt: '2026-01-16T14:00:00Z',
   rules: [
     // ========================================================================

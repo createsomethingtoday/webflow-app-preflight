@@ -974,6 +974,8 @@ describe('review API', () => {
       'main.js.map',
       JSON.stringify({ version: 3, file: 'main.js', sources: ['../src/main.ts'], mappings: '' })
     );
+    mapZip.file('package.json', JSON.stringify({ name: 'mapped-app', version: '1.0.0' }));
+    mapZip.file('pnpm-lock.yaml', 'lockfileVersion: 9');
     const maps = await mapZip.generateAsync({ type: 'uint8array' });
 
     const form = new FormData();
@@ -1096,11 +1098,11 @@ describe('review API', () => {
     expect(reissued.submissionReceipt.code).not.toBe(created.submissionReceipt.code);
   });
 
-  test('rejects a source-map upload that is not a .map file or .zip archive', async () => {
+  test('rejects a source-map upload that is not a .zip archive', async () => {
     const bundle = await createBundle();
     const form = new FormData();
     form.set('bundle', new File([bundle], 'consent-pro.zip', { type: 'application/zip' }));
-    form.set('sourceMaps', new File(['{}'], 'maps.json', { type: 'application/json' }));
+    form.set('sourceMaps', new File(['{"version":3}'], 'app.js.map', { type: 'application/json' }));
 
     const response = await exports.default.fetch(
       new Request('https://preflight.test/v1/reviews', {
@@ -1116,7 +1118,7 @@ describe('review API', () => {
     expect(response.status).toBe(400);
     const body = await response.json<{ error: string; message: string }>();
     expect(body.error).toBe('invalid_bundle');
-    expect(body.message).toContain('.map file or a .zip');
+    expect(body.message).toContain('one .zip containing the source maps, package.json, and lockfile');
   });
 
   test('creates a durable Data Client review from hosted runtime URLs without a bundle', async () => {

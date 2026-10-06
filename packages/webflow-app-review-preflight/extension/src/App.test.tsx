@@ -355,7 +355,7 @@ describe('App Review Preflight extension', () => {
     ).not.toBeInTheDocument();
     expect(screen.getByText(/Choose what the app ships/i)).toBeVisible();
     expect(screen.getByText('Choose bundle')).toBeVisible();
-    expect(screen.getByText('Choose source maps (.zip or .map)')).toBeVisible();
+    expect(screen.getByText('Choose source-map ZIP')).toBeVisible();
     expect(screen.getByRole('button', { name: 'Run preflight' })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Enter script URLs' })).toBeVisible();
     expect(screen.queryByText('Share')).not.toBeInTheDocument();
