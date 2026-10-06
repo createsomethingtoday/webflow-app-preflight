@@ -1,4 +1,5 @@
 import { build } from "esbuild";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { productionApiBase } from "./production-config.mjs";
@@ -29,20 +30,27 @@ const runtimeBoundary = resolve(
   production ? "src/production-runtime.ts" : "src/development-runtime.ts",
 );
 
-await build({
+const outfile = resolve(root, "public/bundle.js");
+const reviewDirectory = resolve(root, "review-artifact");
+
+const result = await build({
   entryPoints: [resolve(root, "src/main.tsx")],
   bundle: true,
   format: "iife",
   target: "es2020",
-  outfile: resolve(root, "public/bundle.js"),
+  outfile,
   // Production builds must be minified and must resolve React to its production
   // build. Without the NODE_ENV define, React's development build is bundled and
   // ships ~56 hardcoded reactjs.org warning URLs, which Marketplace security
   // scanning flags as undisclosed external connections.
   minify: production,
   // Minifying without a source map would remove the readable source that review
-  // depends on, so the two travel together.
-  sourcemap: production ? true : "inline",
+  // depends on, so the two travel together — but never in the public bundle.
+  // Production writes an external map with no sourceMappingURL comment and
+  // keeps it out of public/; package-review-artifact.mjs ships it privately in
+  // the review ZIP alongside package.json and the lockfile.
+  sourcemap: production ? "external" : "inline",
+  write: !production,
   plugins: [
     {
       name: "development-runtime-boundary",
@@ -60,3 +68,16 @@ await build({
     ),
   },
 });
+
+if (production) {
+  await rm(reviewDirectory, { recursive: true, force: true });
+  await mkdir(reviewDirectory, { recursive: true });
+  for (const file of result.outputFiles) {
+    // review-artifact/ sits beside public/, so the map's relative source
+    // paths stay valid after the move.
+    const target = file.path.endsWith(".map")
+      ? resolve(reviewDirectory, "bundle.js.map")
+      : outfile;
+    await writeFile(target, file.contents);
+  }
+}
