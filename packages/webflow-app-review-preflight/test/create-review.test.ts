@@ -281,6 +281,8 @@ describe('createBundleReview', () => {
       'app.min.js.map',
       JSON.stringify({ version: 3, file: 'app.min.js', sources: ['../src/app.ts'], mappings: '' })
     );
+    mapZip.file('package.json', JSON.stringify({ name: 'mapped-app', version: '1.0.0' }));
+    mapZip.file('pnpm-lock.yaml', 'lockfileVersion: 9');
 
     const review = await createBundleReview({
       bundle: await zip.generateAsync({ type: 'arraybuffer' }),
@@ -300,7 +302,7 @@ describe('createBundleReview', () => {
     expect(review.artifact.sourceMaps?.mapFileCount).toBe(1);
   });
 
-  test('accepts a single .map file as the source-map artifact', async () => {
+  test('rejects a bare .map file now that the artifact must be a ZIP', async () => {
     const zip = new JSZip();
     zip.file(
       'webflow.json',
@@ -308,18 +310,45 @@ describe('createBundleReview', () => {
     );
     zip.file('public/app.min.js', 'export const ok=true;//# sourceMappingURL=app.min.js.map');
 
-    const review = await createBundleReview({
+    await expect(
+      createBundleReview({
+        bundle: await zip.generateAsync({ type: 'arraybuffer' }),
+        fileName: 'mapped-app.zip',
+        sourceMapArtifact: {
+          fileName: 'app.min.js.map',
+          bytes: new TextEncoder().encode(
+            JSON.stringify({ version: 3, file: 'app.min.js', sources: ['../src/app.ts'], mappings: '' })
+          ).buffer as ArrayBuffer
+        }
+      })
+    ).rejects.toThrow(/one \.zip/);
+  });
+
+  test('rejects a source-map ZIP without package.json and a lockfile', async () => {
+    const zip = new JSZip();
+    zip.file(
+      'webflow.json',
+      JSON.stringify({ name: 'Mapped App', apiVersion: '2', publicDir: 'public' })
+    );
+    zip.file('public/app.min.js', 'export const ok=true;//# sourceMappingURL=app.min.js.map');
+
+    const mapsOnly = new JSZip();
+    mapsOnly.file(
+      'app.min.js.map',
+      JSON.stringify({ version: 3, file: 'app.min.js', sources: ['../src/app.ts'], mappings: '' })
+    );
+
+    const attempt = createBundleReview({
       bundle: await zip.generateAsync({ type: 'arraybuffer' }),
       fileName: 'mapped-app.zip',
       sourceMapArtifact: {
-        fileName: 'app.min.js.map',
-        bytes: new TextEncoder().encode(
-          JSON.stringify({ version: 3, file: 'app.min.js', sources: ['../src/app.ts'], mappings: '' })
-        ).buffer as ArrayBuffer
+        fileName: 'maps-only.zip',
+        bytes: await mapsOnly.generateAsync({ type: 'arraybuffer' })
       }
     });
 
-    expect(review.sourceMapSummary?.status).toBe('matched');
+    await expect(attempt).rejects.toThrow(SourceMapArtifactError);
+    await expect(attempt).rejects.toThrow(/package\.json, a lockfile/);
   });
 
   test('rejects a source-map artifact that contains no maps', async () => {
@@ -546,13 +575,20 @@ describe('scope-alignment checks (openapi-internal #964 retained gates)', () => 
     expect(review.summary.readiness).toBe('ready');
   });
 
-  test('stays quiet when the manifest and lockfile ship with the bundle', async () => {
-    const bundle = await bundleWith({
-      'dist/app.js': 'export const ok = true;',
-      'package.json': JSON.stringify({ name: 'checkout-app', version: '1.0.0' }),
-      'pnpm-lock.yaml': 'lockfileVersion: 9'
+  test('stays quiet when the source-map ZIP carries the manifest and lockfile', async () => {
+    const bundle = await bundleWith({ 'dist/app.js': 'export const ok = true;' });
+    const artifact = new JSZip();
+    artifact.file('dist/app.js.map', JSON.stringify({ version: 3, file: 'app.js', sources: ['../src/app.ts'], mappings: '' }));
+    artifact.file('package.json', JSON.stringify({ name: 'checkout-app', version: '1.0.0' }));
+    artifact.file('pnpm-lock.yaml', 'lockfileVersion: 9');
+    const review = await createBundleReview({
+      fileName: 'bundle.zip',
+      bundle,
+      sourceMapArtifact: {
+        fileName: 'review-files.zip',
+        bytes: await artifact.generateAsync({ type: 'arraybuffer' })
+      }
     });
-    const review = await createBundleReview({ fileName: 'bundle.zip', bundle });
 
     expect(review.guidance.find((item) => item.id === 'PROD-PACKAGE-MANIFEST')).toBeUndefined();
   });

@@ -213,7 +213,7 @@ export function runtimeSecuritySummary(
     tone: 'fail',
     title: `${issueCount} ${issueCount === 1 ? 'check needs' : 'checks need'} attention`,
     detail:
-      'These are recommended practices for published-site code. They inform review but do not block submission. Address them, publish the test site, then run the test again.'
+      'Preflight reports these as blockers. Fix each one, publish the test site, then run the test again. If one cannot be fixed before review, explain it in your submission notes and the reviewer decides how it is handled. The Marketplace Guidelines list SRI and immutable script URLs as recommended practices, so a reviewer may accept a documented exception.'
   };
 }
 
@@ -291,17 +291,17 @@ function UploadCard({
       />
       <ArtifactFileField
         id={`${id}-maps`}
-        label="Source maps for review"
-        buttonLabel="Choose source maps (.zip or .map)"
-        accept=".map,.zip,application/json,application/zip"
+        label="Source-map ZIP (maps, package.json, lockfile)"
+        buttonLabel="Choose source-map ZIP"
+        accept=".zip,application/zip"
         file={sourceMaps}
         disabled={busy}
         onChange={setSourceMaps}
       />
       <p className="artifact-field-note">
-        Upload the same private source-map ZIP (or one .map file) you will submit
-        through the official form. Required when the bundle is minified or
-        generated. It is never published.
+        Upload the same private ZIP you will submit through the official form:
+        source maps, package.json, and lockfile from this exact build. Keep
+        them out of the production bundle. It is never published.
       </p>
       <button
         className="button button-primary"
@@ -562,7 +562,7 @@ function Coverage({
         ? 'Webflow captured the published runtime and its pinned security checks passed.'
         : observedPackage && runtimeIssues(observedPackage).length === 0
           ? 'Webflow captured the published runtime. Automated checks passed; the remaining declarations await manual reviewer confirmation.'
-          : 'Webflow captured the published runtime. Recommended-practice findings for published-site code are in the result below. They inform review but do not block submission.'
+          : 'Webflow captured the published runtime. Blocking findings for published-site code are listed in the result below.'
     };
   });
 
@@ -857,7 +857,7 @@ function RuntimeObservationCard({
               {observedIssues.length > 0 ? (
                 <section className="runtime-issues" aria-labelledby="runtime-issues-title">
                   <div className="runtime-issues-heading">
-                    <h3 id="runtime-issues-title">Recommended practices to address</h3>
+                    <h3 id="runtime-issues-title">Runtime blockers to fix</h3>
                     <span>{observedIssues.length}</span>
                   </div>
                   <ol>
@@ -1554,9 +1554,9 @@ function ReviewDetail({
         />
         <ArtifactFileField
           id={`${revisionId}-maps`}
-          label="Source maps for review"
-          buttonLabel="Choose source maps (.zip or .map)"
-          accept=".map,.zip,application/json,application/zip"
+          label="Source-map ZIP (maps, package.json, lockfile)"
+          buttonLabel="Choose source-map ZIP"
+          accept=".zip,application/zip"
           file={revisionSourceMaps}
           disabled={busy}
           onChange={setRevisionSourceMaps}

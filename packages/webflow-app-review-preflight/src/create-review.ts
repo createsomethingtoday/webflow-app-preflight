@@ -112,15 +112,27 @@ async function sha256(bundle: ArrayBuffer): Promise<string> {
   return toHex(await crypto.subtle.digest('SHA-256', bundle));
 }
 
+const PACKAGE_MANIFEST_NAMES = new Set(['package.json']);
+const LOCKFILE_NAMES = new Set([
+  'pnpm-lock.yaml',
+  'package-lock.json',
+  'npm-shrinkwrap.json',
+  'yarn.lock',
+  'bun.lockb',
+  'bun.lock'
+]);
+
 /** The uploaded source-map artifact cannot be used as review input. */
 export class SourceMapArtifactError extends Error {}
 
 /**
  * Expand the privately uploaded source-map artifact into individual map
- * files. A `.map` file is used as-is; a `.zip` is unpacked and only its
- * `.map` entries are kept. An artifact that yields no usable map is an
- * input error, not a silent "missing" — the developer believes they
- * supplied maps, so tell them why the upload did not count.
+ * files. The artifact is one `.zip` holding the source maps, package.json,
+ * and lockfile from the build that produced the bundle — the same ZIP the
+ * submission form requires (developers.webflow.com submitting-your-app →
+ * Submission artifacts). An incomplete artifact is an input error, not a
+ * silent "missing": the developer believes they supplied it, so tell them
+ * why the upload did not count.
  */
 async function extractSourceMapArtifact(artifact: {
   fileName: string;
@@ -130,12 +142,9 @@ async function extractSourceMapArtifact(artifact: {
   if (artifact.bytes.byteLength === 0) {
     throw new SourceMapArtifactError('The source-map upload is empty.');
   }
-  if (lowerName.endsWith('.map')) {
-    return [{ path: artifact.fileName, data: new Uint8Array(artifact.bytes) }];
-  }
   if (!lowerName.endsWith('.zip')) {
     throw new SourceMapArtifactError(
-      'Upload source maps as a single .map file or a .zip archive of .map files.'
+      'Upload one .zip containing the source maps, package.json, and lockfile from this build.'
     );
   }
   let entries: UnzippedFile[];
@@ -151,9 +160,17 @@ async function extractSourceMapArtifact(artifact: {
     );
   }
   const maps = entries.filter((file) => file.path.toLowerCase().endsWith('.map'));
-  if (maps.length === 0) {
+  const baseNames = new Set(
+    entries.map((file) => file.path.split('/').pop()?.toLowerCase() ?? '')
+  );
+  const missing = [
+    ...(maps.length > 0 ? [] : ['source maps (.map files)']),
+    ...([...PACKAGE_MANIFEST_NAMES].some((name) => baseNames.has(name)) ? [] : ['package.json']),
+    ...([...LOCKFILE_NAMES].some((name) => baseNames.has(name)) ? [] : ['a lockfile'])
+  ];
+  if (missing.length > 0) {
     throw new SourceMapArtifactError(
-      'The source-map zip contains no .map files. Include the version-3 maps produced by the build that generated this bundle.'
+      `The source-map zip is missing ${missing.join(', ')}. Include them from the exact build that produced this bundle.`
     );
   }
   return maps;
@@ -446,8 +463,6 @@ function manifestIdentityGuidance(scope: {
   } satisfies ReviewGuidance;
 }
 
-const PACKAGE_MANIFEST_NAMES = new Set(['package.json']);
-const LOCKFILE_NAMES = new Set(['pnpm-lock.yaml', 'package-lock.json', 'yarn.lock', 'bun.lockb', 'bun.lock']);
 
 /**
  * Webflow rejects Designer Extension uploads over 5MB
@@ -473,36 +488,27 @@ export function bundleSizeGuidance(compressedBytes: number): ReviewGuidance | nu
 }
 
 /**
- * The Marketplace submission-artifacts docs ask for the package manifest and
- * lockfile alongside compiled bundles so review can reconcile the artifact
- * with its dependencies. Absence is a suggestion, not a gate — the submission
- * form is the enforcement point.
+ * The package manifest and lockfile travel in the private source-map ZIP, not
+ * the bundle (Submission artifacts docs). A provided ZIP is validated in
+ * extractSourceMapArtifact, so this only nudges when no ZIP was attached.
+ * Absence is a suggestion, not a gate — the submission form is the
+ * enforcement point.
  */
 function manifestPresenceGuidance(
-  inventory: ReadonlyArray<{ path: string; ext: string }>
+  inventory: ReadonlyArray<{ ext: string }>,
+  sourceMapArtifactProvided: boolean
 ): ReviewGuidance | null {
-  const hasExecutables = inventory.some((file) => EXECUTABLE_EXTENSIONS.has(file.ext));
-  if (!hasExecutables) return null;
-
-  const baseNames = new Set(
-    inventory.map((file) => file.path.split('/').pop()?.toLowerCase() ?? '')
-  );
-  const hasPackageManifest = [...PACKAGE_MANIFEST_NAMES].some((name) => baseNames.has(name));
-  const hasLockfile = [...LOCKFILE_NAMES].some((name) => baseNames.has(name));
-  if (hasPackageManifest && hasLockfile) return null;
-
-  const missing = [
-    ...(hasPackageManifest ? [] : ['package manifest (package.json)']),
-    ...(hasLockfile ? [] : ['lockfile'])
-  ].join(' and ');
+  if (sourceMapArtifactProvided) return null;
+  if (!inventory.some((file) => EXECUTABLE_EXTENSIONS.has(file.ext))) return null;
 
   return {
     id: 'PROD-PACKAGE-MANIFEST',
     label: 'Suggested update',
-    title: 'Include the package manifest and lockfile for this build',
-    explanation: `This bundle contains compiled executables but no ${missing}. The Marketplace submission-artifacts guidance asks for both, from the exact build that produced the bundle, so review can reconcile the artifact with its dependencies.`,
+    title: 'Attach the source-map ZIP with package.json and lockfile',
+    explanation:
+      'This bundle contains compiled executables, but no source-map ZIP was attached. The submission form requires one ZIP with the source maps, package.json, and lockfile from the exact build that produced the bundle, so review can reconcile the artifact with its dependencies.',
     nextMove:
-      'Include the package manifest and lockfile for this exact build in the bundle or alongside your submission.',
+      'Run Preflight again with that ZIP attached, and upload the same ZIP in the submission form\'s Source map artifact field. Keep these files out of the production bundle.',
     severity: 'LOW',
     confidence: 'HIGH',
     evidence: []
@@ -593,7 +599,7 @@ export async function createBundleReview(
     sourceMapGuidance(sourceMapSummary),
     sourceMapExposureGuidance(sourceMapSummary),
     manifestIdentityGuidance(artifactScope),
-    manifestPresenceGuidance(inventory),
+    manifestPresenceGuidance(inventory, Boolean(input.sourceMapArtifact)),
     bundleSizeGuidance(input.bundle.byteLength),
     unscannedExecutableGuidance(skippedExecutablePaths),
     unsafeEntryGuidance(unsafeEntryPaths)
