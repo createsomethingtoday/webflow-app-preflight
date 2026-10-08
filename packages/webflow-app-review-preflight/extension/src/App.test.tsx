@@ -1386,7 +1386,7 @@ describe('runtimeSecuritySummary', () => {
     const summary = runtimeSecuritySummary('blocked', 4);
     expect(summary.tone).toBe('fail');
     expect(summary.title).toBe('4 checks need attention');
-    expect(summary.detail).toContain('Preflight reports these as blockers');
+    expect(summary.detail).toContain('recommended practices, not review gates');
     expect(summary.detail).not.toContain('do not block submission');
   });
 });

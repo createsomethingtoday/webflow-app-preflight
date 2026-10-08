@@ -21,13 +21,16 @@ export interface ReviewCoverage {
 /**
  * Developer-facing weight of a finding.
  *
- * - `Security blocker` / `Required update`: the bundle needs changes before
- *   submission (readiness `changes_required`).
- * - `Manual review`: preflight could not evaluate this part of the artifact
- *   (an unscanned executable, an unscanned hosted runtime). Zero findings
- *   there mean "not evaluated", never "clean"; readiness becomes
- *   `needs_review` so the run is not presented as a pass.
- * - `Suggested update`: advisory; never affects readiness.
+ * - `Security blocker` / `Required update`: a published MUST matched at
+ *   HIGH confidence; the bundle needs changes before submission (readiness
+ *   `changes_required`).
+ * - `Manual review`: either preflight could not evaluate this part of the
+ *   artifact (an unscanned executable, an unscanned hosted runtime), or a
+ *   published MUST matched at MEDIUM confidence — the mechanism is present
+ *   but whether it violates the guideline depends on context a reviewer
+ *   must read. Readiness becomes `needs_review`; never presented as a pass.
+ * - `Suggested update`: a SHOULD, a recommended practice, or a MUST matched
+ *   at LOW confidence; never affects readiness.
  */
 export type ReviewGuidanceLabel =
   | 'Security blocker'
@@ -115,8 +118,9 @@ export interface BundleReview {
   summary: {
     /**
      * `changes_required`: at least one blocker or Required update.
-     * `needs_review`: nothing to fix, but part of the artifact was not
-     * evaluated (see `Manual review` findings) — not a pass.
+     * `needs_review`: nothing certain to fix, but a reviewer has to look —
+     * part of the artifact was not evaluated, or a published MUST matched at
+     * MEDIUM confidence (see `Manual review` findings). Not a pass.
      * `ready`: every executable input was scanned and nothing requires a
      * change. Never an approval; the human review remains the decision.
      */

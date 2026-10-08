@@ -6,15 +6,31 @@ import type { Ruleset } from '../types';
  * This ruleset covers security, network, privacy, and UX concerns
  * for Webflow App bundles submitted to the Marketplace.
  *
- * Version: 1.6.0-review-zip-shapes-2026-10-06
+ * Version: 1.7.0-docs-aligned-2026-10-07
  *
  * Invariant (enforced by test): a rule is in the AUTO_REJECT bucket if and
  * only if its severity is BLOCKER. The developer-facing label is derived from
  * both, so the two must never disagree.
+ *
+ * Two independent axes, aligned with the published Marketplace Guidelines
+ * (developers.webflow.com, read 2026-10-07):
+ *
+ * - `severity` encodes what the docs say. BLOCKER and HIGH are published
+ *   MUSTs; LOW is a SHOULD, a recommended practice, or a pattern the docs do
+ *   not mention. A rule's severity never says how sure the matcher is.
+ * - each matcher's `confidence` encodes how sure a hit is to be the violation
+ *   the docs describe — not how sure the regex is to have matched text.
+ *   HIGH: the match is the violation. MEDIUM: the match is the mechanism but
+ *   the violation depends on context a human must read (is the data
+ *   untrusted? is the call user-triggered?). LOW: the match is a hint.
+ *
+ * Readiness only gates on MUST × HIGH-confidence. MUST × MEDIUM becomes a
+ * Manual review; everything else is a Suggested update. See
+ * webflow-app-review-preflight/src/create-review.ts (guidanceLabel).
  */
 export const defaultRuleset: Ruleset = {
   schemaVersion: 'wf-marketplace-scanner-ruleset@1.0.0',
-  rulesetVersion: '1.6.0-review-zip-shapes-2026-10-06',
+  rulesetVersion: '1.7.0-docs-aligned-2026-10-07',
   generatedAt: '2026-01-16T14:00:00Z',
   rules: [
     // ========================================================================
@@ -55,7 +71,7 @@ export const defaultRuleset: Ruleset = {
           flags: 'g',
           fileGlobs: ['**/*.{js,ts,jsx,tsx,mjs,cjs}'],
           triggerTokens: ['setTimeout', 'setInterval'],
-          confidence: 'MEDIUM'
+          confidence: 'HIGH'
         }
       ]
     },
@@ -72,7 +88,7 @@ export const defaultRuleset: Ruleset = {
         {
           id: 'parent-doc-access',
           type: 'regex',
-          pattern: '(parent|top|window\\.parent|window\\.top)\\.document',
+          pattern: '(?<![\\w$.])(?:window\\.)?(?:parent|top)\\.document\\b',
           flags: 'g',
           fileGlobs: ['**/*.{js,ts,jsx,tsx,mjs,cjs}'],
           triggerTokens: ['parent.document', 'top.document'],
@@ -200,7 +216,7 @@ export const defaultRuleset: Ruleset = {
           flags: 'g',
           fileGlobs: ['**/*.{js,ts,jsx,tsx,mjs,cjs}'],
           triggerTokens: ['_0x'],
-          confidence: 'MEDIUM'
+          confidence: 'HIGH'
         },
         {
           id: 'anti-debug',
@@ -248,11 +264,11 @@ export const defaultRuleset: Ruleset = {
       ruleId: 'SEC-UNSAFE-HTML',
       name: 'Unsafe HTML Injection',
       category: 'SECURITY',
-      reviewBucket: 'NEEDS_EXPLANATION',
-      severity: 'LOW',
-      disposition: 'INFO',
+      reviewBucket: 'ACTION_REQUIRED',
+      severity: 'HIGH',
+      disposition: 'ACTION_REQUIRED',
       description:
-        'Raw HTML insertion found. Confirm the markup never carries untrusted data and never inserts script elements. Framework internals such as React DOM trigger this too.',
+        'Do not insert untrusted data into your UI as raw HTML, and never insert <script> tags at runtime through innerHTML, document.write(), or insertAdjacentHTML() (Marketplace Guidelines: Technical, Designer Extensions). These sinks are the mechanism; a reviewer confirms whether the data is untrusted or a script is inserted.',
       matchers: [
         {
           id: 'doc-write',
@@ -261,16 +277,7 @@ export const defaultRuleset: Ruleset = {
           flags: 'i',
           fileGlobs: ['**/*.{js,ts,jsx,tsx,mjs,cjs}'],
           triggerTokens: ['document.write'],
-          confidence: 'HIGH',
-          // document.write is never acceptable inside the Designer iframe.
-          conditionalOverrides: [
-            {
-              pattern: 'document\\.write',
-              newSeverity: 'HIGH',
-              newReviewBucket: 'ACTION_REQUIRED',
-              newDisposition: 'ACTION_REQUIRED'
-            }
-          ]
+          confidence: 'MEDIUM'
         },
         {
           id: 'inner-outer-html',
@@ -279,7 +286,9 @@ export const defaultRuleset: Ruleset = {
           flags: 'g',
           fileGlobs: ['**/*.{js,ts,jsx,tsx,mjs,cjs}'],
           triggerTokens: ['.innerHTML', '.outerHTML'],
-          confidence: 'MEDIUM'
+          // Framework internals (react-dom) and static markup trip this far
+          // more often than untrusted data does: a hint for the reviewer.
+          confidence: 'LOW'
         },
         {
           id: 'insert-adjacent',
@@ -288,7 +297,7 @@ export const defaultRuleset: Ruleset = {
           flags: 'g',
           fileGlobs: ['**/*.{js,ts,jsx,tsx,mjs,cjs}'],
           triggerTokens: ['insertAdjacentHTML'],
-          confidence: 'MEDIUM'
+          confidence: 'LOW'
         }
       ]
     },
@@ -309,7 +318,7 @@ export const defaultRuleset: Ruleset = {
           flags: 'gs',
           fileGlobs: ['**/*.{js,ts,jsx,tsx,mjs,cjs}'],
           triggerTokens: ['createElement'],
-          confidence: 'MEDIUM'
+          confidence: 'HIGH'
         },
         {
           id: 'script-tag-literal',
@@ -318,7 +327,16 @@ export const defaultRuleset: Ruleset = {
           flags: 'i',
           fileGlobs: ['**/*.{js,ts,jsx,tsx,html,mjs,cjs}'],
           triggerTokens: ['<script'],
-          confidence: 'MEDIUM'
+          confidence: 'MEDIUM',
+          // A `<script src=` string next to a DOM sink is runtime script
+          // injection with certainty (Technical, Designer Extensions #6).
+          conditionalOverrides: [
+            {
+              pattern: 'innerHTML|outerHTML|insertAdjacentHTML|document\\.write',
+              newConfidence: 'HIGH',
+              note: 'Script markup inserted into the DOM at runtime.'
+            }
+          ]
         }
       ]
     },
@@ -335,7 +353,7 @@ export const defaultRuleset: Ruleset = {
         {
           id: 'top-nav-assignment',
           type: 'regex',
-          pattern: '(top|parent|window\\.top|window\\.parent)\\.location\\s*=',
+          pattern: '(?<![\\w$.])(?:window\\.)?(?:parent|top)\\.location(?:\\.href)?\\s*=(?!=)|(?<![\\w$.])(?:window\\.)?(?:parent|top)\\.location\\.(?:assign|replace)\\s*\\(',
           flags: 'g',
           fileGlobs: ['**/*.{js,ts,jsx,tsx,mjs,cjs}'],
           triggerTokens: ['top.location', 'parent.location'],
@@ -382,6 +400,17 @@ export const defaultRuleset: Ruleset = {
       disposition: 'ACTION_REQUIRED',
       description: 'Disallow http://, ws://, javascript: protocols. Exception for W3C/Schema URIs.',
       matchers: [
+        {
+          id: 'http-request-literal',
+          type: 'regex',
+          // A request helper called with a literal http:// URL: the endpoint
+          // is plaintext by construction (Transport security #1).
+          pattern: '(?:\\bfetch|\\.open|\\baxios(?:\\.(?:get|post|put|patch|delete|head|request))?)\\s*\\(\\s*(?:[\'"`](?:GET|POST|PUT|PATCH|DELETE|HEAD)[\'"`]\\s*,\\s*)?[\'"`]http:\\/\\/(?!localhost\\b|127\\.0\\.0\\.1)',
+          flags: 'gi',
+          fileGlobs: ['**/*.{js,ts,jsx,tsx,mjs,cjs}'],
+          triggerTokens: ['http://'],
+          confidence: 'HIGH'
+        },
         {
           id: 'http-usage',
           type: 'regex',
@@ -432,9 +461,9 @@ export const defaultRuleset: Ruleset = {
       ruleId: 'IFRAME-SANDBOX',
       name: 'Weak Iframe Sandbox',
       category: 'SECURITY',
-      reviewBucket: 'ACTION_REQUIRED',
-      severity: 'HIGH',
-      disposition: 'ACTION_REQUIRED',
+      reviewBucket: 'NEEDS_EXPLANATION',
+      severity: 'LOW',
+      disposition: 'INFO',
       description: 'Iframe sandboxes must not allow top-navigation or popup escapes.',
       matchers: [
         {
@@ -453,9 +482,9 @@ export const defaultRuleset: Ruleset = {
       ruleId: 'IFRAME-MESSAGING',
       name: 'Insecure postMessage',
       category: 'SECURITY',
-      reviewBucket: 'ACTION_REQUIRED',
-      severity: 'MEDIUM',
-      disposition: 'ACTION_REQUIRED',
+      reviewBucket: 'NEEDS_EXPLANATION',
+      severity: 'LOW',
+      disposition: 'INFO',
       description: 'Wildcard targetOrigin (\'*\') is risky, especially for auth.',
       matchers: [
         {
@@ -487,9 +516,9 @@ export const defaultRuleset: Ruleset = {
       ruleId: 'SEC-WEBRTC-HARDWARE',
       name: 'Hardware Access (Mic/Cam)',
       category: 'PRIVACY',
-      reviewBucket: 'NEEDS_EXPLANATION',
-      severity: 'LOW',
-      disposition: 'INFO',
+      reviewBucket: 'ACTION_REQUIRED',
+      severity: 'HIGH',
+      disposition: 'ACTION_REQUIRED',
       description:
         'Camera, microphone, and screen capture may start only on direct user interaction, after clear disclosure UI. Confirm both.',
       matchers: [
@@ -500,7 +529,7 @@ export const defaultRuleset: Ruleset = {
           flags: 'g',
           fileGlobs: ['**/*.{js,ts,jsx,tsx,mjs,cjs}'],
           triggerTokens: ['getUserMedia', 'getDisplayMedia', 'enumerateDevices'],
-          confidence: 'HIGH'
+          confidence: 'MEDIUM'
         },
         {
           id: 'input-capture',
@@ -509,7 +538,7 @@ export const defaultRuleset: Ruleset = {
           flags: 'i',
           fileGlobs: ['**/*.{html,js,ts,jsx,tsx}'],
           triggerTokens: ['capture'],
-          confidence: 'MEDIUM'
+          confidence: 'LOW'
         }
       ]
     },
@@ -544,9 +573,9 @@ export const defaultRuleset: Ruleset = {
       ruleId: 'UX-NO-SILENT-MUTATIONS',
       name: 'Silent Canvas Mutations',
       category: 'UX',
-      reviewBucket: 'NEEDS_EXPLANATION',
-      severity: 'LOW',
-      disposition: 'INFO',
+      reviewBucket: 'ACTION_REQUIRED',
+      severity: 'HIGH',
+      disposition: 'ACTION_REQUIRED',
       description:
         'Every state-changing action must trace to a direct user interaction. Confirm this observer does not write to the site on its own.',
       matchers: [
@@ -566,9 +595,9 @@ export const defaultRuleset: Ruleset = {
       ruleId: 'UX-NO-POPUPS',
       name: 'Prohibited Popups',
       category: 'UX',
-      reviewBucket: 'NEEDS_EXPLANATION',
-      severity: 'LOW',
-      disposition: 'INFO',
+      reviewBucket: 'ACTION_REQUIRED',
+      severity: 'HIGH',
+      disposition: 'ACTION_REQUIRED',
       description:
         'Popups and new windows are allowed only on direct user interaction, never on load or a timer. Confirm this opens from a click or other user action.',
       matchers: [
@@ -579,7 +608,7 @@ export const defaultRuleset: Ruleset = {
           flags: 'g',
           fileGlobs: ['**/*.{js,ts,jsx,tsx,mjs,cjs}'],
           triggerTokens: ['window.open'],
-          confidence: 'MEDIUM',
+          confidence: 'LOW',
           notes: 'Allowed only for user-initiated docs/auth with _blank.'
         }
       ]
@@ -594,7 +623,7 @@ export const defaultRuleset: Ruleset = {
       name: 'Non-Production Endpoints',
       category: 'PRODUCTION_READINESS',
       reviewBucket: 'ACTION_REQUIRED',
-      severity: 'MEDIUM',
+      severity: 'HIGH',
       disposition: 'ACTION_REQUIRED',
       description:
         'Every embedded URL must point to production. Remove localhost, loopback, private network, cloud metadata, and tunnel references.',
@@ -602,7 +631,7 @@ export const defaultRuleset: Ruleset = {
         {
           id: 'localhost-url',
           type: 'regex',
-          pattern: 'https?:\\/\\/(localhost|127\\.0\\.0\\.1|0\\.0\\.0\\.0|.*\\.ngrok\\.io|.*\\.localtunnel\\.me)',
+          pattern: 'https?:\\/\\/(localhost|127\\.0\\.0\\.1|0\\.0\\.0\\.0|[a-z0-9.-]+\\.ngrok(?:-free)?\\.(?:io|app|dev)|[a-z0-9.-]+\\.localtunnel\\.me|[a-z0-9.-]+\\.loca\\.lt|[a-z0-9.-]+\\.trycloudflare\\.com|[a-z0-9.-]+\\.serveo\\.net)',
           flags: 'i',
           fileGlobs: ['**/*.{js,ts,jsx,tsx,mjs,cjs,json}'],
           triggerTokens: ['localhost', '127.0.0.1', 'ngrok'],
@@ -688,7 +717,7 @@ export const defaultRuleset: Ruleset = {
           flags: 'g',
           fileGlobs: ['**/*.{js,ts,jsx,tsx,mjs,cjs}'],
           triggerTokens: ['/debug/'],
-          confidence: 'HIGH'
+          confidence: 'MEDIUM'
         },
         {
           id: 'bypass-flag',
@@ -706,9 +735,9 @@ export const defaultRuleset: Ruleset = {
       ruleId: 'UX-NO-MUTATION-ON-LOAD',
       name: 'Site Mutation Without User Action',
       category: 'UX',
-      reviewBucket: 'NEEDS_EXPLANATION',
-      severity: 'LOW',
-      disposition: 'INFO',
+      reviewBucket: 'ACTION_REQUIRED',
+      severity: 'HIGH',
+      disposition: 'ACTION_REQUIRED',
       description:
         'Creating or removing site resources (styles, variables, assets, components) must follow a deliberate user action — opening the extension must not mutate the site. If these calls only run after an explicit user choice, explain that in your review notes (Marketplace Guidelines: user interaction).',
       matchers: [
@@ -719,7 +748,7 @@ export const defaultRuleset: Ruleset = {
           flags: 'g',
           fileGlobs: ['**/*.{js,ts,jsx,tsx,mjs,cjs}'],
           triggerTokens: ['webflow.create', 'webflow.remove'],
-          confidence: 'MEDIUM'
+          confidence: 'LOW'
         }
       ]
     },
@@ -759,9 +788,9 @@ export const defaultRuleset: Ruleset = {
       ruleId: 'PROD-STAGING-HOST',
       name: 'Possible Staging or Development Host',
       category: 'PRODUCTION_READINESS',
-      reviewBucket: 'NEEDS_EXPLANATION',
-      severity: 'LOW',
-      disposition: 'INFO',
+      reviewBucket: 'ACTION_REQUIRED',
+      severity: 'HIGH',
+      disposition: 'ACTION_REQUIRED',
       description:
         'This URL looks like a staging or development host. Every embedded URL must point to production, so confirm it does or remove it.',
       matchers: [
@@ -913,9 +942,9 @@ export const defaultRuleset: Ruleset = {
       ruleId: 'SEC-RUNTIME-DECODING',
       name: 'Runtime Base64 Decoding',
       category: 'SECURITY',
-      reviewBucket: 'NEEDS_EXPLANATION',
-      severity: 'LOW',
-      disposition: 'INFO',
+      reviewBucket: 'ACTION_REQUIRED',
+      severity: 'HIGH',
+      disposition: 'ACTION_REQUIRED',
       description:
         'Decoding code at runtime with atob or btoa counts as obfuscation. Confirm this decodes data, such as a token payload or image, and never code.',
       matchers: [

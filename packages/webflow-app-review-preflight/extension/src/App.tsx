@@ -213,7 +213,7 @@ export function runtimeSecuritySummary(
     tone: 'fail',
     title: `${issueCount} ${issueCount === 1 ? 'check needs' : 'checks need'} attention`,
     detail:
-      'Preflight reports these as blockers. Fix each one, publish the test site, then run the test again. If one cannot be fixed before review, explain it in your submission notes and the reviewer decides how it is handled. The Marketplace Guidelines list SRI and immutable script URLs as recommended practices, so a reviewer may accept a documented exception.'
+      'The Marketplace Guidelines list these published-site practices as recommended practices, not review gates. Fix each one, publish the test site, then run the test again: they separate a dependable integration from a support burden, and a reviewer reads them as findings rather than blockers. If one cannot be fixed before review, explain it in your submission notes.'
   };
 }
 
@@ -858,7 +858,7 @@ function RuntimeObservationCard({
               {observedIssues.length > 0 ? (
                 <section className="runtime-issues" aria-labelledby="runtime-issues-title">
                   <div className="runtime-issues-heading">
-                    <h3 id="runtime-issues-title">Runtime blockers to fix</h3>
+                    <h3 id="runtime-issues-title">Runtime findings to fix</h3>
                     <span>{observedIssues.length}</span>
                   </div>
                   <ol>

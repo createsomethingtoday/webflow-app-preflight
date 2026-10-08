@@ -295,11 +295,29 @@ function findManifest(inventory: FileEntry[]): {
   }
 }
 
-function guidanceLabel(severity: Severity): ReviewGuidanceLabel {
-  if (severity === 'BLOCKER') return 'Security blocker';
-  if (severity === 'HIGH' || severity === 'MEDIUM') return 'Required update';
+/**
+ * Severity says what the published guidelines require (BLOCKER/HIGH/MEDIUM
+ * are MUSTs; LOW is a SHOULD or unmentioned). Confidence says how sure the
+ * match is to be that violation. Only a MUST matched at HIGH confidence
+ * gates readiness; a MUST at MEDIUM confidence goes to a reviewer; a MUST
+ * at LOW confidence, and every SHOULD, is a suggestion.
+ */
+export function guidanceLabel(
+  severity: Severity,
+  confidence: ReviewGuidance['confidence']
+): ReviewGuidanceLabel {
+  if (severity === 'LOW' || severity === 'INFO') return 'Suggested update';
+  if (confidence === 'HIGH') return severity === 'BLOCKER' ? 'Security blocker' : 'Required update';
+  if (confidence === 'MEDIUM') return 'Manual review';
   return 'Suggested update';
 }
+
+const LABEL_RANK: Record<ReviewGuidanceLabel, number> = {
+  'Security blocker': 3,
+  'Required update': 2,
+  'Manual review': 1,
+  'Suggested update': 0
+};
 
 const SEVERITY_RANK: Record<Severity, number> = {
   BLOCKER: 4,
@@ -329,12 +347,14 @@ export function effectiveFindingSeverity(finding: Finding, rule: ScanRule): Seve
 }
 
 /**
- * A rule's finding takes the MOST severe match, not the first one. Matches
- * arrive in file order, so a downgraded match (a commented-out `eval`) can
- * precede a live one; taking `items[0]` let the comment mask the real call
- * and report readiness `ready`. Confidence follows the match that set the
- * severity (highest confidence among the top-severity matches), and the
- * items come back ordered so evidence shows the strongest matches first.
+ * A rule's finding takes the match with the STRONGEST label, not the first
+ * one. Matches arrive in file order, so a downgraded match (a commented-out
+ * `eval`) can precede a live one; taking `items[0]` let the comment mask the
+ * real call and report readiness `ready`. Label strength combines severity
+ * and confidence (see guidanceLabel): one HIGH-confidence hit on a MUST
+ * outranks ten MEDIUM-confidence hits on the same rule. Ties break on
+ * severity, then confidence, then file order, so evidence shows the
+ * strongest matches first.
  */
 export function guidanceSeverity(group: FindingGroup): {
   severity: Severity;
@@ -342,13 +362,18 @@ export function guidanceSeverity(group: FindingGroup): {
   items: Finding[];
 } {
   const ranked = group.items
-    .map((finding, index) => ({
-      finding,
-      index,
-      severity: effectiveFindingSeverity(finding, group.rule)
-    }))
+    .map((finding, index) => {
+      const severity = effectiveFindingSeverity(finding, group.rule);
+      return {
+        finding,
+        index,
+        severity,
+        label: guidanceLabel(severity, finding.confidence)
+      };
+    })
     .sort(
       (left, right) =>
+        LABEL_RANK[right.label] - LABEL_RANK[left.label] ||
         SEVERITY_RANK[right.severity] - SEVERITY_RANK[left.severity] ||
         CONFIDENCE_RANK[right.finding.confidence] - CONFIDENCE_RANK[left.finding.confidence] ||
         left.index - right.index
@@ -534,7 +559,7 @@ function manifestIdentityGuidance(scope: {
 
   return {
     id: 'PROD-DEV-IDENTITY',
-    label: 'Required update',
+    label: 'Manual review',
     title: 'App manifest carries a development identity',
     explanation: `The app name in the manifest ("${scope.appName}") reads as a development or staging build. Production submissions must ship under the production identity — a dev-named bundle is the clearest sign the wrong artifact was packaged.`,
     nextMove:
@@ -610,7 +635,7 @@ function toGuidance(groups: Record<string, FindingGroup>): ReviewGuidance[] {
 
       return {
         id: group.rule.ruleId,
-        label: guidanceLabel(severity),
+        label: guidanceLabel(severity, confidence),
         title: group.rule.name,
         explanation: group.rule.description,
         nextMove:

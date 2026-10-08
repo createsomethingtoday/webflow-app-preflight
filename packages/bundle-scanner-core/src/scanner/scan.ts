@@ -224,8 +224,10 @@ export function runScan(
         let confidence: Confidence = cm.matcher.confidence ?? 'MEDIUM';
         let confidenceReason: string | undefined;
 
+        // Minified or generated code is harder to read, not less real: an
+        // eval() in a production bundle is still an eval(). Keep the
+        // matcher's confidence and note the context for the reviewer.
         if (file.tags.includes('MINIFIED_FILE') || file.tags.includes('GENERATED_BUNDLE')) {
-          confidence = 'LOW';
           confidenceReason = 'Generated/Minified Code';
         }
 
@@ -250,6 +252,7 @@ export function runScan(
                 if (override.newSeverity) severity = override.newSeverity;
                 if (override.newReviewBucket) reviewBucket = override.newReviewBucket;
                 if (override.newDisposition) disposition = override.newDisposition;
+                if (override.newConfidence && locationType !== 'COMMENT') confidence = override.newConfidence;
                 if (override.note) confidenceReason = override.note;
                 break;
               }

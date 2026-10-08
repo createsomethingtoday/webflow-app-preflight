@@ -9,6 +9,7 @@ import {
 import {
   boundedEvidenceSnippet,
   effectiveFindingSeverity,
+  guidanceLabel,
   guidanceSeverity
 } from '../src/create-review';
 import { defaultRuleset, type FindingGroup } from '@create-something/bundle-scanner-core';
@@ -611,7 +612,7 @@ describe('scope-alignment checks (openapi-internal #964 retained gates)', () => 
     const review = await createBundleReview({ fileName: 'bundle.zip', bundle });
 
     const finding = review.guidance.find((item) => item.id === 'PROD-NO-DEBUG-RESIDUE');
-    expect(finding?.label).toBe('Required update');
+    expect(finding?.label).toBe('Manual review');
   });
 
   test('asks for an explanation when Designer API mutations are present', async () => {
@@ -628,7 +629,7 @@ describe('scope-alignment checks (openapi-internal #964 retained gates)', () => 
     const review = await createBundleReview({ fileName: 'bundle.zip', bundle });
 
     const finding = review.guidance.find((item) => item.id === 'PROD-DEV-IDENTITY');
-    expect(finding?.label).toBe('Required update');
+    expect(finding?.label).toBe('Manual review');
     expect(finding?.evidence[0]?.snippet).toContain('North Staging App');
   });
 
@@ -708,7 +709,7 @@ describe('Marketplace Guidelines alignment (developers.webflow.com, read 2026-09
     const result = await review({
       'dist/index.js': 'window.addEventListener("message", (event) => {\n  run(event.data);\n});'
     });
-    expect(find(result, 'SEC-MESSAGE-ORIGIN')?.label).toBe('Required update');
+    expect(find(result, 'SEC-MESSAGE-ORIGIN')?.label).toBe('Manual review');
   });
 
   test('flags native prototype and global function overrides', async () => {
@@ -736,7 +737,7 @@ describe('Marketplace Guidelines alignment (developers.webflow.com, read 2026-09
 
   test('flags modifier-key shortcuts but not plain key handling', async () => {
     const shortcut = await review({ 'dist/index.js': 'if (e.metaKey && e.key === "k") openPalette();' });
-    expect(find(shortcut, 'UX-NO-KEYBOARD-SHORTCUTS')?.label).toBe('Required update');
+    expect(find(shortcut, 'UX-NO-KEYBOARD-SHORTCUTS')?.label).toBe('Manual review');
 
     const enter = await review({ 'dist/index.js': 'if (e.key === "Enter") submit();' });
     expect(find(enter, 'UX-NO-KEYBOARD-SHORTCUTS')).toBeUndefined();
@@ -823,7 +824,7 @@ describe('Marketplace Guidelines alignment: precision review', () => {
     const result = await review({
       'dist/index.js': 'window.addEventListener("message", (event) => {\n  const base = location.origin;\n  run(event.data, base);\n});'
     });
-    expect(find(result, 'SEC-MESSAGE-ORIGIN')?.label).toBe('Required update');
+    expect(find(result, 'SEC-MESSAGE-ORIGIN')?.label).toBe('Manual review');
   });
 
   test('destructured and allowlist-style origin checks count', async () => {
@@ -927,12 +928,18 @@ describe('Marketplace Guidelines alignment: real-bundle false positives', () => 
     expect(result.summary.readiness).toBe('ready');
   });
 
-  test('the same patterns in live code stay required or blocking', async () => {
+  test('the same patterns in live code are reviewed or blocking', async () => {
     const result = await review({
       'dist/index.js': 'const url = "http://www.andismith.com/";\neval("x");'
     });
-    expect(find(result, 'NET-URL-HYGIENE')?.label).toBe('Required update');
+    // A bare http:// literal is the mechanism, not the request: a reviewer
+    // confirms it is an endpoint. A request helper called with it is certain.
+    expect(find(result, 'NET-URL-HYGIENE')?.label).toBe('Manual review');
     expect(find(result, 'SEC-NO-DCE')?.label).toBe('Security blocker');
+
+    const request = await review({ 'dist/index.js': 'fetch("http://api.andismith.com/v1");' });
+    expect(find(request, 'NET-URL-HYGIENE')?.label).toBe('Required update');
+    expect(request.summary.readiness).toBe('changes_required');
   });
 
   test('a commented-out match never masks a live match of the same rule', async () => {
@@ -997,9 +1004,9 @@ describe('Marketplace Guidelines alignment: real-bundle false positives', () => 
     expect(find(result, 'SEC-NO-DCE')?.label).toBe('Security blocker');
   });
 
-  test('document.write stays a required update', async () => {
+  test('document.write goes to a reviewer: the sink is certain, the script insert is not', async () => {
     const result = await review({ 'dist/index.js': 'document.write("<p>hi</p>");' });
-    expect(find(result, 'SEC-UNSAFE-HTML')?.label).toBe('Required update');
+    expect(find(result, 'SEC-UNSAFE-HTML')?.label).toBe('Manual review');
   });
 
   test('script markup pushed through innerHTML is still a blocker', async () => {
@@ -1111,7 +1118,7 @@ describe('review correctness: severity, buckets, and labels agree', () => {
     expect(derived.items.map((item) => item.line)).toEqual([3, 2, 1]);
   });
 
-  test('an external iframe in live code is a Required update', async () => {
+  test('an external iframe in live code goes to a reviewer (auth-flow iframes are allowed)', async () => {
     const zip = new JSZip();
     zip.file('webflow.json', JSON.stringify({ name: 'Embed', apiVersion: '2', publicDir: 'dist' }));
     zip.file('dist/index.html', '<iframe src="https://widgets.example.com/ui"></iframe>');
@@ -1120,7 +1127,148 @@ describe('review correctness: severity, buckets, and labels agree', () => {
       fileName: 'embed.zip'
     });
     const finding = review.guidance.find((item) => item.id === 'IFRAME-EXTERNAL-SRC');
-    expect(finding?.label).toBe('Required update');
-    expect(review.summary.readiness).toBe('changes_required');
+    expect(finding?.label).toBe('Manual review');
+    expect(review.summary.readiness).toBe('needs_review');
+  });
+});
+
+describe('docs-aligned gating (ruleset 1.7.0): severity is the doc level, confidence is the gate', () => {
+  async function bundleWith(files: Record<string, string>): Promise<ArrayBuffer> {
+    const zip = new JSZip();
+    zip.file('webflow.json', JSON.stringify({ name: 'Aligned App', apiVersion: '2', publicDir: 'dist' }));
+    zip.file('package.json', JSON.stringify({ name: 'aligned-app', version: '1.0.0' }));
+    zip.file('pnpm-lock.yaml', 'lockfileVersion: 9');
+    for (const [path, content] of Object.entries(files)) zip.file(path, content);
+    return zip.generateAsync({ type: 'arraybuffer' });
+  }
+
+  const review = async (files: Record<string, string>) =>
+    createBundleReview({ fileName: 'bundle.zip', bundle: await bundleWith(files) });
+  const find = (result: Awaited<ReturnType<typeof review>>, id: string) =>
+    result.guidance.find((item) => item.id === id);
+
+  test('the label is a function of doc level and match confidence', () => {
+    expect(guidanceLabel('BLOCKER', 'HIGH')).toBe('Security blocker');
+    expect(guidanceLabel('HIGH', 'HIGH')).toBe('Required update');
+    expect(guidanceLabel('MEDIUM', 'HIGH')).toBe('Required update');
+    expect(guidanceLabel('BLOCKER', 'MEDIUM')).toBe('Manual review');
+    expect(guidanceLabel('HIGH', 'MEDIUM')).toBe('Manual review');
+    expect(guidanceLabel('HIGH', 'LOW')).toBe('Suggested update');
+    expect(guidanceLabel('BLOCKER', 'LOW')).toBe('Suggested update');
+    expect(guidanceLabel('LOW', 'HIGH')).toBe('Suggested update');
+    expect(guidanceLabel('INFO', 'HIGH')).toBe('Suggested update');
+  });
+
+  test('every rule that can gate readiness is a published MUST with at least one HIGH-confidence matcher', () => {
+    // Severity LOW/INFO never gates; HIGH/BLOCKER rules gate only through a
+    // HIGH-confidence matcher (base or override). A MUST rule whose matchers
+    // are all MEDIUM/LOW can only ever ask for a reviewer.
+    const gating = defaultRuleset.rules.filter((rule) => rule.severity === 'BLOCKER' || rule.severity === 'HIGH');
+    const neverGates = gating
+      .filter((rule) => !rule.matchers.some((m) => m.confidence === 'HIGH' || m.conditionalOverrides?.some((o) => o.newConfidence === 'HIGH')))
+      .map((rule) => rule.ruleId)
+      .sort();
+    expect(neverGates).toEqual([
+      'IFRAME-EXTERNAL-SRC',
+      'PROD-NO-DEBUG-RESIDUE',
+      'PROD-STAGING-HOST',
+      'SEC-MESSAGE-ORIGIN',
+      'SEC-NO-SENSITIVE-TOKENS-IN-STORAGE',
+      'SEC-RUNTIME-DECODING',
+      'SEC-UNSAFE-HTML',
+      'SEC-WEBRTC-HARDWARE',
+      'UX-NO-MUTATION-ON-LOAD',
+      'UX-NO-POPUPS',
+      'UX-NO-SILENT-MUTATIONS'
+    ]);
+  });
+
+  test('a MUST matched at medium confidence asks for a reviewer and never blocks', async () => {
+    const result = await review({ 'dist/index.js': 'localStorage.setItem("auth_token", token);' });
+    const finding = find(result, 'SEC-NO-SENSITIVE-TOKENS-IN-STORAGE');
+    expect(finding?.label).toBe('Manual review');
+    expect(result.summary.requiredUpdates).toBe(0);
+    expect(result.summary.securityBlockers).toBe(0);
+    expect(result.summary.manualReviews).toBe(1);
+    expect(result.summary.readiness).toBe('needs_review');
+  });
+
+  test('a MUST matched at low confidence is a suggestion and leaves readiness alone', async () => {
+    const result = await review({
+      'dist/index.js': [
+        'button.onclick = () => window.open("https://docs.example.com", "_blank");',
+        'const obs = new MutationObserver(() => {});',
+        'const claims = JSON.parse(atob(parts[1]));',
+        'async function apply() { await webflow.createStyle("hero"); }'
+      ].join('\n')
+    });
+    for (const id of ['UX-NO-POPUPS', 'UX-NO-SILENT-MUTATIONS', 'SEC-RUNTIME-DECODING', 'UX-NO-MUTATION-ON-LOAD']) {
+      expect(find(result, id)?.label, id).toBe('Suggested update');
+    }
+    expect(result.summary.readiness).toBe('ready');
+  });
+
+  test('camera and microphone access goes to a reviewer (user-triggered + disclosure cannot be seen statically)', async () => {
+    const result = await review({ 'dist/index.js': 'const s = await navigator.mediaDevices.getUserMedia({ audio: true });' });
+    expect(find(result, 'SEC-WEBRTC-HARDWARE')?.label).toBe('Manual review');
+    expect(result.summary.readiness).toBe('needs_review');
+  });
+
+  test('a string timer is dynamic code execution with certainty', async () => {
+    const result = await review({ 'dist/index.js': 'setTimeout("refresh()", 1000);' });
+    expect(find(result, 'SEC-NO-DCE')?.label).toBe('Security blocker');
+    expect(result.summary.readiness).toBe('changes_required');
+  });
+
+  test('minified code keeps the matcher confidence: an eval in a production bundle still blocks', async () => {
+    const result = await review({ 'dist/app.min.js': 'var a=1;function b(c){return eval(c)}' });
+    const finding = find(result, 'SEC-NO-DCE');
+    expect(finding?.label).toBe('Security blocker');
+    expect(finding?.confidence).toBe('HIGH');
+    expect(result.summary.readiness).toBe('changes_required');
+  });
+
+  test('host-document access requires the global parent or top, not any object named parent', async () => {
+    const library = await review({ 'dist/index.js': 'const doc = node.parent.document; const own = el.top.document;' });
+    expect(find(library, 'SEC-NO-HOST-DOM')).toBeUndefined();
+
+    const escape = await review({ 'dist/index.js': 'window.top.document.body.append(panel); top.document.title = "x";' });
+    expect(find(escape, 'SEC-NO-HOST-DOM')?.label).toBe('Security blocker');
+  });
+
+  test('redirecting the host catches href assignment and replace/assign, not comparisons', async () => {
+    const compare = await review({ 'dist/index.js': 'if (top.location === self.location) start();' });
+    expect(find(compare, 'SEC-UNTRUSTED-REDIRECT')).toBeUndefined();
+
+    const href = await review({ 'dist/index.js': 'top.location.href = next;' });
+    expect(find(href, 'SEC-UNTRUSTED-REDIRECT')?.label).toBe('Security blocker');
+
+    const replace = await review({ 'dist/index.js': 'window.parent.location.replace(next);' });
+    expect(find(replace, 'SEC-UNTRUSTED-REDIRECT')?.label).toBe('Security blocker');
+  });
+
+  test('tunnel hosts are development endpoints', async () => {
+    for (const host of ['https://a1b2.ngrok-free.app', 'https://demo.trycloudflare.com', 'https://my-app.loca.lt']) {
+      const result = await review({ 'dist/index.js': `const API = "${host}";` });
+      expect(find(result, 'PROD-NO-LOCALHOST')?.label, host).toBe('Required update');
+    }
+  });
+
+  test('a <script src> string is certain only next to a DOM sink', async () => {
+    const custom = await review({
+      'dist/index.js': 'const snippet = \'<script src="https://cdn.example.com/x.js"></script>\';\nawait registerCustomCode(snippet);'
+    });
+    expect(find(custom, 'SEC-SCRIPT-INJECTION')?.label).toBe('Manual review');
+
+    const injected = await review({
+      'dist/index.js': 'host.insertAdjacentHTML("beforeend", \'<script src="https://cdn.example.com/x.js"></script>\');'
+    });
+    expect(find(injected, 'SEC-SCRIPT-INJECTION')?.label).toBe('Security blocker');
+  });
+
+  test('an external iframe asks for a reviewer because auth-flow iframes are allowed', async () => {
+    const result = await review({ 'dist/index.html': '<iframe src="https://app.vendor.com/embed"></iframe>' });
+    expect(find(result, 'IFRAME-EXTERNAL-SRC')?.label).toBe('Manual review');
+    expect(result.summary.readiness).toBe('needs_review');
   });
 });
