@@ -118,7 +118,7 @@ describe('runScan', () => {
     expect(runScan(inventory, rs, config, noop)).toHaveLength(3);
   });
 
-  it('downgrades confidence to LOW for minified/generated files', () => {
+  it('keeps the matcher confidence for minified/generated files and records the context', () => {
     const inventory = [file({ path: 'bundle.js', content: 'eval(x)', tags: ['MINIFIED_FILE'] })];
     const rs = ruleset([
       rule({
@@ -128,7 +128,7 @@ describe('runScan', () => {
     ]);
 
     const [f] = runScan(inventory, rs, defaultConfig, noop);
-    expect(f?.confidence).toBe('LOW');
+    expect(f?.confidence).toBe('HIGH');
     expect(f?.confidenceReason).toBe('Generated/Minified Code');
   });
 

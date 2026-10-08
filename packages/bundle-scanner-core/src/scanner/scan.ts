@@ -12,6 +12,7 @@ import type {
   Disposition
 } from '../types';
 import { matchesAnyGlob } from '../utils/glob';
+import { applyAstConfirmation } from './ast-confirm';
 
 /**
  * Calculate line and column from a string index
@@ -224,8 +225,10 @@ export function runScan(
         let confidence: Confidence = cm.matcher.confidence ?? 'MEDIUM';
         let confidenceReason: string | undefined;
 
+        // Minified or generated code is harder to read, not less real: an
+        // eval() in a production bundle is still an eval(). Keep the
+        // matcher's confidence and note the context for the reviewer.
         if (file.tags.includes('MINIFIED_FILE') || file.tags.includes('GENERATED_BUNDLE')) {
-          confidence = 'LOW';
           confidenceReason = 'Generated/Minified Code';
         }
 
@@ -250,6 +253,7 @@ export function runScan(
                 if (override.newSeverity) severity = override.newSeverity;
                 if (override.newReviewBucket) reviewBucket = override.newReviewBucket;
                 if (override.newDisposition) disposition = override.newDisposition;
+                if (override.newConfidence && locationType !== 'COMMENT') confidence = override.newConfidence;
                 if (override.note) confidenceReason = override.note;
                 break;
               }
@@ -300,5 +304,8 @@ export function runScan(
   // Intentionally no completion logging here: per-upload timings and partner
   // file context must not be written to shared Worker logs. Progress surfaces
   // only through the caller-supplied onProgress callback.
+  // Second stage: let the syntax tree settle what the regex could not.
+  applyAstConfirmation(inventory, findings, onProgress);
+
   return findings;
 }

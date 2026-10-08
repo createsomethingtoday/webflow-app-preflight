@@ -96,6 +96,12 @@ export interface ConditionalOverride {
   scope?: 'snippet' | 'from_match';
   newSeverity?: Severity;
   newReviewBucket?: ReviewBucket;
+  /**
+   * Confidence that this match is the violation the rule describes, once the
+   * override's context is known (a `<script` string pushed through innerHTML
+   * is certain; the bare string is not).
+   */
+  newConfidence?: Confidence;
   newDisposition?: Disposition;
   note?: string;
 }
