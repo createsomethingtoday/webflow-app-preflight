@@ -27,6 +27,13 @@ import type { Ruleset } from '../types';
  * Readiness only gates on MUST × HIGH-confidence. MUST × MEDIUM becomes a
  * Manual review; everything else is a Suggested update. See
  * webflow-app-review-preflight/src/create-review.ts (guidanceLabel).
+ *
+ * A matcher's confidence here is the regex's view. For the matchers listed in
+ * scanner/ast-confirm.ts the syntax tree then settles the context the regex
+ * cannot read (inside a click handler or at module load; literal or
+ * variable; event.origin read anywhere in the handler; http:// literal
+ * flowing into a request) and moves the finding to HIGH or LOW with a
+ * recorded reason. Unparseable files keep the regex result.
  */
 export const defaultRuleset: Ruleset = {
   schemaVersion: 'wf-marketplace-scanner-ruleset@1.0.0',
@@ -318,7 +325,7 @@ export const defaultRuleset: Ruleset = {
           flags: 'gs',
           fileGlobs: ['**/*.{js,ts,jsx,tsx,mjs,cjs}'],
           triggerTokens: ['createElement'],
-          confidence: 'HIGH'
+          confidence: 'MEDIUM'
         },
         {
           id: 'script-tag-literal',
@@ -327,16 +334,9 @@ export const defaultRuleset: Ruleset = {
           flags: 'i',
           fileGlobs: ['**/*.{js,ts,jsx,tsx,html,mjs,cjs}'],
           triggerTokens: ['<script'],
-          confidence: 'MEDIUM',
-          // A `<script src=` string next to a DOM sink is runtime script
-          // injection with certainty (Technical, Designer Extensions #6).
-          conditionalOverrides: [
-            {
-              pattern: 'innerHTML|outerHTML|insertAdjacentHTML|document\\.write',
-              newConfidence: 'HIGH',
-              note: 'Script markup inserted into the DOM at runtime.'
-            }
-          ]
+          confidence: 'MEDIUM'
+          // Whether this string reaches a DOM sink is decided on the syntax
+          // tree (scanner/ast-confirm.ts); displayed install snippets do not.
         }
       ]
     },
@@ -497,6 +497,9 @@ export const defaultRuleset: Ruleset = {
           confidence: 'MEDIUM',
           conditionalOverrides: [
             {
+              // Test the call itself: on a minified line the ±3-line snippet
+              // is the whole bundle and "key" is always somewhere in it.
+              scope: 'from_match',
               pattern: '(token|auth|key|secret)',
               newSeverity: 'BLOCKER',
               newReviewBucket: 'AUTO_REJECT',

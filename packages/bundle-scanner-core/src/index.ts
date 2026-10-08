@@ -11,6 +11,7 @@ export { processZipFile, processZipBuffer } from './scanner/zip';
 export type { ZipExtractionResult } from './scanner/zip';
 export { buildInventory } from './scanner/inventory';
 export { runScan } from './scanner/scan';
+export { applyAstConfirmation, AST_CONFIRMABLE_MATCHERS, AST_RAISING_MATCHERS } from './scanner/ast-confirm';
 export { generateReport } from './scanner/report';
 export type { ReportSummaryInput } from './scanner/report';
 export { analyzeSourceMaps } from './scanner/source-map';

@@ -12,6 +12,7 @@ import type {
   Disposition
 } from '../types';
 import { matchesAnyGlob } from '../utils/glob';
+import { applyAstConfirmation } from './ast-confirm';
 
 /**
  * Calculate line and column from a string index
@@ -303,5 +304,8 @@ export function runScan(
   // Intentionally no completion logging here: per-upload timings and partner
   // file context must not be written to shared Worker logs. Progress surfaces
   // only through the caller-supplied onProgress callback.
+  // Second stage: let the syntax tree settle what the regex could not.
+  applyAstConfirmation(inventory, findings, onProgress);
+
   return findings;
 }

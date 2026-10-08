@@ -32,6 +32,8 @@
     "test:coverage": "vitest --coverage"
   },
   "dependencies": {
+    "acorn": "^8.17.0",
+    "acorn-walk": "^8.3.5",
     "jszip": "^3.10.1",
     "minimatch": "^9.0.0"
   },
