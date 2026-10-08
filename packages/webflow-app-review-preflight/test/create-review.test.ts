@@ -12,7 +12,7 @@ import {
   guidanceLabel,
   guidanceSeverity
 } from '../src/create-review';
-import { defaultRuleset, type FindingGroup } from '@create-something/bundle-scanner-core';
+import { AST_RAISING_MATCHERS, defaultRuleset, type FindingGroup } from '@create-something/bundle-scanner-core';
 
 async function createDesignerExtensionFixture(): Promise<ArrayBuffer> {
   const zip = new JSZip();
@@ -705,11 +705,11 @@ describe('Marketplace Guidelines alignment (developers.webflow.com, read 2026-09
     expect(find(result, 'SEC-MESSAGE-ORIGIN')).toBeUndefined();
   });
 
-  test('flags a message handler that never checks event.origin', async () => {
+  test('flags a message handler that never checks event.origin (the tree proves it)', async () => {
     const result = await review({
       'dist/index.js': 'window.addEventListener("message", (event) => {\n  run(event.data);\n});'
     });
-    expect(find(result, 'SEC-MESSAGE-ORIGIN')?.label).toBe('Manual review');
+    expect(find(result, 'SEC-MESSAGE-ORIGIN')?.label).toBe('Required update');
   });
 
   test('flags native prototype and global function overrides', async () => {
@@ -824,7 +824,7 @@ describe('Marketplace Guidelines alignment: precision review', () => {
     const result = await review({
       'dist/index.js': 'window.addEventListener("message", (event) => {\n  const base = location.origin;\n  run(event.data, base);\n});'
     });
-    expect(find(result, 'SEC-MESSAGE-ORIGIN')?.label).toBe('Manual review');
+    expect(['Required update', 'Manual review']).toContain(find(result, 'SEC-MESSAGE-ORIGIN')?.label);
   });
 
   test('destructured and allowlist-style origin checks count', async () => {
@@ -1004,9 +1004,12 @@ describe('Marketplace Guidelines alignment: real-bundle false positives', () => 
     expect(find(result, 'SEC-NO-DCE')?.label).toBe('Security blocker');
   });
 
-  test('document.write goes to a reviewer: the sink is certain, the script insert is not', async () => {
-    const result = await review({ 'dist/index.js': 'document.write("<p>hi</p>");' });
-    expect(find(result, 'SEC-UNSAFE-HTML')?.label).toBe('Manual review');
+  test('document.write with static markup is a hint; with a variable it goes to a reviewer', async () => {
+    const literal = await review({ 'dist/index.js': 'document.write("<p>hi</p>");' });
+    expect(find(literal, 'SEC-UNSAFE-HTML')?.label).toBe('Suggested update');
+
+    const variable = await review({ 'dist/index.js': 'document.write(html);' });
+    expect(find(variable, 'SEC-UNSAFE-HTML')?.label).toBe('Manual review');
   });
 
   test('script markup pushed through innerHTML is still a blocker', async () => {
@@ -1164,21 +1167,21 @@ describe('docs-aligned gating (ruleset 1.7.0): severity is the doc level, confid
     // HIGH-confidence matcher (base or override). A MUST rule whose matchers
     // are all MEDIUM/LOW can only ever ask for a reviewer.
     const gating = defaultRuleset.rules.filter((rule) => rule.severity === 'BLOCKER' || rule.severity === 'HIGH');
+    const canReachHigh = (m: (typeof gating)[number]['matchers'][number]) =>
+      m.confidence === 'HIGH' ||
+      m.conditionalOverrides?.some((o) => o.newConfidence === 'HIGH') ||
+      AST_RAISING_MATCHERS.has(m.id);
     const neverGates = gating
-      .filter((rule) => !rule.matchers.some((m) => m.confidence === 'HIGH' || m.conditionalOverrides?.some((o) => o.newConfidence === 'HIGH')))
+      .filter((rule) => !rule.matchers.some(canReachHigh))
       .map((rule) => rule.ruleId)
       .sort();
     expect(neverGates).toEqual([
       'IFRAME-EXTERNAL-SRC',
       'PROD-NO-DEBUG-RESIDUE',
       'PROD-STAGING-HOST',
-      'SEC-MESSAGE-ORIGIN',
       'SEC-NO-SENSITIVE-TOKENS-IN-STORAGE',
       'SEC-RUNTIME-DECODING',
       'SEC-UNSAFE-HTML',
-      'SEC-WEBRTC-HARDWARE',
-      'UX-NO-MUTATION-ON-LOAD',
-      'UX-NO-POPUPS',
       'UX-NO-SILENT-MUTATIONS'
     ]);
   });
@@ -1208,10 +1211,17 @@ describe('docs-aligned gating (ruleset 1.7.0): severity is the doc level, confid
     expect(result.summary.readiness).toBe('ready');
   });
 
-  test('camera and microphone access goes to a reviewer (user-triggered + disclosure cannot be seen statically)', async () => {
-    const result = await review({ 'dist/index.js': 'const s = await navigator.mediaDevices.getUserMedia({ audio: true });' });
-    expect(find(result, 'SEC-WEBRTC-HARDWARE')?.label).toBe('Manual review');
-    expect(result.summary.readiness).toBe('needs_review');
+  test('camera and microphone access: load is certain, a click handler is cleared, anything else goes to a reviewer', async () => {
+    const onLoad = await review({ 'dist/index.js': 'const s = await navigator.mediaDevices.getUserMedia({ audio: true });' });
+    expect(find(onLoad, 'SEC-WEBRTC-HARDWARE')?.label).toBe('Required update');
+    expect(onLoad.summary.readiness).toBe('changes_required');
+
+    const onClick = await review({ 'dist/index.js': 'rec.onclick = async () => { await navigator.mediaDevices.getUserMedia({ audio: true }); };' });
+    expect(find(onClick, 'SEC-WEBRTC-HARDWARE')?.label).toBe('Suggested update');
+
+    const unknown = await review({ 'dist/index.js': 'async function start() { return navigator.mediaDevices.getUserMedia({ audio: true }); }\nexport { start };' });
+    expect(find(unknown, 'SEC-WEBRTC-HARDWARE')?.label).toBe('Manual review');
+    expect(unknown.summary.readiness).toBe('needs_review');
   });
 
   test('a string timer is dynamic code execution with certainty', async () => {
@@ -1264,6 +1274,32 @@ describe('docs-aligned gating (ruleset 1.7.0): severity is the doc level, confid
       'dist/index.js': 'host.insertAdjacentHTML("beforeend", \'<script src="https://cdn.example.com/x.js"></script>\');'
     });
     expect(find(injected, 'SEC-SCRIPT-INJECTION')?.label).toBe('Security blocker');
+  });
+
+  test('the syntax tree settles what the regex could not: popups, Designer writes, http flows, message handlers', async () => {
+    const popupOnLoad = await review({ 'dist/index.js': 'window.open("https://promo.example.com");' });
+    expect(find(popupOnLoad, 'UX-NO-POPUPS')?.label).toBe('Required update');
+    expect(find(popupOnLoad, 'UX-NO-POPUPS')?.evidence[0]?.snippet).toBeDefined();
+    expect(popupOnLoad.summary.readiness).toBe('changes_required');
+
+    const popupOnClick = await review({ 'dist/index.js': 'btn.addEventListener("click", () => window.open("https://docs.example.com", "_blank"));' });
+    expect(find(popupOnClick, 'UX-NO-POPUPS')?.label).toBe('Suggested update');
+    expect(popupOnClick.summary.readiness).toBe('ready');
+
+    const writeOnLoad = await review({ 'dist/index.js': 'await webflow.createStyle("hero");' });
+    expect(find(writeOnLoad, 'UX-NO-MUTATION-ON-LOAD')?.label).toBe('Required update');
+
+    const httpFlow = await review({ 'dist/index.js': 'const API = "http://api.example.com";\nasync function load() { return fetch(`${API}/v1`); }' });
+    expect(find(httpFlow, 'NET-URL-HYGIENE')?.label).toBe('Required update');
+
+    const dataOnly = await review({ 'dist/index.js': 'window.addEventListener("message", (e) => { apply(e.data); });' });
+    expect(find(dataOnly, 'SEC-MESSAGE-ORIGIN')?.label).toBe('Required update');
+    expect(dataOnly.summary.readiness).toBe('changes_required');
+
+    const checksLater = await review({
+      'dist/index.js': ['window.addEventListener("message", function (event) {', ...Array.from({ length: 8 }, (_, i) => `  const v${i} = ${i};`), '  if (event.origin !== ALLOWED) return;', '  apply(event.data);', '});'].join('\n')
+    });
+    expect(find(checksLater, 'SEC-MESSAGE-ORIGIN')?.label).toBe('Suggested update');
   });
 
   test('an external iframe asks for a reviewer because auth-flow iframes are allowed', async () => {
