@@ -140,7 +140,12 @@ describe('AST confirmation: plaintext URLs', () => {
       'localhost-url'
     );
     expect(libraryDefault.confidence).toBe('LOW');
-    expect(libraryDefault.confidenceReason).toContain('spread under caller options');
+    expect(libraryDefault.confidenceReason).toContain('merged under caller options');
+    const lowered = only(
+      scan('PROD-NO-LOCALHOST', 'const Sp="http://localhost:9999",Dp={url:Sp,storageKey:"k"};class C{constructor(t){const r=Object.assign(Object.assign({},Dp),t);this.url=r.url}}'),
+      'localhost-url'
+    );
+    expect(lowered.confidence).toBe('LOW');
     const constantRead = only(
       scan('PROD-NO-LOCALHOST', 'const CONFIG = { api: "http://localhost:3000" };\nfetch(CONFIG.api);'),
       'localhost-url'

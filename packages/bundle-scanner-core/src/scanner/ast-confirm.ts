@@ -480,10 +480,17 @@ const confirmLocalhost: Confirmer = ({ finding, offset, index }) => {
     if (owner.type === 'VariableDeclarator' && owner.init === object && owner.id.type === 'Identifier') {
       const constant = owner.id.name;
       const scope = enclosingScope(chain);
-      const spread = index.nodes.some(
-        ({ node: c, ancestors: ch }) => c.type === 'SpreadElement' && c.argument.type === 'Identifier' && c.argument.name === constant && ch.includes(scope)
-      );
-      if (spread) return { confidence: 'LOW', reason: `Default option in \`${constant}\`, spread under caller options` };
+      // `{...DEFAULTS, ...options}` or its TypeScript lowering,
+      // `Object.assign(Object.assign({}, DEFAULTS), options)`.
+      const merged = index.nodes.some(({ node: c, ancestors: ch }) => {
+        if (!ch.includes(scope)) return false;
+        if (c.type === 'SpreadElement') return c.argument.type === 'Identifier' && c.argument.name === constant;
+        if (c.type === 'CallExpression' && c.callee.type === 'MemberExpression' && memberProperty(c.callee) === 'assign' && c.callee.object.type === 'Identifier' && c.callee.object.name === 'Object') {
+          return c.arguments.some((arg: AnyNode) => arg.type === 'Identifier' && arg.name === constant);
+        }
+        return false;
+      });
+      if (merged) return { confidence: 'LOW', reason: `Default option in \`${constant}\`, merged under caller options` };
     }
     return null;
   };
