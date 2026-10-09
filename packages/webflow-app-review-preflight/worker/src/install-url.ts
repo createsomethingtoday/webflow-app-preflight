@@ -142,6 +142,35 @@ export function parseAuthorizeHandoff(url: URL): AuthorizeHandoff | null {
   };
 }
 
+/**
+ * IU-8: requested scopes against the scopes configured for the app. Extra
+ * scopes block (Webflow's own install already fails on them); missing ones
+ * warn. Runs on a bare authorize URL at Tier 1 and on the probe's hand-off.
+ */
+export function compareScopes(requestedScopes: string[], configuredScopes: string[]): InstallUrlFinding[] {
+  if (configuredScopes.length === 0) return [];
+  const configured = new Set(configuredScopes);
+  const requested = new Set(requestedScopes);
+  const findings: InstallUrlFinding[] = [];
+  const extra = requestedScopes.filter((scope) => !configured.has(scope));
+  const missing = configuredScopes.filter((scope) => !requested.has(scope));
+  if (extra.length > 0) {
+    findings.push({
+      rule: 'IU-8',
+      severity: 'block',
+      message: `Install URL requests scopes the app is not configured for: ${extra.join(', ')}.`
+    });
+  }
+  if (missing.length > 0) {
+    findings.push({
+      rule: 'IU-8',
+      severity: 'warn',
+      message: `Install URL omits configured scopes: ${missing.join(', ')}.`
+    });
+  }
+  return findings;
+}
+
 function worst(findings: InstallUrlFinding[]): 'pass' | 'warn' | 'block' {
   if (findings.some((finding) => finding.severity === 'block')) return 'block';
   if (findings.some((finding) => finding.severity === 'warn')) return 'warn';
@@ -322,26 +351,7 @@ export function checkInstallUrlString(input: InstallUrlCheckInput): InstallUrlSt
           message: 'redirect_uri is pinned in the install URL. It must match the redirect URI registered for the app.'
         });
       }
-      if (configuredScopes.length > 0) {
-        const configured = new Set(configuredScopes);
-        const requested = new Set(authorize.scopes);
-        const extra = authorize.scopes.filter((scope) => !configured.has(scope));
-        const missing = configuredScopes.filter((scope) => !requested.has(scope));
-        if (extra.length > 0) {
-          findings.push({
-            rule: 'IU-8',
-            severity: 'block',
-            message: `Install URL requests scopes the app is not configured for: ${extra.join(', ')}.`
-          });
-        }
-        if (missing.length > 0) {
-          findings.push({
-            rule: 'IU-8',
-            severity: 'warn',
-            message: `Install URL omits configured scopes: ${missing.join(', ')}.`
-          });
-        }
-      }
+      findings.push(...compareScopes(authorize.scopes, configuredScopes));
     }
   }
 
@@ -702,6 +712,15 @@ export async function checkInstallUrl(
     clientId: asString(input.clientId)?.trim() || null
   });
   const findings = [...stringCheck.findings];
+  if (probe.authorize && !stringCheck.authorize) {
+    // The developer endpoint handed off to authorize: compare those scopes.
+    findings.push(
+      ...compareScopes(
+        probe.authorize.scopes,
+        asStringList(input.configuredScopes).map((scope) => scope.trim()).filter(Boolean)
+      )
+    );
+  }
   if (probe.authorize && !probe.authorize.hasState) {
     findings.push({
       rule: 'IU-7',

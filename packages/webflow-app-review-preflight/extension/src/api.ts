@@ -10,6 +10,8 @@ import type {
   CreateHostedRuntimeReviewInput,
   CreatedReview,
   SubmissionReceipt,
+  InstallUrlCheck,
+  InstallUrlCheckInput,
 } from "./types";
 import { PREFLIGHT_API_BASE } from "./config";
 import { developmentApiBase, developmentIdToken } from "./development-runtime";
@@ -151,6 +153,20 @@ export function createPreflightApi(): PreflightApi {
         { method: "POST" },
       );
       return body.submissionReceipt;
+    },
+    async checkInstallUrl(
+      reviewId: string,
+      input: InstallUrlCheckInput,
+    ): Promise<InstallUrlCheck> {
+      const body = await request<{ installUrlCheck: InstallUrlCheck }>(
+        `/v1/reviews/${reviewId}/install-url-check`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(input),
+        },
+      );
+      return body.installUrlCheck;
     },
     async listRuntimeTestPackages(
       reviewId: string,

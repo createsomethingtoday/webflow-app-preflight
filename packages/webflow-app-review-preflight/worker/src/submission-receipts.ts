@@ -1,4 +1,5 @@
 import type { BundleReview } from '@create-something/webflow-app-review-preflight';
+import { installUrlCheckSummaryForVersion, type InstallUrlCheckSummary } from './install-url-checks';
 import type { AuthenticatedUser, Env } from './types';
 
 /**
@@ -26,6 +27,7 @@ export interface SubmissionReceiptVerification {
   readiness: BundleReview['summary']['readiness'];
   sourceMapStatus: string;
   runtimeSecurityStatus: 'passed' | 'blocked' | 'none';
+  installUrl: InstallUrlCheckSummary | null;
   createdAt: string;
 }
 
@@ -174,6 +176,7 @@ export async function verifySubmissionReceipt(
     readiness: result.summary.readiness,
     sourceMapStatus: result.sourceMapSummary?.status ?? 'not_applicable',
     runtimeSecurityStatus,
+    installUrl: await installUrlCheckSummaryForVersion(row.review_version_id, env),
     createdAt: row.created_at
   };
 }

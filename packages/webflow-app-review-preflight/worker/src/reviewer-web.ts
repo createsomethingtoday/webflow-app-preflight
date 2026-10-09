@@ -2,6 +2,11 @@ import type { AuthenticatedUser, Env } from './types';
 import { redeemCompanionPairing } from './companion-pairings';
 import { getReview, listReviews } from './reviews';
 import {
+  InstallUrlCheckInputError,
+  recordInstallUrlCheck,
+  type StoredInstallUrlCheck
+} from './install-url-checks';
+import {
   listRuntimeTestPackages,
   requestReviewerRuntimeObservationReplay
 } from './runtime-observations';
@@ -57,6 +62,15 @@ function shell(content: string, title = 'Reviewer workspace'): string {
     .mono { font-family:ui-monospace, SFMono-Regular, Menlo, monospace; font-size:12px; overflow-wrap:anywhere; }
     .pill { display:inline-flex; align-items:center; padding:4px 8px; border-radius:999px; background:#143f2c; color:#57d999; font-size:11px; font-weight:700; text-transform:uppercase; }
     .pill.blocked { background:#4a252a; color:#ff7180; }
+    .pill.warn { background:#3d3418; color:#eab308; }
+    .pill.info { background:#2b2b2b; color:#b8b8b8; }
+    .findings { margin:12px 0 0; padding:0; list-style:none; }
+    .findings li { display:flex; gap:10px; align-items:flex-start; padding:8px 0; border-top:1px solid #3b3b3b; font-size:13px; }
+    .findings li:first-child { border-top:0; }
+    .findings code { font-family:ui-monospace, SFMono-Regular, Menlo, monospace; font-size:12px; color:#7bb2ff; white-space:nowrap; }
+    label { display:block; margin:12px 0 6px; color:#b8b8b8; font-size:12px; font-weight:600; }
+    input[type=text] { width:100%; min-height:36px; padding:0 10px; border:1px solid #414141; border-radius:4px; background:#171717; color:#f5f5f5; font:inherit; font-size:13px; }
+    .actions { display:flex; gap:10px; margin-top:14px; flex-wrap:wrap; }
     button, .button { display:inline-flex; justify-content:center; align-items:center; min-height:38px; padding:0 16px; border:0; border-radius:4px; background:#146ef5; color:white; font:inherit; font-weight:650; text-decoration:none; cursor:pointer; }
     button:hover, .button:hover { background:#2d7ff8; }
     .queue { margin:0; padding:0; list-style:none; }
@@ -189,6 +203,8 @@ export async function reviewerWorkspace(
     : '<p class="muted">No trusted runtime observations have run for this exact package yet.</p>';
 
   const started = new URL(request.url).searchParams.get('started');
+  const installUrlNotice = new URL(request.url).searchParams.get('installUrl');
+  const installUrlHtml = renderInstallUrlCheck(review.id, review.installUrlCheck ?? null);
   const queueHtml = reviews.map((item) => `<li><strong>${escapeHtml(item.name)}</strong><div class="muted">Revision ${item.latestSequence} · ${escapeHtml(item.updatedAt)}</div></li>`).join('');
   return html(shell(`<main>
     <p class="eyebrow">Reviewer workspace</p>
@@ -210,6 +226,7 @@ export async function reviewerWorkspace(
         <div class="notice">A pinned E2B template runs a fresh browser. Runtime bytes, SRI, created scripts, network behavior, and the proxy canary are derived by the Worker.</div>
       </section>
       <aside class="card"><h2>Submission queue</h2><ul class="queue">${queueHtml}</ul></aside>
+      <section class="card" style="grid-column:1/-1"><h2>Install URL</h2>${installUrlNotice ? `<div class="notice">${escapeHtml(installUrlNotice)}</div>` : ''}${installUrlHtml}</section>
       <section class="card" style="grid-column:1/-1"><h2>Previous observations</h2>${historyHtml}</section>
     </div>
   </main>`));
@@ -232,4 +249,94 @@ export async function replayReviewerRuntimePackage(
       'cache-control': 'no-store'
     }
   });
+}
+
+function verdictPill(verdict: string): string {
+  const cls = verdict === 'block' ? 'blocked' : verdict === 'warn' ? 'warn' : '';
+  return `<span class="pill ${cls}">${escapeHtml(verdict)}</span>`;
+}
+
+function renderInstallUrlCheck(reviewId: string, check: StoredInstallUrlCheck | null): string {
+  const action = `/reviewer/reviews/${encodeURIComponent(reviewId)}/install-url-check`;
+  const form = `<form method="post" action="${action}">
+      <label for="install-url">Install URL${check ? ' (leave blank to re-check the stored URL)' : ''}</label>
+      <input type="text" id="install-url" name="installUrl" value="" placeholder="${escapeHtml(check?.installUrl ?? 'https://…')}" autocomplete="off">
+      <label for="client-id">Client ID from the app settings</label>
+      <input type="text" id="client-id" name="clientId" value="${escapeHtml(check?.clientId ?? '')}" autocomplete="off">
+      <label for="configured-scopes">Configured scopes, space separated (for the IU-8 comparison)</label>
+      <input type="text" id="configured-scopes" name="configuredScopes" value="${escapeHtml(check?.configuredScopes?.join(' ') ?? '')}" placeholder="sites:read cms:read" autocomplete="off">
+      <div class="actions"><button type="submit">${check ? 'Re-check install URL' : 'Check install URL'}</button></div>
+    </form>`;
+  if (!check) {
+    return `<p class="muted">The developer has not recorded an install URL check for this review. Enter the install URL from the submission to run it now.</p>${form}`;
+  }
+  const result = check.result;
+  const findings = result.findings.length
+    ? `<ul class="findings">${result.findings
+        .map((finding) => `<li>${verdictPill(finding.severity)}<code>${escapeHtml(finding.rule)}</code><span>${escapeHtml(finding.message)}</span></li>`)
+        .join('')}</ul>`
+    : '<p class="muted">No string-rule findings.</p>';
+  const probe = result.probe
+    ? `<div class="receipt"><span class="muted">Probe</span><span>${verdictPill(result.probe.verdict)} <span class="mono">${escapeHtml(result.probe.code)}</span> · ${escapeHtml(result.probe.reason)}</span></div>
+       <div class="receipt"><span class="muted">Redirect chain</span><span class="mono">${result.probe.hops.map((hop) => `${escapeHtml(hop.url)}${hop.status !== null ? ` → ${hop.status}` : hop.error ? ` → ${escapeHtml(hop.error)}` : ''}`).join('<br>')}</span></div>`
+    : '<div class="receipt"><span class="muted">Probe</span><span class="muted">not run (string rules blocked, or not a Data Client)</span></div>';
+  return `<div class="receipt"><span class="muted">Verdict</span><span>${verdictPill(result.verdict)} <span class="muted">${escapeHtml(check.actorRole)} · ${escapeHtml(check.createdAt)}</span></span></div>
+    <div class="receipt"><span class="muted">Install URL</span><span class="mono">${escapeHtml(check.installUrl)}</span></div>
+    <div class="receipt"><span class="muted">Client ID</span><span class="mono">${escapeHtml(check.clientId ?? 'not supplied')}</span></div>
+    ${probe}
+    ${findings}
+    ${form}`;
+}
+
+/**
+ * Reviewer re-check from the workspace form. Blank fields reuse the stored
+ * inputs; configured scopes are what the reviewer read from the developer
+ * workspace, which is the only source the worker has for IU-8.
+ */
+export async function recheckReviewerInstallUrl(
+  reviewId: string,
+  request: Request,
+  env: Env,
+  user: AuthenticatedUser
+): Promise<Response> {
+  if (!user.companionSession || user.companionSession.actorRole !== 'reviewer') {
+    return html(shell('<main><div class="card"><h1>Reviewer sign-in required</h1></div></main>'), 401);
+  }
+  let form: FormData;
+  try {
+    form = await request.formData();
+  } catch {
+    return html(shell('<main><div class="card"><h1>Invalid request</h1></div></main>'), 400);
+  }
+  const scopes = String(form.get('configuredScopes') ?? '').trim();
+  try {
+    const check = await recordInstallUrlCheck(
+      reviewId,
+      {
+        installUrl: form.get('installUrl'),
+        clientId: form.get('clientId'),
+        configuredScopes: scopes ? scopes.split(/[\s,]+/) : undefined
+      },
+      env,
+      user
+    );
+    if (!check) {
+      return html(shell('<main><div class="card"><h1>Review unavailable</h1></div></main>'), 404);
+    }
+    return new Response(null, {
+      status: 303,
+      headers: {
+        location: `/reviewer?installUrl=${encodeURIComponent(`Install URL check recorded: ${check.result.verdict}`)}`,
+        'cache-control': 'no-store'
+      }
+    });
+  } catch (error) {
+    if (error instanceof InstallUrlCheckInputError) {
+      return new Response(null, {
+        status: 303,
+        headers: { location: `/reviewer?installUrl=${encodeURIComponent(error.message)}`, 'cache-control': 'no-store' }
+      });
+    }
+    throw error;
+  }
 }

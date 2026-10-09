@@ -5,6 +5,7 @@ import {
 } from './auth';
 import { allowedOrigin, json, options } from './http';
 import { checkInstallUrl } from './install-url';
+import { InstallUrlCheckInputError, recordInstallUrlCheck } from './install-url-checks';
 import { serviceTokenAuthorized } from './service-auth';
 import {
   addRevision,
@@ -58,6 +59,7 @@ import {
 } from './webflow-authorization';
 import {
   connectReviewerWorkspace,
+  recheckReviewerInstallUrl,
   replayReviewerRuntimePackage,
   reviewerWorkspace
 } from './reviewer-web';
@@ -282,6 +284,20 @@ async function handle(request: Request, env: Env): Promise<Response> {
       }
       throw error;
     }
+  }
+
+  const reviewerInstallUrlMatch = url.pathname.match(
+    /^\/reviewer\/reviews\/([^/]+)\/install-url-check$/
+  );
+  if (reviewerInstallUrlMatch && request.method === 'POST') {
+    const reviewer = await authenticateCompanion(request, env);
+    if (!reviewer) return json({ error: 'unauthorized' }, 401, origin);
+    return recheckReviewerInstallUrl(
+      decodeURIComponent(reviewerInstallUrlMatch[1]!),
+      request,
+      env,
+      reviewer
+    );
   }
 
   const companionPairingMatch = url.pathname.match(
@@ -585,6 +601,37 @@ async function handle(request: Request, env: Env): Promise<Response> {
       return revision
         ? json(revision, revision.deduplicated ? 200 : 201, origin)
         : json({ error: 'review_not_found' }, 404, origin);
+    }
+
+    const installUrlCheckMatch = url.pathname.match(
+      /^\/v1\/reviews\/([^/]+)\/install-url-check$/
+    );
+    if (installUrlCheckMatch && request.method === 'POST') {
+      let body: Record<string, unknown> = {};
+      try {
+        const text = await request.text();
+        if (text.length > 16 * 1024) throw new Error();
+        body = text ? (JSON.parse(text) as Record<string, unknown>) : {};
+        if (!body || typeof body !== 'object' || Array.isArray(body)) throw new Error();
+      } catch {
+        return json({ error: 'invalid_request' }, 400, origin);
+      }
+      try {
+        const installUrlCheck = await recordInstallUrlCheck(
+          decodeURIComponent(installUrlCheckMatch[1]!),
+          body,
+          env,
+          user
+        );
+        return installUrlCheck
+          ? json({ installUrlCheck }, 201, origin)
+          : json({ error: 'review_not_found' }, 404, origin);
+      } catch (error) {
+        if (error instanceof InstallUrlCheckInputError) {
+          return json({ error: 'invalid_install_url_check', message: error.message }, 400, origin);
+        }
+        throw error;
+      }
     }
 
     const receiptMatch = url.pathname.match(

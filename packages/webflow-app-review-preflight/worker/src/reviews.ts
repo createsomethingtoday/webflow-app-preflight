@@ -9,6 +9,7 @@ import {
   issueSubmissionReceipt,
   type SubmissionReceipt
 } from './submission-receipts';
+import { latestInstallUrlCheck } from './install-url-checks';
 import type { AuthenticatedUser, Env, StoredReview } from './types';
 
 const MAX_BUNDLE_BYTES = 10 * 1024 * 1024;
@@ -137,7 +138,8 @@ function storedReview(
       sequence: 1,
       createdAt: result.createdAt,
       result
-    }
+    },
+    installUrlCheck: null
   };
 }
 
@@ -476,7 +478,8 @@ export async function addRevision(
           sequence: duplicate.sequence,
           createdAt: duplicate.created_at,
           result: duplicateResult
-        }
+        },
+        installUrlCheck: await latestInstallUrlCheck(reviewId, env)
       },
       comparison: compareResults(previous, duplicateResult),
       deduplicated: true,
@@ -633,7 +636,8 @@ export async function addRevision(
         sequence: nextSequence,
         createdAt: result.createdAt,
         result
-      }
+      },
+      installUrlCheck: await latestInstallUrlCheck(reviewId, env)
     },
     comparison: compareResults(previous, result),
     deduplicated: false,
@@ -729,6 +733,7 @@ export async function getReview(
       sequence: row.sequence,
       createdAt: row.version_created_at,
       result: JSON.parse(row.review_json) as BundleReview
-    }
+    },
+    installUrlCheck: await latestInstallUrlCheck(row.id, env)
   };
 }
