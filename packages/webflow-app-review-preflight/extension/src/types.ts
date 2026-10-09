@@ -15,12 +15,55 @@ export interface ReviewVersion {
   result: BundleReview;
 }
 
+export interface InstallUrlFinding {
+  rule: string;
+  severity: 'block' | 'warn' | 'info';
+  message: string;
+}
+
+export interface InstallUrlProbe {
+  verdict: 'pass' | 'warn' | 'block';
+  code: string;
+  reason: string;
+  hops: { url: string; status: number | null; error?: string }[];
+  finalUrl: string | null;
+  finalStatus: number | null;
+  durationMs: number;
+}
+
+export interface InstallUrlCheckResult {
+  installUrl: string | null;
+  requiresInstallUrl: boolean;
+  verdict: 'pass' | 'warn' | 'block';
+  findings: InstallUrlFinding[];
+  probe: InstallUrlProbe | null;
+}
+
+export interface InstallUrlCheck {
+  id: string;
+  reviewVersionId: string;
+  actorRole: 'developer' | 'reviewer';
+  installUrl: string;
+  clientId: string | null;
+  capabilities: string[];
+  configuredScopes: string[] | null;
+  createdAt: string;
+  result: InstallUrlCheckResult;
+}
+
+export interface InstallUrlCheckInput {
+  installUrl: string;
+  clientId?: string;
+  capabilities?: string[];
+}
+
 export interface StoredReview {
   id: string;
   name: string;
   createdAt: string;
   updatedAt: string;
   latestVersion: ReviewVersion;
+  installUrlCheck?: InstallUrlCheck | null;
 }
 
 export interface ReviewSummary {
@@ -79,6 +122,7 @@ export interface PreflightApi {
   createRuntimeReview(input: CreateHostedRuntimeReviewInput): Promise<CreatedReview>;
   addRevision(reviewId: string, file: File, sourceMaps?: File): Promise<RevisionResult>;
   reissueSubmissionReceipt(reviewId: string): Promise<SubmissionReceipt>;
+  checkInstallUrl(reviewId: string, input: InstallUrlCheckInput): Promise<InstallUrlCheck>;
   listRuntimeTestPackages(reviewId: string): Promise<RuntimeTestPackageView[]>;
   createRuntimeTestPackage(
     reviewId: string,

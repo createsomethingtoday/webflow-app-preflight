@@ -743,6 +743,98 @@ describe('review API', () => {
     expect(sessionCount?.count).toBe(0);
   });
 
+  test('reviewer workspace shows the install URL check and accepts a form re-check', async () => {
+    const CLIENT_ID = 'd0a488aa5884654d34106a6d64d00019138b3be57a4364e7b6f19ed34c7b9ede';
+    const form = new FormData();
+    form.set(
+      'bundle',
+      new File([await createBundle()], 'install-url-review.zip', { type: 'application/zip' })
+    );
+    const createdResponse = await exports.default.fetch(
+      new Request('https://preflight.test/v1/reviews', {
+        method: 'POST',
+        headers: { authorization: 'Bearer test-token', origin: 'http://localhost:1337' },
+        body: form
+      })
+    );
+    const created = await createdResponse.json<{
+      review: { id: string; latestVersion: { id: string } };
+    }>();
+    const runtimeTestPackageId = await createReadyRuntimePackage(created.review.id);
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+        if (url === 'https://app.acme.dev/install') {
+          return new Response(null, {
+            status: 302,
+            headers: {
+              location: `https://webflow.com/oauth/authorize?response_type=code&client_id=${CLIENT_ID}&scope=sites%3Aread+cms%3Awrite`
+            }
+          });
+        }
+        return new Response('unexpected', { status: 599 });
+      })
+    );
+    const recorded = await exports.default.fetch(
+      new Request(`https://preflight.test/v1/reviews/${created.review.id}/install-url-check`, {
+        method: 'POST',
+        headers: { authorization: 'Bearer test-token', origin: 'http://localhost:1337', 'content-type': 'application/json' },
+        body: JSON.stringify({ installUrl: 'https://app.acme.dev/install', clientId: CLIENT_ID, capabilities: 'Hybrid' })
+      })
+    );
+    expect(recorded.status).toBe(201);
+
+    const pairingResponse = await exports.default.fetch(
+      new Request(`https://preflight.test/v1/reviews/${created.review.id}/companion-pairings`, {
+        method: 'POST',
+        headers: { authorization: 'Bearer reviewer-test-token', origin: 'http://localhost:1337', 'content-type': 'application/json' },
+        body: JSON.stringify({ reviewVersionId: created.review.latestVersion.id, runtimeTestPackageId })
+      })
+    );
+    const pairing = await pairingResponse.json<{ pairing: { code: string } }>();
+    const connectForm = new FormData();
+    connectForm.set('code', pairing.pairing.code);
+    const redeemed = await exports.default.fetch(
+      new Request('https://preflight.test/reviewer/connect', { method: 'POST', redirect: 'manual', body: connectForm })
+    );
+    expect(redeemed.status).toBe(303);
+    const cookie = redeemed.headers.get('set-cookie')!.split(';')[0]!;
+
+    const page = await exports.default.fetch(new Request('https://preflight.test/reviewer', { headers: { cookie } }));
+    expect(page.status).toBe(200);
+    const markup = await page.text();
+    expect(markup).toContain('<h2>Install URL</h2>');
+    expect(markup).toContain('https://app.acme.dev/install');
+    expect(markup).toContain('reaches_authorize');
+    expect(markup).toContain('Re-check install URL');
+
+    // Reviewer re-check: blank URL reuses the stored one; configured scopes
+    // from the developer workspace drive IU-8.
+    const recheck = await exports.default.fetch(
+      new Request(`https://preflight.test/reviewer/reviews/${created.review.id}/install-url-check`, {
+        method: 'POST',
+        redirect: 'manual',
+        headers: { cookie, 'content-type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ installUrl: '', clientId: CLIENT_ID, configuredScopes: 'sites:read' }).toString()
+      })
+    );
+    expect(recheck.status).toBe(303);
+    expect(recheck.headers.get('location')).toContain('Install%20URL%20check%20recorded%3A%20block');
+
+    const latest = await env.DB.prepare(
+      `SELECT actor_role, verdict, configured_scopes_json FROM install_url_checks
+        WHERE review_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1`
+    )
+      .bind(created.review.id)
+      .first<{ actor_role: string; verdict: string; configured_scopes_json: string }>();
+    expect(latest).toMatchObject({ actor_role: 'reviewer', verdict: 'block', configured_scopes_json: '["sites:read"]' });
+
+    const after = await exports.default.fetch(new Request('https://preflight.test/reviewer', { headers: { cookie } }));
+    expect(await after.text()).toContain('IU-8');
+  });
+
   test('preserves reviewer authority from Webflow identity through pairing redemption', async () => {
     const form = new FormData();
     form.set(
@@ -952,6 +1044,7 @@ describe('review API', () => {
       'appName',
       'bundleSha256',
       'createdAt',
+      'installUrl',
       'readiness',
       'reviewId',
       'runtimeSecurityStatus',

@@ -10,7 +10,9 @@ import type {
   RuntimeTestPackageView,
   ReviewerHandoff,
   StoredReview,
-  SubmissionReceipt
+  SubmissionReceipt,
+  InstallUrlCheck,
+  InstallUrlCheckInput
 } from './types';
 import { PreflightAuthenticationError } from './api';
 
@@ -1399,6 +1401,108 @@ openssl dgst -sha256 -binary /tmp/reviewed-runtime.js \\
   );
 }
 
+function installUrlCapabilities(appType: string | undefined, runtimeOnly: boolean): string[] | null {
+  if (appType === 'hybrid') return ['Hybrid'];
+  if (appType === 'data_client' || runtimeOnly) return ['Data Client v2'];
+  return null;
+}
+
+function InstallUrlCard({
+  check,
+  capabilities,
+  busy,
+  error,
+  onCheck
+}: {
+  check: InstallUrlCheck | null;
+  capabilities: string[];
+  busy: boolean;
+  error: string | null;
+  onCheck: (input: InstallUrlCheckInput) => void;
+}) {
+  const id = useId();
+  const [installUrl, setInstallUrl] = useState(check?.installUrl ?? '');
+  const [clientId, setClientId] = useState(check?.clientId ?? '');
+  useEffect(() => {
+    if (check) {
+      setInstallUrl(check.installUrl);
+      setClientId(check.clientId ?? '');
+    }
+  }, [check?.id]);
+  const result = check?.result ?? null;
+  const verdictLabel = result?.verdict === 'block' ? 'Fix before submitting' : result?.verdict === 'warn' ? 'Reviewer will confirm' : 'Install URL works';
+  return (
+    <section className="revision-card install-url-card" aria-labelledby={`${id}-title`}>
+      <div>
+        <span className="eyebrow">Install URL</span>
+        <h2 id={`${id}-title`}>Check the link users click to install</h2>
+        <p>
+          Paste the install URL from your Marketplace listing. Preflight checks the string, follows it once, and
+          records where it ends on this run and on your submission receipt. Broken install URLs are a common
+          rejection reason.
+        </p>
+      </div>
+      <form
+        onSubmit={(event) => {
+          event.preventDefault();
+          if (!installUrl.trim()) return;
+          onCheck({ installUrl: installUrl.trim(), clientId: clientId.trim() || undefined, capabilities });
+        }}
+      >
+        <label>
+          Install URL
+          <input
+            type="url"
+            value={installUrl}
+            placeholder="Paste the install URL from your listing"
+            disabled={busy}
+            onChange={(event) => setInstallUrl(event.target.value)}
+          />
+        </label>
+        <label>
+          Client ID from your app settings (optional)
+          <input
+            type="text"
+            value={clientId}
+            disabled={busy}
+            onChange={(event) => setClientId(event.target.value)}
+          />
+        </label>
+        {error ? <p className="field-error" role="alert">{error}</p> : null}
+        <button className="button button-secondary" type="submit" disabled={busy || !installUrl.trim()}>
+          {busy ? 'Checking…' : check ? 'Check again' : 'Check install URL'}
+        </button>
+      </form>
+      {check && result ? (
+        <div className="install-url-result" aria-live="polite">
+          <div className="install-url-verdict">
+            <span className={`manual-pill ${result.verdict === 'pass' ? 'approved' : result.verdict}`}>{result.verdict}</span>
+            <strong>{verdictLabel}</strong>
+            <span className="muted">· {check.actorRole} · {formatDate(check.createdAt)}</span>
+          </div>
+          {result.probe ? (
+            <p className="install-url-chain">
+              {result.probe.reason}
+              {result.probe.hops.length > 1 ? ` (${result.probe.hops.length} hops, ${result.probe.durationMs} ms)` : ''}
+            </p>
+          ) : null}
+          {result.findings.length > 0 ? (
+            <ul className="install-url-findings">
+              {result.findings.map((finding, index) => (
+                <li key={`${finding.rule}-${index}`}>
+                  <span className={`manual-pill ${finding.severity === 'info' ? 'approved' : finding.severity}`}>{finding.severity}</span>
+                  <code>{finding.rule}</code>
+                  <span>{finding.message}</span>
+                </li>
+              ))}
+            </ul>
+          ) : null}
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
 function ReviewDetail({
   review,
   comparison,
@@ -1408,6 +1512,9 @@ function ReviewDetail({
   authenticatedSiteId,
   submissionReceipt,
   onReissueReceipt,
+  installUrlCheck,
+  installUrlError,
+  onCheckInstallUrl,
   onRevision,
   onPrepareRuntimePackage,
   onRunRuntimeObservation,
@@ -1425,6 +1532,9 @@ function ReviewDetail({
   authenticatedSiteId: string | null;
   submissionReceipt: SubmissionReceipt | null;
   onReissueReceipt: () => void;
+  installUrlCheck: InstallUrlCheck | null;
+  installUrlError: string | null;
+  onCheckInstallUrl: (input: InstallUrlCheckInput) => void;
   onRevision: (file: File, sourceMaps: File | null) => void;
   onPrepareRuntimePackage: (input: RuntimeTestPackageInput) => void;
   onRunRuntimeObservation: (testPackageId: string) => void;
@@ -1436,6 +1546,7 @@ function ReviewDetail({
 }) {
   const result = review.latestVersion.result;
   const runtimeOnly = result.artifact.kind === 'runtime_manifest';
+  const installUrlCapabilityList = installUrlCapabilities(result.artifactScope.appType, runtimeOnly);
   const revisionId = useId();
   const [revisionBundle, setRevisionBundle] = useState<File | null>(null);
   const [revisionSourceMaps, setRevisionSourceMaps] = useState<File | null>(null);
@@ -1472,6 +1583,16 @@ function ReviewDetail({
         busy={busy}
         onReissue={onReissueReceipt}
       />
+
+      {installUrlCapabilityList ? (
+        <InstallUrlCard
+          check={installUrlCheck}
+          capabilities={installUrlCapabilityList}
+          busy={busy}
+          error={installUrlError}
+          onCheck={onCheckInstallUrl}
+        />
+      ) : null}
 
       {!runtimeOnly ? <section className="summary-grid" aria-label="Finding summary">
         <div><strong>{result.summary.securityBlockers}</strong><span>Security blockers</span></div>
@@ -1596,6 +1717,8 @@ export function App({
   const [identity, setIdentity] = useState<PreflightIdentity | null>(null);
   const [reviewerHandoff, setReviewerHandoff] = useState<ReviewerHandoff | null>(null);
   const [submissionReceipt, setSubmissionReceipt] = useState<SubmissionReceipt | null>(null);
+  const [installUrlCheck, setInstallUrlCheck] = useState<InstallUrlCheck | null>(null);
+  const [installUrlError, setInstallUrlError] = useState<string | null>(null);
   const [connectionNeedsReauth, setConnectionNeedsReauth] = useState(false);
 
   const refreshHistory = async () => {
@@ -1697,12 +1820,22 @@ export function App({
           onReissueReceipt={() => run(async () => {
             setSubmissionReceipt(await api.reissueSubmissionReceipt(review.id));
           })}
+          installUrlCheck={installUrlCheck}
+          installUrlError={installUrlError}
+          onCheckInstallUrl={(input) => {
+            setInstallUrlError(null);
+            void run(async () => {
+              setInstallUrlCheck(await api.checkInstallUrl(review.id, input));
+            }, setInstallUrlError);
+          }}
           onBack={() => {
             setReview(null);
             setComparison(null);
             setRuntimeTestPackages([]);
             setReviewerHandoff(null);
             setSubmissionReceipt(null);
+            setInstallUrlCheck(null);
+            setInstallUrlError(null);
           }}
           onRevision={(file, sourceMaps) => run(async () => {
             const revised = await api.addRevision(review.id, file, sourceMaps ?? undefined);
@@ -1710,6 +1843,7 @@ export function App({
             setComparison(revised.comparison);
             setReviewerHandoff(null);
             setSubmissionReceipt(revised.submissionReceipt);
+            setInstallUrlCheck(revised.review.installUrlCheck ?? null);
             await refreshRuntimePackages(review.id);
             await refreshHistory();
           })}
@@ -1770,6 +1904,7 @@ export function App({
                 setRuntimeTestPackages([]);
                 setReviewerHandoff(null);
                 setSubmissionReceipt(created.submissionReceipt);
+                setInstallUrlCheck(created.review.installUrlCheck ?? null);
                 await refreshHistory();
               })}
             />
@@ -1782,6 +1917,7 @@ export function App({
                 setRuntimeTestPackages([]);
                 setReviewerHandoff(null);
                 setSubmissionReceipt(created.submissionReceipt);
+                setInstallUrlCheck(created.review.installUrlCheck ?? null);
                 await refreshHistory();
               })}
             />
@@ -1798,6 +1934,7 @@ export function App({
               setComparison(null);
               setReviewerHandoff(null);
               setSubmissionReceipt(null);
+              setInstallUrlCheck(selectedReview.installUrlCheck ?? null);
             })}
           />
           <p className="privacy-note">

@@ -2,7 +2,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-li
 import { afterEach, describe, expect, test, vi } from 'vitest';
 import { App, runtimeIssues, runtimeSecuritySummary } from './App';
 import { PreflightAuthenticationError } from './api';
-import type { PreflightApi, StoredReview, SubmissionReceipt } from './types';
+import type { InstallUrlCheck, PreflightApi, StoredReview, SubmissionReceipt } from './types';
 
 afterEach(() => {
   cleanup();
@@ -21,6 +21,7 @@ const api: PreflightApi = {
   createRuntimeReview: async () => Promise.reject(new Error('not used')),
   addRevision: async () => Promise.reject(new Error('not used')),
   reissueSubmissionReceipt: async () => Promise.reject(new Error('not used')),
+  checkInstallUrl: async () => Promise.reject(new Error('not used')),
   listRuntimeTestPackages: async () => [],
   createRuntimeTestPackage: async () => Promise.reject(new Error('not used')),
   requestRuntimeObservationRun: async () => Promise.reject(new Error('not used')),
@@ -1388,5 +1389,120 @@ describe('runtimeSecuritySummary', () => {
     expect(summary.title).toBe('4 checks need attention');
     expect(summary.detail).toContain('recommended practices, not review gates');
     expect(summary.detail).not.toContain('do not block submission');
+  });
+});
+
+describe('install URL check', () => {
+  function sampleInstallUrlCheck(verdict: 'pass' | 'block'): InstallUrlCheck {
+    return {
+      id: `check-${verdict}`,
+      reviewVersionId: 'version-website-speedy-runtime',
+      actorRole: 'developer',
+      installUrl: 'https://app.websitespeedy.com/install',
+      clientId: null,
+      capabilities: ['Data Client v2'],
+      configuredScopes: null,
+      createdAt: '2026-10-09T18:00:00.000Z',
+      result:
+        verdict === 'pass'
+          ? {
+              installUrl: 'https://app.websitespeedy.com/install',
+              requiresInstallUrl: true,
+              verdict: 'pass',
+              findings: [],
+              probe: {
+                verdict: 'pass',
+                code: 'reaches_authorize',
+                reason: 'reaches webflow.com/oauth/authorize with state',
+                hops: [
+                  { url: 'https://app.websitespeedy.com/install', status: 302 },
+                  { url: 'https://webflow.com/oauth/authorize?client_id=abc', status: null }
+                ],
+                finalUrl: 'https://webflow.com/oauth/authorize?client_id=abc',
+                finalStatus: null,
+                durationMs: 420
+              }
+            }
+          : {
+              installUrl: 'https://app.websitespeedy.com/install',
+              requiresInstallUrl: true,
+              verdict: 'block',
+              findings: [],
+              probe: {
+                verdict: 'block',
+                code: 'not_found',
+                reason: 'install URL returned 404',
+                hops: [{ url: 'https://app.websitespeedy.com/install', status: 404 }],
+                finalUrl: 'https://app.websitespeedy.com/install',
+                finalStatus: 404,
+                durationMs: 180
+              }
+            }
+    };
+  }
+
+  test('a Data Client run offers the install URL check and shows the recorded verdict', async () => {
+    const review = websiteSpeedyRuntimeReview();
+    const checkInstallUrl = vi.fn(async (_reviewId: string, input: { installUrl: string }) =>
+      sampleInstallUrlCheck(input.installUrl.endsWith('/install') ? 'pass' : 'block')
+    );
+    render(
+      <App
+        api={{
+          ...api,
+          listReviews: async () => [
+            {
+              id: review.id,
+              name: review.name,
+              updatedAt: review.updatedAt,
+              latestSequence: 1,
+              readiness: review.latestVersion.result.summary.readiness,
+              appName: 'Website Speedy',
+              reviewType: 'runtime_manifest',
+              coverage: review.latestVersion.result.coverage
+            }
+          ],
+          getReview: async () => review,
+          checkInstallUrl
+        }}
+      />
+    );
+    fireEvent.click(await screen.findByRole('button', { name: /Website Speedy/ }));
+    await screen.findByText('Check the link users click to install');
+    expect(screen.getByRole('button', { name: 'Check install URL' })).toBeDisabled();
+
+    fireEvent.change(screen.getByLabelText('Install URL'), {
+      target: { value: 'https://app.websitespeedy.com/install' }
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Check install URL' }));
+
+    await screen.findByText('Install URL works');
+    expect(checkInstallUrl).toHaveBeenCalledWith(review.id, {
+      installUrl: 'https://app.websitespeedy.com/install',
+      clientId: undefined,
+      capabilities: ['Data Client v2']
+    });
+    expect(screen.getByText(/reaches webflow.com\/oauth\/authorize/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Check again' })).toBeEnabled();
+  });
+
+  test('a Designer Extension run does not show the install URL check', async () => {
+    const review = consentProReview();
+    const { container } = render(
+      <App
+        api={{
+          ...api,
+          listReviews: async () => [],
+          getReview: async () => review,
+          createReview: async () => ({ review, submissionReceipt: sampleSubmissionReceipt() })
+        }}
+      />
+    );
+    const file = new File(['zip'], 'consent-pro.zip', { type: 'application/zip' });
+    const [bundleInput] = container.querySelectorAll('input[type="file"]');
+    fireEvent.change(bundleInput!, { target: { files: [file] } });
+    fireEvent.click(screen.getByRole('button', { name: 'Run preflight' }));
+    await screen.findByText('Reconcile this run with your submission');
+    expect(screen.queryByText('Check the link users click to install')).toBeNull();
   });
 });

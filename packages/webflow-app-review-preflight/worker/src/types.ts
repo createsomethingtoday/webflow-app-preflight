@@ -1,4 +1,5 @@
 import type { BundleReview } from '@create-something/webflow-app-review-preflight';
+import type { StoredInstallUrlCheck } from './install-url-checks';
 
 export interface Env {
   DB: D1Database;
@@ -19,6 +20,7 @@ export interface Env {
   PATTERN_COORDINATOR_TOKEN?: string;
   GOVERNANCE_APPROVER_TOKEN?: string;
   REVIEWER_USER_IDS?: string;
+  INSTALL_URL_CHECK_TOKEN?: string;
 }
 
 export interface AuthenticatedUser {
@@ -45,4 +47,5 @@ export interface StoredReview {
   createdAt: string;
   updatedAt: string;
   latestVersion: StoredReviewVersion;
+  installUrlCheck?: StoredInstallUrlCheck | null;
 }
