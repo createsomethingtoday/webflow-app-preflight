@@ -1454,7 +1454,7 @@ function InstallUrlCard({
           <input
             type="url"
             value={installUrl}
-            placeholder="https://app.example.dev/install"
+            placeholder="Paste the install URL from your listing"
             disabled={busy}
             onChange={(event) => setInstallUrl(event.target.value)}
           />
