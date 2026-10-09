@@ -30,6 +30,7 @@ export default defineConfig({
             'app-review-companion-runtime:f47ac10b-58cc-4372-a567-0e02b2c3d479',
           PATTERN_COORDINATOR_TOKEN: 'pattern-coordinator-test-token',
           GOVERNANCE_APPROVER_TOKEN: 'governance-approver-test-token',
+          INSTALL_URL_CHECK_TOKEN: 'install-url-check-test-token',
           TEST_MIGRATIONS: await readD1Migrations(path.join(directory, '../migrations'))
         }
       }

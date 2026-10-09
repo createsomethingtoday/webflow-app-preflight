@@ -19,6 +19,7 @@ export interface Env {
   PATTERN_COORDINATOR_TOKEN?: string;
   GOVERNANCE_APPROVER_TOKEN?: string;
   REVIEWER_USER_IDS?: string;
+  INSTALL_URL_CHECK_TOKEN?: string;
 }
 
 export interface AuthenticatedUser {

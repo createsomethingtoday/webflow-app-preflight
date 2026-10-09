@@ -4,6 +4,8 @@ import {
   companionRoleForUser
 } from './auth';
 import { allowedOrigin, json, options } from './http';
+import { checkInstallUrl } from './install-url';
+import { serviceTokenAuthorized } from './service-auth';
 import {
   addRevision,
   createReview,
@@ -196,6 +198,33 @@ async function handle(request: Request, env: Env): Promise<Response> {
   }
   if (url.pathname === '/v1/oauth/webflow/complete' && request.method === 'GET') {
     return webflowOAuthCompletePage();
+  }
+  // Install URL check: Tier 1 string rules plus the unauthenticated probe.
+  // Callers are the submission form's server (service token) or a signed-in
+  // extension or reviewer session. Never anonymous: the probe fetches a
+  // developer-supplied URL from Webflow infrastructure.
+  if (url.pathname === '/v1/install-url/check' && request.method === 'POST') {
+    const serviceCaller = await serviceTokenAuthorized(request, env.INSTALL_URL_CHECK_TOKEN);
+    if (!serviceCaller && !(await authenticate(request, env))) {
+      return json({ error: 'unauthorized' }, 401, origin);
+    }
+    let body: {
+      installUrl?: unknown;
+      clientId?: unknown;
+      capabilities?: unknown;
+      configuredScopes?: unknown;
+      probe?: unknown;
+    };
+    try {
+      const text = await request.text();
+      if (!text || text.length > 16 * 1024) throw new Error();
+      body = JSON.parse(text) as typeof body;
+      if (!body || typeof body !== 'object') throw new Error();
+    } catch {
+      return json({ error: 'invalid_request' }, 400, origin);
+    }
+    const result = await checkInstallUrl(body, { probe: body.probe !== false });
+    return json(result, 200, origin);
   }
 
   if (

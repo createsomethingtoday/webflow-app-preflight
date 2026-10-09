@@ -10,6 +10,7 @@ declare module 'cloudflare:workers' {
     E2B_RUNTIME_TEMPLATE_ID: string;
     PATTERN_COORDINATOR_TOKEN: string;
     GOVERNANCE_APPROVER_TOKEN: string;
+    INSTALL_URL_CHECK_TOKEN: string;
     TEST_MIGRATIONS: D1Migration[];
   }
 }

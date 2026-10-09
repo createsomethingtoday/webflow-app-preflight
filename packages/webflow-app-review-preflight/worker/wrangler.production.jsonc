@@ -10,6 +10,8 @@
   //   - E2B_COORDINATOR_TOKEN     coordinator service token
   //   - WEBFLOW_CLIENT_ID / WEBFLOW_CLIENT_SECRET / WEBFLOW_TOKEN_ENCRYPTION_KEY
   //   - PATTERN_COORDINATOR_TOKEN / GOVERNANCE_APPROVER_TOKEN
+  //   - INSTALL_URL_CHECK_TOKEN    service token for the submission form's
+  //                               server to call POST /v1/install-url/check
   // Required out-of-band VARIABLES (set as secrets or dashboard vars):
   //   - REVIEWER_USER_IDS         comma-separated Webflow user IDs. Without it
   //                               every identity is a developer and the
