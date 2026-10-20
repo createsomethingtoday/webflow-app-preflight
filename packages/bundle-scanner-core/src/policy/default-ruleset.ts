@@ -37,7 +37,7 @@ import type { Ruleset } from '../types';
  */
 export const defaultRuleset: Ruleset = {
   schemaVersion: 'wf-marketplace-scanner-ruleset@1.0.0',
-  rulesetVersion: '1.7.0-docs-aligned-2026-10-07',
+  rulesetVersion: '1.8.0-declared-egress-2026-10-20',
   generatedAt: '2026-01-16T14:00:00Z',
   rules: [
     // ========================================================================
@@ -629,7 +629,7 @@ export const defaultRuleset: Ruleset = {
       severity: 'HIGH',
       disposition: 'ACTION_REQUIRED',
       description:
-        'Every embedded URL must point to production. Remove localhost, loopback, private network, cloud metadata, and tunnel references.',
+        'Every embedded URL must point to production. Remove localhost, loopback, private network, cloud metadata, and tunnel references. One exception: a loopback endpoint for software the user installs on their own machine, declared with its scheme and port in webflow.json egress, is routed to Manual review (Marketplace Guidelines: Transport security, item 3).',
       matchers: [
         {
           id: 'localhost-url',
