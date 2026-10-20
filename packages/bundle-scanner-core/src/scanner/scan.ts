@@ -66,6 +66,113 @@ function getContextualSnippet(
 /** Characters a `scope: 'from_match'` override may inspect after the match. */
 const OVERRIDE_FROM_MATCH_WINDOW = 200;
 
+/** `webflow.json` at the bundle root (or any directory, for nested uploads). */
+const MANIFEST_PATH = /(^|\/)webflow\.json$/i;
+
+/**
+ * Hostnames that resolve to the user's own machine. Mirrors the Designer's
+ * loopback test for `egress`: `.localhost` is reserved for loopback by RFC
+ * 6761, `[::1]` is IPv6 loopback, and the whole 127/8 block is loopback. The
+ * 127/8 test is anchored to four octets so `127.0.0.1.evil.com` stays remote.
+ */
+function isLoopbackHost(hostname: string): boolean {
+  return (
+    hostname === 'localhost' ||
+    hostname.endsWith('.localhost') ||
+    hostname === '[::1]' ||
+    /^127(?:\.\d{1,3}){3}$/.test(hostname)
+  );
+}
+
+/**
+ * Loopback origins the manifest declares in `egress`. The Designer grants
+ * `loopback-network` to the extension iframe only for approved versions whose
+ * manifest declares such an entry (webflow/webflow EXT-1727), so a declared
+ * loopback URL is a reviewed companion-software connection, not development
+ * residue. Non-loopback entries and unparseable entries are ignored here.
+ */
+function declaredLoopbackOrigins(inventory: FileEntry[]): Set<string> {
+  const origins = new Set<string>();
+  const manifest = inventory.find((file) => MANIFEST_PATH.test(file.path) && file.content);
+  if (!manifest?.content) return origins;
+  try {
+    const parsed = JSON.parse(manifest.content) as { egress?: unknown };
+    if (!Array.isArray(parsed.egress)) return origins;
+    for (const entry of parsed.egress) {
+      if (typeof entry !== 'string') continue;
+      try {
+        const url = new URL(entry);
+        if (isLoopbackHost(url.hostname)) origins.add(url.origin);
+      } catch {
+        // Not an absolute URL: declares nothing we can act on.
+      }
+    }
+  } catch {
+    // Unparseable manifest: no declarations.
+  }
+  return origins;
+}
+
+/** The absolute URL starting at `index`, as an origin, or null. */
+function urlOriginAt(content: string, index: number): string | null {
+  const window = content.slice(index, index + OVERRIDE_FROM_MATCH_WINDOW);
+  const match = /^[a-z][a-z0-9+.-]*:\/\/[^\s"'`<>)\]},;]+/i.exec(window);
+  if (!match) return null;
+  try {
+    return new URL(match[0]).origin;
+  } catch {
+    return null;
+  }
+}
+
+/** Character offset of a 1-based line/column pair. */
+function offsetOf(content: string, line: number, col: number): number {
+  let offset = 0;
+  let current = 1;
+  while (current < line) {
+    const next = content.indexOf('\n', offset);
+    if (next === -1) return -1;
+    offset = next + 1;
+    current++;
+  }
+  return offset + col - 1;
+}
+
+/**
+ * Route a localhost finding whose origin the manifest declares in `egress`
+ * to Manual review. Runs after the syntax-tree stage so a declared endpoint
+ * is not re-raised as a configured dev endpoint. The finding keeps a MUST
+ * severity (MEDIUM) at MEDIUM confidence, which the review layer labels
+ * `Manual review` and reads as `needs_review`: a reviewer confirms the
+ * local software authenticates callers and the listing states the
+ * requirement. An undeclared localhost reference is unchanged.
+ */
+function applyDeclaredEgress(inventory: FileEntry[], findings: Finding[]): number {
+  const declared = declaredLoopbackOrigins(inventory);
+  if (declared.size === 0) return 0;
+  const contentByPath = new Map<string, string>();
+  for (const file of inventory) {
+    if (file.content) contentByPath.set(file.path, file.content);
+  }
+  let routed = 0;
+  for (const finding of findings) {
+    if (finding.ruleId !== 'PROD-NO-LOCALHOST') continue;
+    const content = contentByPath.get(finding.filePath);
+    if (!content) continue;
+    const offset = offsetOf(content, finding.line, finding.col);
+    if (offset < 0) continue;
+    const origin = urlOriginAt(content, offset);
+    if (!origin || !declared.has(origin)) continue;
+    finding.severity = 'MEDIUM';
+    finding.reviewBucket = 'NEEDS_EXPLANATION';
+    finding.disposition = 'INFO';
+    if (finding.locationType !== 'COMMENT') finding.confidence = 'MEDIUM';
+    finding.confidenceReason = `Declared in webflow.json egress (${origin}): a loopback endpoint for software the user installs, which the Designer grants only to approved versions that declare it. Reviewer confirms the local software authenticates callers and the listing states the requirement.`;
+    routed++;
+  }
+  return routed;
+}
+
 /**
  * Pre-compiled matcher for performance
  */
@@ -306,6 +413,8 @@ export function runScan(
   // only through the caller-supplied onProgress callback.
   // Second stage: let the syntax tree settle what the regex could not.
   applyAstConfirmation(inventory, findings, onProgress);
+  // Third stage: a declared companion-software endpoint is a review question, not a dev leftover.
+  applyDeclaredEgress(inventory, findings);
 
   return findings;
 }

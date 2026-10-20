@@ -80,8 +80,9 @@ function hits(ruleId: string, matcherId: string, content: string, path = 'dist/a
 }
 
 describe('ruleset 1.9.0 reviewer-practice patterns', () => {
-  it('is version 1.9.0 and keeps every new matcher at MEDIUM confidence', () => {
-    expect(defaultRuleset.rulesetVersion.startsWith('1.9.0')).toBe(true);
+  it('ships in ruleset 1.9.0 or later and keeps every new matcher at MEDIUM confidence', () => {
+    const [major, minor] = defaultRuleset.rulesetVersion.split('.').map(Number);
+    expect(major === 1 && minor! >= 9).toBe(true);
     const ids = [
       'window-open-no-opener',
       'storage-set-credential-name',
