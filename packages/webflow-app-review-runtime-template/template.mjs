@@ -2,8 +2,8 @@ import { Template, waitForPort } from 'e2b';
 import { fileURLToPath } from 'node:url';
 
 export const BASE_IMAGE =
-  'node@sha256:a25e59a5562406b0a4f34ce94ccad6c3902dcf3269b40e1fe12d881090c6f9be';
-export const NODE_VERSION = '20.19.4';
+  'node@sha256:63538dfe497cc29dfafdda25ada09b46db68a3f4cc205abf1f5d6bf0913f3384';
+export const NODE_VERSION = '22.23.4';
 export const PLAYWRIGHT_VERSION = '1.61.1';
 export const RUNNER_PORT = 3_000;
 
