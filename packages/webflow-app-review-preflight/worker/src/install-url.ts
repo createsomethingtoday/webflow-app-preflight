@@ -351,6 +351,26 @@ export function checkInstallUrlString(input: InstallUrlCheckInput): InstallUrlSt
           message: 'redirect_uri is pinned in the install URL. It must match the redirect URI registered for the app.'
         });
       }
+      if (required) {
+        // Ruling 2026-09-17: the listing install URL must be a developer-owned
+        // endpoint that mints `state` per request. A bare authorize link cannot
+        // do that, and a fixed `state` breaks every install that starts from the
+        // listing when the redirect page expects a popup opener (Monotype v0).
+        if (authorize.hasState) {
+          findings.push({
+            rule: 'IU-7',
+            severity: 'warn',
+            message:
+              'state is fixed in the install URL, so every install reuses the same value. Mint state per request from an endpoint you own; a fixed value fails the OAuth state check in review.'
+          });
+        }
+        findings.push({
+          rule: 'IU-7',
+          severity: 'warn',
+          message:
+            'The install URL is Webflow\'s authorize page. Data Client and Hybrid apps need an install URL on a domain you own that mints state per request and then redirects to webflow.com/oauth/authorize.'
+        });
+      }
       findings.push(...compareScopes(authorize.scopes, configuredScopes));
     }
   }

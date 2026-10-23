@@ -77,7 +77,10 @@ describe('Tier 1: install URL string rules', () => {
 
   test('validates bare authorize URLs against the submission', () => {
     const ok = checkInstallUrlString({ installUrl: BARE, clientId: CLIENT_ID, ...DATA_CLIENT });
-    expect(ok.verdict).toBe('pass');
+    // A bare authorize link is not developer-owned (ruling 2026-09-17): recorded, not blocked.
+    expect(ok.verdict).toBe('warn');
+    expect(rules(ok, 'warn')).toEqual(['IU-7']);
+    expect(ok.findings.map((finding) => finding.message).join(' ')).toContain('domain you own');
     expect(ok.authorize).toEqual({
       clientId: CLIENT_ID,
       scopes: ['sites:read', 'cms:read'],
@@ -93,13 +96,29 @@ describe('Tier 1: install URL string rules', () => {
     expect(rules(noType, 'block')).toEqual(['IU-7']);
 
     const workspace = checkInstallUrlString({ installUrl: `${BARE}&workspace=acme`, ...DATA_CLIENT });
-    expect(rules(workspace, 'warn')).toEqual(['IU-7']);
+    expect(rules(workspace, 'warn')).toEqual(['IU-7', 'IU-7']);
 
     const login = checkInstallUrlString({
       installUrl: 'https://webflow.com/dashboard/login?r=https%3A%2F%2Fwebflow.com%2Foauth%2Fauthorize',
       ...DATA_CLIENT
     });
     expect(rules(login, 'block')).toEqual(['IU-7']);
+  });
+
+  test('warns on a fixed state in a listing authorize URL, and stays quiet for Designer Extensions', () => {
+    const fixedState = checkInstallUrlString({
+      installUrl: `${BARE}&state=6a925eec-0772-4388-a0e9-862ef194da1e%3Ahttps%3A%2F%2Fabc.webflow-ext.com`,
+      clientId: CLIENT_ID,
+      capabilities: ['Hybrid']
+    });
+    expect(fixedState.verdict).toBe('warn');
+    expect(fixedState.authorize?.hasState).toBe(true);
+    const messages = fixedState.findings.filter((finding) => finding.severity === 'warn').map((finding) => finding.message);
+    expect(messages.some((message) => message.includes('state is fixed'))).toBe(true);
+    expect(messages.some((message) => message.includes('domain you own'))).toBe(true);
+
+    const extension = checkInstallUrlString({ installUrl: `${BARE}&state=abc`, clientId: CLIENT_ID, capabilities: 'Designer Extension' });
+    expect(rules(extension, 'warn')).toEqual([]);
   });
 
   test('compares requested scopes with configured scopes when the caller supplies them', () => {
@@ -110,7 +129,8 @@ describe('Tier 1: install URL string rules', () => {
       configuredScopes: ['sites:read', 'cms:read', 'forms:read'],
       ...DATA_CLIENT
     });
-    expect(rules(missing, 'warn')).toEqual(['IU-8']);
+    // IU-7 is the bare-authorize (not developer-owned) warning; IU-8 is the scope gap.
+    expect(rules(missing, 'warn')).toEqual(['IU-7', 'IU-8']);
     expect(rules(missing, 'block')).toEqual([]);
   });
 });
