@@ -127,8 +127,8 @@ export function runtimeIssues(testPackage: RuntimeTestPackageView): RuntimeIssue
     if (pageFiles.length > 0) {
       issues.push({
         title: 'Script integrity is missing or wrong',
-        detail: 'A page-loaded script does not use the SRI value saved in this test package.',
-        nextMove: 'Add the saved integrity value and crossorigin="anonymous" to each script tag. Make sure the CDN allows cross-origin SRI.',
+        detail: 'A page-loaded script has no integrity attribute, or its value does not match the reviewed bytes.',
+        nextMove: 'Add the saved integrity value (or a sha384/sha512 SRI of the same bytes) and crossorigin="anonymous" to each script tag. Make sure the CDN allows cross-origin SRI.',
         urls: pageFiles
       });
     }
@@ -174,9 +174,9 @@ export function runtimeIssues(testPackage: RuntimeTestPackageView): RuntimeIssue
   if (evidence.securityPredicates.runtimeSourceMapAvailable === false) {
     issues.push({
       title: 'Runtime is not traceable to source',
-      detail: 'A pinned runtime served no reachable source map, so the executed code cannot be read alongside the bytes that ran.',
-      nextMove: 'Publish a source map next to each runtime file, or supply readable source matching the served runtime for a Webflow reviewer to confirm manually.',
-      urls: failedFiles((file) => !file.sourceMapAvailable)
+      detail: 'A pinned runtime served no reachable source map and matched no file in an unchanged-source review ZIP, so the executed code cannot be read alongside the bytes that ran.',
+      nextMove: 'Publish a source map next to each runtime file, include the served file unchanged in the review ZIP, or supply readable source matching the served runtime for a Webflow reviewer to confirm manually.',
+      urls: failedFiles((file) => !file.sourceMapAvailable && !file.reviewedSourceMatched)
     });
   }
   return issues;
@@ -920,10 +920,18 @@ function RuntimeObservationCard({
                                 ? 'SRI matched'
                                 : 'SRI mismatch'}
                           </span>
-                          <span className={runtimeFile.sourceMapAvailable ? 'pass' : 'fail'}>
+                          <span
+                            className={
+                              runtimeFile.sourceMapAvailable || runtimeFile.reviewedSourceMatched
+                                ? 'pass'
+                                : 'fail'
+                            }
+                          >
                             {runtimeFile.sourceMapAvailable
                               ? 'Source map reachable'
-                              : 'No source map'}
+                              : runtimeFile.reviewedSourceMatched
+                                ? 'Matches review ZIP'
+                                : 'No source map'}
                           </span>
                         </div>
                       </li>
@@ -1246,7 +1254,8 @@ openssl dgst -sha256 -binary /tmp/reviewed-runtime.js \\
                     />
                     <small>
                       This app calculates SRI from the SHA-256 above. For a page-loaded file,
-                      publish this exact value in the script's <code>integrity</code> attribute.
+                      publish this value in the script's <code>integrity</code> attribute; a
+                      sha384 or sha512 SRI of the same bytes also passes.
                       For a child file, it remains the human-readable form of the verified pin.
                     </small>
                   </label>

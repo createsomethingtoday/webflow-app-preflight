@@ -390,6 +390,30 @@ describe('runtime observation runner boundaries', () => {
     expect(manifest.runtimeReadyObserved).toBe(true);
   }, 30_000);
 
+  test('reports every SRI form of the executed bytes so a page may publish sha384 or sha512', async () => {
+    const runtimeSource = 'document.body.setAttribute("data-runtime-ready", "sha384");';
+    const sha384 = `sha384-${createHash('sha384').update(runtimeSource).digest('base64')}`;
+    const sha512 = `sha512-${createHash('sha512').update(runtimeSource).digest('base64')}`;
+    let pinnedSha256 = '';
+    const { manifest } = await runAdversarialFixture({
+      proxyStatus: 403,
+      runtimeSource,
+      markup: (integrity) => {
+        pinnedSha256 = integrity;
+        return `<script src="/runtime-v1.js" integrity="${sha384}" crossorigin="anonymous"></script>`;
+      }
+    });
+
+    const observations = manifest.runtimeArtifacts as Array<{
+      loadedByPage: boolean;
+      domIntegrity: string | null;
+      observedIntegrity: string[];
+    }>;
+    expect(observations[0]?.loadedByPage).toBe(true);
+    expect(observations[0]?.domIntegrity).toBe(sha384);
+    expect(observations[0]?.observedIntegrity).toEqual([pinnedSha256, sha384, sha512]);
+  }, 30_000);
+
   test('does not treat a fetched but unexecuted pinned script as loaded', async () => {
     const { manifest, networkLog } = await runAdversarialFixture({
       proxyStatus: 403,

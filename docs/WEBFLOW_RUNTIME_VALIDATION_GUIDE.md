@@ -130,7 +130,7 @@ curl --fail --silent --show-error --location \
   | grep -i '^access-control-allow-origin:'
 ```
 
-If the command prints a valid header, publish the script with the calculated `integrity` value and `crossorigin="anonymous"`.
+If the command prints a valid header, publish the script with the calculated `integrity` value and `crossorigin="anonymous"`. A `sha384-` or `sha512-` SRI of the same bytes also passes; browsers enforce the strongest algorithm in the attribute, and Preflight checks the same one.
 
 If it prints nothing, do not add those two attributes. The browser would block the runtime before it could initialize. Keep the calculated SHA-256 and SRI in the Runtime Test Package, run the observation, and expect a clear browser-SRI blocker. Ask the runtime vendor to add CORS before expecting that predicate to pass.
 
@@ -208,8 +208,9 @@ For every declared file, check:
 - **SRI matched** - a page-loaded file carried the expected DOM SRI
 - **Pinned parent verified** - a child file was initiated by another pinned runtime
 - **Source map reachable** - the served file published a `sourceMappingURL` the service could retrieve
+- **Matches review ZIP** - the served bytes equal a file in the unchanged-source review ZIP, so the reviewer already holds exactly what ran
 
-A hash pin proves *which* bytes ran. It does not make those bytes readable. **No source map** therefore returns a blocker even when every other predicate passes: the executed code cannot be read next to the reviewed source. This is a manual-review blocker rather than a violation, because readable source may have been supplied privately. Publish a source map beside each runtime file, or supply matching readable source and let a reviewer confirm it.
+A hash pin proves *which* bytes ran. It does not make those bytes readable. **No source map** therefore returns a blocker even when every other predicate passes: the executed code cannot be read next to the reviewed source. This is a manual-review blocker rather than a violation, because readable source may have been supplied privately. Publish a source map beside each runtime file, include the served file unchanged in the review ZIP (with its README), or supply matching readable source and let a reviewer confirm it.
 
 ### Proxy result
 

@@ -49,6 +49,7 @@ interface RuntimeArtifactObservation {
   url: string;
   expectedSha256: string;
   observedSha256: string;
+  observedIntegrity: string[];
   integrity: string;
   domIntegrity: string | null;
   domCrossOrigin: string | null;
@@ -576,6 +577,11 @@ async function observeRuntimeArtifact(
     url: pin.url,
     expectedSha256: pin.sha256,
     observedSha256,
+    // Every SRI form of the executed bytes, so the worker can accept a page
+    // that publishes sha384/sha512 instead of the sha256 pin.
+    observedIntegrity: (['sha256', 'sha384', 'sha512'] as const).map(
+      (algorithm) => `${algorithm}-${createHash(algorithm).update(bytes).digest('base64')}`
+    ),
     integrity: pin.integrity,
     domIntegrity: scripts.find((script) => script.src === pin.url)?.integrity ?? null,
     domCrossOrigin: scripts.find((script) => script.src === pin.url)?.crossOrigin ?? null,

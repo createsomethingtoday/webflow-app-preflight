@@ -329,6 +329,98 @@ describe('review API', () => {
     expect(mapped.blockers).toEqual([]);
   });
 
+  test('accepts a sha384 or sha512 integrity attribute that pins the observed bytes', async () => {
+    const bytes = new TextEncoder().encode('document.body.setAttribute("data-runtime-ready", "");');
+    const base64Digest = async (algorithm: 'SHA-256' | 'SHA-384' | 'SHA-512') =>
+      btoa(String.fromCharCode(...new Uint8Array(await crypto.subtle.digest(algorithm, bytes))));
+    const sha256Hex = [...new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))]
+      .map((byte) => byte.toString(16).padStart(2, '0'))
+      .join('');
+    const pin = {
+      url: 'https://api.consentpro.com/v2/cdn/runtime.js',
+      sha256: sha256Hex,
+      integrity: `sha256-${await base64Digest('SHA-256')}`
+    };
+    const observedIntegrity = [
+      pin.integrity,
+      `sha384-${await base64Digest('SHA-384')}`,
+      `sha512-${await base64Digest('SHA-512')}`
+    ];
+    const contract = {
+      target: { url: 'https://consent-pro-test.webflow.io/', host: 'consent-pro-test.webflow.io' },
+      runtimeArtifacts: [pin],
+      negativeProxyProbe: {
+        mode: 'probe',
+        method: 'GET',
+        urlTemplate: 'https://api.consentpro.com/v2/proxy?url={canaryUrl}'
+      }
+    } as any;
+    const manifestFor = (domIntegrity: string | null, includeObserved = true) => ({
+      runtimeReadyObserved: true,
+      runtimeCreatedScripts: [],
+      unreviewedRuntimeScripts: [],
+      negativeProxyCanary: { outcome: 'blocked' },
+      runtimeArtifacts: [
+        {
+          url: pin.url,
+          observedSha256: pin.sha256,
+          loadedByPage: true,
+          domIntegrity,
+          sourceMap: { available: true, url: `${pin.url}.map` },
+          ...(includeObserved ? { observedIntegrity } : {})
+        }
+      ]
+    });
+    const integrityMatched = (domIntegrity: string | null, includeObserved = true) =>
+      evaluateRuntimeSecurity(manifestFor(domIntegrity, includeObserved), contract).predicates
+        .runtimeIntegrityMatched;
+
+    // The page may publish a stronger SRI of the same bytes than the sha256 pin.
+    expect(integrityMatched(observedIntegrity[1])).toBe(true);
+    expect(integrityMatched(`  ${observedIntegrity[2]}?ct=application/javascript `)).toBe(true);
+    expect(integrityMatched(pin.integrity)).toBe(true);
+    expect(evaluateRuntimeSecurity(manifestFor(observedIntegrity[1]), contract)).toMatchObject({
+      status: 'passed',
+      blockers: []
+    });
+
+    // Browsers accept base64url digests.
+    expect(
+      integrityMatched(observedIntegrity[2].replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''))
+    ).toBe(true);
+
+    // Browsers enforce only the strongest algorithm present, so a correct
+    // sha256 beside a wrong (or malformed) stronger token would block the
+    // load — and fails here too.
+    expect(integrityMatched(`${pin.integrity} sha384-${'A'.repeat(64)}`)).toBe(false);
+    expect(integrityMatched(`${pin.integrity} sha512-not-base64!`)).toBe(false);
+    expect(integrityMatched(`sha384-${'A'.repeat(64)}`)).toBe(false);
+    expect(integrityMatched('')).toBe(false);
+    expect(integrityMatched(null)).toBe(false);
+
+    // Evidence recorded before observedIntegrity existed keeps the exact-match rule.
+    expect(integrityMatched(observedIntegrity[1], false)).toBe(false);
+    expect(integrityMatched(pin.integrity, false)).toBe(true);
+
+    // A declared child runtime may carry no attribute, or one that pins its bytes.
+    const childContract = {
+      ...contract,
+      runtimeArtifacts: [{ ...pin, loadMode: 'runtime_child' }]
+    };
+    const childIntegrityMatched = (domIntegrity: string | null) => {
+      const manifest = manifestFor(domIntegrity);
+      manifest.runtimeArtifacts[0] = {
+        ...manifest.runtimeArtifacts[0],
+        loadedByPage: false,
+        trustedRuntimeInitiator: true
+      };
+      return evaluateRuntimeSecurity(manifest, childContract).predicates.runtimeIntegrityMatched;
+    };
+    expect(childIntegrityMatched(null)).toBe(true);
+    expect(childIntegrityMatched(observedIntegrity[1])).toBe(true);
+    expect(childIntegrityMatched(`sha384-${'A'.repeat(64)}`)).toBe(false);
+  });
+
   test('requires a source map for every pinned file in a runtime set', () => {
     const runtimeArtifacts = [
       {
@@ -373,6 +465,87 @@ describe('review API', () => {
 
     expect(result.predicates.runtimeSourceMapAvailable).toBe(false);
     expect(result.status).toBe('blocked');
+  });
+
+  test('accepts a served runtime that is byte-identical to an unchanged-source review file', () => {
+    const pin = {
+      url: 'https://api.consentpro.com/v2/cdn/runtime.js',
+      sha256: 'a'.repeat(64),
+      integrity: 'sha256-runtime'
+    };
+    const manifest = {
+      runtimeReadyObserved: true,
+      runtimeArtifacts: [
+        {
+          url: pin.url,
+          observedSha256: pin.sha256,
+          loadedByPage: true,
+          domIntegrity: pin.integrity,
+          sourceMap: { available: false }
+        }
+      ],
+      runtimeCreatedScripts: [],
+      unreviewedRuntimeScripts: [],
+      negativeProxyCanary: { outcome: 'blocked' }
+    };
+    const contractWith = (reviewedSourceSha256s?: string[]) =>
+      ({
+        target: {
+          url: 'https://consent-pro-test.webflow.io/',
+          host: 'consent-pro-test.webflow.io'
+        },
+        runtimeArtifacts: [pin],
+        ...(reviewedSourceSha256s ? { reviewedSourceSha256s } : {}),
+        negativeProxyProbe: {
+          mode: 'probe',
+          method: 'GET',
+          urlTemplate: 'https://api.consentpro.com/v2/proxy?url={canaryUrl}'
+        }
+      }) as any;
+
+    // The review ZIP held the served file unchanged: the reviewer holds what ran.
+    const matched = evaluateRuntimeSecurity(manifest, contractWith(['c'.repeat(64), pin.sha256]));
+    expect(matched.predicates.runtimeSourceMapAvailable).toBe(true);
+    expect(matched.status).toBe('passed');
+    expect(matched.blockers).toEqual([]);
+
+    // Other reviewed files, or no unchanged-source ZIP, change nothing.
+    for (const contract of [contractWith(['c'.repeat(64)]), contractWith()]) {
+      const unmatched = evaluateRuntimeSecurity(manifest, contract);
+      expect(unmatched.predicates.runtimeSourceMapAvailable).toBe(false);
+      expect(unmatched.status).toBe('blocked');
+      expect(unmatched.blockers).toHaveLength(1);
+      expect(unmatched.blockers[0]).toMatch(/readable source/i);
+    }
+
+    // Every pin must qualify, by a source map or by reviewed bytes.
+    const second = {
+      url: 'https://api.consentpro.com/v2/cdn/preferences.js',
+      sha256: 'b'.repeat(64),
+      integrity: 'sha256-preferences'
+    };
+    const twoPins = (secondHasSourceMap: boolean) => ({
+      ...manifest,
+      runtimeArtifacts: [
+        manifest.runtimeArtifacts[0],
+        {
+          url: second.url,
+          observedSha256: second.sha256,
+          loadedByPage: true,
+          domIntegrity: second.integrity,
+          sourceMap: secondHasSourceMap
+            ? { available: true, url: `${second.url}.map` }
+            : { available: false }
+        }
+      ]
+    });
+    const twoPinContract = { ...contractWith([pin.sha256]), runtimeArtifacts: [pin, second] };
+    expect(
+      evaluateRuntimeSecurity(twoPins(true), twoPinContract).predicates.runtimeSourceMapAvailable
+    ).toBe(true);
+    expect(
+      evaluateRuntimeSecurity(twoPins(false), twoPinContract).predicates.runtimeSourceMapAvailable
+    ).toBe(false);
   });
 
   test('does not honor a runtime_child declaration for a script the page actually loaded', () => {
@@ -3864,6 +4037,228 @@ describe('review API', () => {
     } finally {
       await env.DB.prepare('DROP TRIGGER IF EXISTS test_expire_during_upload').run();
     }
+  });
+
+  test('accepts a sha384 page integrity only when the runner reports consistent executed-bytes tokens', async () => {
+    const form = new FormData();
+    form.set(
+      'bundle',
+      new File([await createBundle()], 'sri-algorithm.zip', { type: 'application/zip' })
+    );
+    const createdResponse = await exports.default.fetch(
+      new Request('https://preflight.test/v1/reviews', {
+        method: 'POST',
+        headers: { authorization: 'Bearer test-token', origin: 'http://localhost:1337' },
+        body: form
+      })
+    );
+    const created = await createdResponse.json<{
+      review: { id: string; latestVersion: { id: string; result: { artifact: { sha256: string } } } };
+    }>();
+    const testPackageId = await createReadyRuntimePackage(created.review.id);
+    const approved = await exports.default.fetch(
+      new Request(
+        `https://preflight.test/v1/runtime-test-packages/${testPackageId}/observation-jobs`,
+        {
+          method: 'POST',
+          headers: {
+            authorization: 'Bearer coordinator-test-token',
+            'content-type': 'application/json'
+          },
+          body: JSON.stringify({ approved: true, sandboxOwnershipVerified: true })
+        }
+      )
+    );
+    expect(approved.status).toBe(201);
+    const job = (
+      await approved.json<{
+        observationJob: {
+          id: string;
+          capability: string;
+          contract: { nonce: string; target: { url: string } };
+        };
+      }>()
+    ).observationJob;
+    const running = await exports.default.fetch(
+      new Request(`https://preflight.test/v1/runtime-observation-jobs/${job.id}`, {
+        headers: { authorization: `Bearer ${job.capability}` }
+      })
+    );
+    expect(running.status).toBe(200);
+
+    const screenshot = new Uint8Array([
+      0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x01
+    ]);
+    const screenshotSha256 = await sha256Hex(screenshot);
+    // The page publishes sha384; only the trusted runner can vouch that it
+    // digests the executed bytes.
+    const pageSha384 = `sha384-${btoa(String.fromCharCode(...new Uint8Array(48).fill(0xbb)))}`;
+    const manifestWith = (observedIntegrity: string[]) => ({
+      schemaVersion: 'runtime_observation_evidence.v1',
+      observationJobId: job.id,
+      testPackageId,
+      reviewVersionId: created.review.latestVersion.id,
+      bundleSha256: created.review.latestVersion.result.artifact.sha256,
+      nonce: job.contract.nonce,
+      targetUrl: job.contract.target.url,
+      trust: 'webflow_observed',
+      executionEvidence: 'chromium_cdp_v1',
+      startedAt: new Date().toISOString(),
+      finishedAt: new Date().toISOString(),
+      redaction: {
+        applied: true,
+        headersRemoved: true,
+        cookiesRemoved: true,
+        formValuesMasked: true
+      },
+      runtimeReadyObserved: true,
+      runtimeArtifacts: [
+        {
+          url: 'http://127.0.0.1:4173/runtime-v1.js',
+          expectedSha256: 'a'.repeat(64),
+          observedSha256: 'a'.repeat(64),
+          observedIntegrity,
+          integrity: TEST_RUNTIME_INTEGRITY,
+          domIntegrity: pageSha384,
+          domCrossOrigin: 'anonymous',
+          loadedByPage: true,
+          trustedRuntimeInitiator: false,
+          sourceMap: { available: false }
+        }
+      ],
+      runtimeCreatedScripts: [],
+      unreviewedRuntimeScripts: [],
+      cleanup: { status: 'not_tested', residue: [] },
+      negativeProxyCanary: {
+        url: 'http://127.0.0.1:4174/webflow-runtime-canary',
+        outcome: 'blocked',
+        statusCode: 403
+      },
+      artifacts: [
+        {
+          field: 'screenshot_after_observation',
+          kind: 'screenshot_after_observation',
+          fileName: 'after-observation.png',
+          contentType: 'image/png',
+          bytes: screenshot.byteLength,
+          sha256: screenshotSha256
+        }
+      ]
+    });
+    const upload = (observedIntegrity: string[]) => {
+      const evidence = new FormData();
+      evidence.set('manifest', JSON.stringify(manifestWith(observedIntegrity)));
+      evidence.set(
+        'screenshot_after_observation',
+        new File([screenshot], 'after-observation.png', { type: 'image/png' })
+      );
+      return exports.default.fetch(
+        new Request(`https://preflight.test/v1/runtime-observation-jobs/${job.id}/evidence`, {
+          method: 'POST',
+          headers: { authorization: `Bearer ${job.capability}` },
+          body: evidence
+        })
+      );
+    };
+
+    // Tokens whose sha256 form disagrees with observedSha256 cannot vouch for
+    // the executed bytes: the whole upload is refused before the job is claimed.
+    const forged = await upload([TEST_RUNTIME_INTEGRITY.replace(/o=$/, 'p='), pageSha384]);
+    expect(forged.status).toBe(400);
+    await expect(forged.json()).resolves.toMatchObject({
+      error: 'invalid_runtime_observation_evidence',
+      message: expect.stringMatching(/inconsistent integrity tokens/i)
+    });
+    const duplicated = await upload([TEST_RUNTIME_INTEGRITY, TEST_RUNTIME_INTEGRITY]);
+    expect(duplicated.status).toBe(400);
+
+    const accepted = await upload([TEST_RUNTIME_INTEGRITY, pageSha384]);
+    expect(accepted.status).toBe(200);
+    const stored = await env.DB.prepare(
+      'SELECT evidence_manifest_json FROM runtime_observation_jobs WHERE id = ?'
+    )
+      .bind(job.id)
+      .first<{ evidence_manifest_json: string }>();
+    const evaluation = JSON.parse(stored!.evidence_manifest_json).securityEvaluation as {
+      predicates: { runtimeIntegrityMatched: boolean; runtimeHashMatched: boolean };
+      blockers: string[];
+    };
+    expect(evaluation.predicates.runtimeIntegrityMatched).toBe(true);
+    expect(evaluation.predicates.runtimeHashMatched).toBe(true);
+    expect(evaluation.blockers).not.toContainEqual(expect.stringMatching(/pinned SRI/));
+  });
+
+  test('carries unchanged-source review hashes on the observation contract', async () => {
+    const approveJob = async (reviewId: string) => {
+      const testPackageId = await createReadyRuntimePackage(reviewId);
+      const approved = await exports.default.fetch(
+        new Request(
+          `https://preflight.test/v1/runtime-test-packages/${testPackageId}/observation-jobs`,
+          {
+            method: 'POST',
+            headers: {
+              authorization: 'Bearer coordinator-test-token',
+              'content-type': 'application/json'
+            },
+            body: JSON.stringify({ approved: true, sandboxOwnershipVerified: true })
+          }
+        )
+      );
+      expect(approved.status).toBe(201);
+      return (
+        await approved.json<{
+          observationJob: { contract: { reviewedSourceSha256s?: string[] } };
+        }>()
+      ).observationJob.contract;
+    };
+    const createReview = async (form: FormData) => {
+      const response = await exports.default.fetch(
+        new Request('https://preflight.test/v1/reviews', {
+          method: 'POST',
+          headers: { authorization: 'Bearer test-token', origin: 'http://localhost:1337' },
+          body: form
+        })
+      );
+      expect(response.status).toBe(201);
+      return (await response.json<{ review: { id: string } }>()).review.id;
+    };
+
+    // The same bytes as the bundle's assets/index.js, shipped unchanged.
+    const indexSource = [
+      'const API = "https://api.consentpro.com";',
+      'const runtime = "/v2/cdn/runtime.js";',
+      'const script = document.createElement("script");',
+      'script.src = runtime;'
+    ].join('\n');
+    const reviewZip = new JSZip();
+    reviewZip.file('src/index.js', indexSource);
+    reviewZip.file('src/styles.css', 'body { margin: 0 }');
+    reviewZip.file('README.md', 'Shipped as-is: assets/ is copied into the bundle without a build step.');
+    const unchangedForm = new FormData();
+    unchangedForm.set(
+      'bundle',
+      new File([await createBundle()], 'unchanged-source.zip', { type: 'application/zip' })
+    );
+    unchangedForm.set(
+      'sourceMaps',
+      new File([await reviewZip.generateAsync({ type: 'uint8array' })], 'review.zip', {
+        type: 'application/zip'
+      })
+    );
+    const unchanged = await approveJob(await createReview(unchangedForm));
+    // Only JavaScript files qualify: the stylesheet is not a runtime.
+    expect(unchanged.reviewedSourceSha256s).toEqual([await sha256Hex(indexSource)]);
+
+    // No review ZIP: the contract carries no hashes at all.
+    const plainForm = new FormData();
+    plainForm.set(
+      'bundle',
+      new File([await createBundle({ seed: 'no-review-zip' })], 'plain.zip', {
+        type: 'application/zip'
+      })
+    );
+    const plain = await approveJob(await createReview(plainForm));
+    expect(plain).not.toHaveProperty('reviewedSourceSha256s');
   });
 
   test('gives uploading jobs a grace window before the cron expiry sweep reclaims them', async () => {

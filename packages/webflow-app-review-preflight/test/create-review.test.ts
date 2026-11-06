@@ -379,6 +379,13 @@ describe('createBundleReview', () => {
     expect(review.artifact.sourceMaps?.shape).toBe('unchanged-source');
     expect(review.artifact.sourceMaps?.mapFileCount).toBe(0);
     expect(review.artifact.sourceMaps?.sourceFileCount).toBe(1);
+    // The runtime observation matches served bytes against these hashes.
+    const sourceSha256 = [
+      ...new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(source)))
+    ]
+      .map((byte) => byte.toString(16).padStart(2, '0'))
+      .join('');
+    expect(review.artifact.sourceMaps?.sourceFileSha256s).toEqual([sourceSha256]);
     expect(review.guidance.find((item) => item.id === 'SRC-REVIEW-FILES-MISMATCH')).toBeUndefined();
     expect(review.guidance.find((item) => item.id === 'PROD-PACKAGE-MANIFEST')).toBeUndefined();
     expect(review.guidance.find((item) => item.id === 'SRC-MAP-CORRESPONDENCE')).toBeUndefined();

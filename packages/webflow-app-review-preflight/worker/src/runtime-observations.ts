@@ -95,6 +95,33 @@ interface TestPackageRow {
   status: string;
   license_expires_at: string;
   package_json: string;
+  /** `json_extract` of the stored review: the review-ZIP shape, if any. */
+  review_source_shape: string | null;
+  /** `json_extract` of the stored review: JSON array of unchanged-source hashes. */
+  review_source_sha256s: string | null;
+}
+
+/** Parse a JSON array column into the lowercase hex SHA-256 values it holds. */
+function parseSha256List(json: string | null): string[] {
+  if (!json) return [];
+  try {
+    const value = JSON.parse(json) as unknown;
+    return Array.isArray(value)
+      ? value.filter((item): item is string => typeof item === 'string' && HEX_SHA256.test(item))
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Hashes of the review version's unchanged-source files, if the developer
+ * supplied that review-ZIP shape. Extracted in SQL from the stored review so
+ * the runtime contract carries the same acceptance the static review applied
+ * without loading the whole review document.
+ */
+function reviewedSourceHashes(shape: string | null, sha256sJson: string | null): string[] {
+  return shape === 'unchanged-source' ? parseSha256List(sha256sJson) : [];
 }
 
 interface ObservationJobRow {
@@ -323,11 +350,7 @@ function parseArtifacts(value: unknown, env: Env): RuntimeArtifactPin[] {
     ) {
       throw new RuntimeTestPackageError(`${file}: provide a SHA-256 SRI value.`);
     }
-    const digestBytes = artifact.sha256
-      .match(/.{2}/g)!
-      .map((pair) => String.fromCharCode(Number.parseInt(pair, 16)))
-      .join('');
-    if (artifact.integrity !== `sha256-${btoa(digestBytes)}`) {
+    if (artifact.integrity !== sriFromHexSha256(artifact.sha256)) {
       throw new RuntimeTestPackageError(
         `${file}: the SHA-256 and SRI must describe the same SHA-256 bytes.`
       );
@@ -601,6 +624,7 @@ export async function listRuntimeTestPackages(
             j.id AS job_id, j.status AS job_status,
             j.approved_at, j.expires_at, j.consumed_at,
             j.evidence_trust, j.evidence_manifest_json,
+            json_extract(j.contract_json, '$.reviewedSourceSha256s') AS reviewed_source_sha256s,
             (SELECT COUNT(*)
                FROM runtime_observation_artifacts a
               WHERE a.observation_job_id = j.id) AS artifact_count
@@ -628,6 +652,7 @@ export async function listRuntimeTestPackages(
       consumed_at: string | null;
       evidence_trust: 'webflow_observed' | null;
       evidence_manifest_json: string | null;
+      reviewed_source_sha256s: string | null;
       artifact_count: number;
     }>();
 
@@ -673,8 +698,17 @@ export async function listRuntimeTestPackages(
               item !== null && typeof item === 'object' && !Array.isArray(item)
           )
         : [];
+      const reviewedSource = new Set(parseSha256List(row.reviewed_source_sha256s));
       const runtimeFiles = testPackage.runtimeArtifacts.map((pin) => {
         const observed = runtimeObservations.find((item) => item.url === pin.url);
+        // Same rule as evaluateRuntimeSecurity: any observation of this URL
+        // whose bytes equal a reviewed file.
+        const reviewedSourceMatched = runtimeObservations.some(
+          (item) =>
+            item.url === pin.url &&
+            typeof item.observedSha256 === 'string' &&
+            reviewedSource.has(item.observedSha256)
+        );
         // Mirrors evaluateRuntimeSecurity: a runtime_child declaration counts
         // only when the observation proves the file was runtime-created.
         const observedAsChild =
@@ -690,12 +724,22 @@ export async function listRuntimeTestPackages(
           integrityMatched:
             (pin.loadMode ?? 'document') === 'runtime_child'
               ? observedAsChild &&
-                (observed?.domIntegrity === null || observed?.domIntegrity === pin.integrity)
-              : observed?.domIntegrity === pin.integrity,
+                (observed?.domIntegrity === null ||
+                  domIntegrityPinsObservedBytes(
+                    observed?.domIntegrity,
+                    pin.integrity,
+                    observed?.observedIntegrity
+                  ))
+              : domIntegrityPinsObservedBytes(
+                  observed?.domIntegrity,
+                  pin.integrity,
+                  observed?.observedIntegrity
+                ),
           sourceMapAvailable: observedSourceMap?.available === true,
           ...(typeof observedSourceMap?.url === 'string'
             ? { sourceMapUrl: observedSourceMap.url }
-            : {})
+            : {}),
+          ...(reviewedSourceMatched ? { reviewedSourceMatched: true } : {})
         };
       });
       const artifactRows =
@@ -967,6 +1011,24 @@ function validateManifest(
         `Runtime observation for ${pin.url} is incomplete or substituted.`
       );
     }
+    // Optional (runners predating it omit it). When present it must be the
+    // runner's own digests of the executed bytes: its sha256 form must agree
+    // with observedSha256, so the tokens cannot vouch for different bytes.
+    if (record.observedIntegrity !== undefined) {
+      const tokens = record.observedIntegrity;
+      if (
+        !Array.isArray(tokens) ||
+        tokens.length === 0 ||
+        tokens.length > SRI_ALGORITHMS.length ||
+        tokens.some((token) => typeof token !== 'string' || !SRI_TOKEN.test(token)) ||
+        new Set(tokens.map((token) => String(token).slice(0, 6))).size !== tokens.length ||
+        !tokens.includes(sriFromHexSha256(String(record.observedSha256)))
+      ) {
+        throw new RuntimeObservationEvidenceError(
+          `Runtime observation for ${pin.url} reports inconsistent integrity tokens.`
+        );
+      }
+    }
     const sourceMap = requireRecord(record.sourceMap, 'Source-map observation');
     if (typeof sourceMap.available !== 'boolean') {
       throw new RuntimeObservationEvidenceError('Source-map availability must be recorded.');
@@ -1081,6 +1143,67 @@ function validateManifest(
   return Object.assign(manifest, { artifacts });
 }
 
+const SRI_ALGORITHMS = ['sha256', 'sha384', 'sha512'] as const;
+// Runner-reported tokens: standard base64 only.
+const SRI_TOKEN = /^(?:sha256|sha384|sha512)-[A-Za-z0-9+/]+={0,2}$/;
+// Page-authored tokens: a known algorithm with any digest text. A malformed
+// digest still counts as that algorithm being present (the browser would
+// enforce it and fail), and base64url spellings are normalized before
+// comparison because browsers accept them.
+const DOM_SRI_TOKEN = /^(sha256|sha384|sha512)-(\S+)$/;
+
+function sriFromHexSha256(hex: string): string {
+  const digestBytes = hex
+    .match(/.{2}/g)!
+    .map((pair) => String.fromCharCode(Number.parseInt(pair, 16)))
+    .join('');
+  return `sha256-${btoa(digestBytes)}`;
+}
+
+function normalizeSriToken(token: string): string {
+  const match = token.match(DOM_SRI_TOKEN);
+  if (!match) return token;
+  const digest = match[2].replace(/-/g, '+').replace(/_/g, '/').replace(/=+$/, '');
+  return `${match[1]}-${digest}${'='.repeat((4 - (digest.length % 4)) % 4)}`;
+}
+
+/**
+ * Whether a script's DOM `integrity` attribute pins the bytes the sandbox
+ * executed. Browser semantics apply: the attribute may carry several
+ * whitespace-separated tokens (each optionally suffixed with `?options`), and
+ * only the strongest algorithm present is enforced, any one of its tokens
+ * matching. A token matches when it equals a token the server-owned runner
+ * computed from the executed bytes, so the attribute pins what actually ran
+ * and a page may publish sha384 or sha512 instead of the sha256 pin the
+ * extension calculates. Evidence recorded before `observedIntegrity` existed
+ * keeps the exact-match rule against the pin.
+ */
+function domIntegrityPinsObservedBytes(
+  domIntegrity: unknown,
+  pinIntegrity: string,
+  observedIntegrity: unknown
+): boolean {
+  if (typeof domIntegrity !== 'string') return false;
+  if (!Array.isArray(observedIntegrity)) return domIntegrity === pinIntegrity;
+  const tokens = domIntegrity
+    .split(/[ \t\n\f\r]+/)
+    .map((token) => token.split('?')[0])
+    .filter((token) => DOM_SRI_TOKEN.test(token));
+  if (tokens.length === 0) return false;
+  const present = SRI_ALGORITHMS.filter((algorithm) =>
+    tokens.some((token) => token.startsWith(`${algorithm}-`))
+  );
+  const strongest = present[present.length - 1];
+  const observed = new Set(
+    observedIntegrity
+      .filter((token): token is string => typeof token === 'string')
+      .map(normalizeSriToken)
+  );
+  return tokens.some(
+    (token) => token.startsWith(`${strongest}-`) && observed.has(normalizeSriToken(token))
+  );
+}
+
 export function evaluateRuntimeSecurity(
   manifest: Record<string, unknown>,
   contract: RuntimeObservationJobContract
@@ -1101,6 +1224,7 @@ export function evaluateRuntimeSecurity(
   // an ordinary page-loaded script.
   const observedAsChild = (item: Record<string, unknown>): boolean =>
     item.loadedByPage === false && item.trustedRuntimeInitiator === true;
+  const reviewedSource = new Set(contract.reviewedSourceSha256s ?? []);
 
   const predicates: RuntimeSecurityPredicates = {
     publishedTarget:
@@ -1127,8 +1251,17 @@ export function evaluateRuntimeSecurity(
           item.url === pin.url &&
           ((pin.loadMode ?? 'document') === 'runtime_child'
             ? observedAsChild(item) &&
-              (item.domIntegrity === null || item.domIntegrity === pin.integrity)
-            : item.domIntegrity === pin.integrity)
+              (item.domIntegrity === null ||
+                domIntegrityPinsObservedBytes(
+                  item.domIntegrity,
+                  pin.integrity,
+                  item.observedIntegrity
+                ))
+            : domIntegrityPinsObservedBytes(
+                item.domIntegrity,
+                pin.integrity,
+                item.observedIntegrity
+              ))
       )
     ),
     noRuntimeCreatedScripts:
@@ -1150,11 +1283,15 @@ export function evaluateRuntimeSecurity(
     // claim — but its absence is not automatically a violation, since a
     // partner may supply readable source privately. Like a no-proxy
     // declaration, it therefore yields a mandatory manual-review blocker.
+    // A served file whose bytes equal a file in the unchanged-source review
+    // ZIP is its own readable source: the reviewer holds exactly what ran.
     runtimeSourceMapAvailable: contract.runtimeArtifacts.every((pin) =>
       observations.some(
         (item) =>
           item.url === pin.url &&
-          (item.sourceMap as { available?: unknown } | undefined)?.available === true
+          ((item.sourceMap as { available?: unknown } | undefined)?.available === true ||
+            (typeof item.observedSha256 === 'string' &&
+              reviewedSource.has(item.observedSha256)))
       )
     )
   };
@@ -1184,7 +1321,7 @@ export function evaluateRuntimeSecurity(
         : 'The negative proxy canary was not blocked.'
       : null,
     !predicates.runtimeSourceMapAvailable
-      ? 'A pinned runtime exposed no reachable source map, so the executed bytes cannot be traced to readable source. A Webflow reviewer must manually confirm readable source matching the served runtime was supplied before this check can pass.'
+      ? 'A pinned runtime exposed no reachable source map and matched no file in an unchanged-source review ZIP, so the executed bytes cannot be traced to readable source. A Webflow reviewer must manually confirm readable source matching the served runtime was supplied before this check can pass.'
       : null
   ].filter((item): item is string => item !== null);
   return {
@@ -1637,10 +1774,13 @@ async function issueRuntimeObservationJob(
   env: Env
 ): Promise<StoredRuntimeObservationJob | null> {
   const row = await env.DB.prepare(
-    `SELECT id, review_version_id, owner_user_id, status,
-            license_expires_at, package_json
-       FROM runtime_test_packages
-      WHERE id = ?`
+    `SELECT p.id, p.review_version_id, p.owner_user_id, p.status,
+            p.license_expires_at, p.package_json,
+            json_extract(v.review_json, '$.artifact.sourceMaps.shape') AS review_source_shape,
+            json_extract(v.review_json, '$.artifact.sourceMaps.sourceFileSha256s') AS review_source_sha256s
+       FROM runtime_test_packages p
+       JOIN review_versions v ON v.id = p.review_version_id
+      WHERE p.id = ?`
   )
     .bind(testPackageId)
     .first<TestPackageRow>();
@@ -1701,10 +1841,15 @@ async function issueRuntimeObservationJob(
       'The runtime test package names too many distinct hosts for one sandbox egress allowlist.'
     );
   }
+  const reviewedSourceSha256s = reviewedSourceHashes(
+    row.review_source_shape,
+    row.review_source_sha256s
+  );
   const contract: RuntimeObservationJobContract = {
     schemaVersion: 'runtime_observation_job.v1',
     purpose: 'webflow_observation',
     testPackageId: testPackage.id,
+    ...(reviewedSourceSha256s.length > 0 ? { reviewedSourceSha256s } : {}),
     reviewId: testPackage.reviewId,
     reviewVersionId: testPackage.reviewVersionId,
     bundleSha256: testPackage.bundleSha256,
