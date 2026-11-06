@@ -101,6 +101,11 @@ export interface BundleReview {
       shape: 'source-maps' | 'unchanged-source';
       /** Source files found in an unchanged-source ZIP (0 for source maps). */
       sourceFileCount: number;
+      /**
+       * SHA-256 of each unchanged-source file. Runtime evidence treats a
+       * served file with one of these hashes as readable source.
+       */
+      sourceFileSha256s?: string[];
     };
   };
   artifactScope: {
@@ -256,6 +261,12 @@ export interface RuntimeObservationJobContract {
   target: RuntimeTestPackage['target'];
   sandboxInstallationId: string;
   runtimeArtifacts: RuntimeArtifactPin[];
+  /**
+   * SHA-256 of the files in the review version's unchanged-source ZIP, when
+   * one was supplied. A served runtime with one of these hashes satisfies the
+   * readable-source predicate without a source map.
+   */
+  reviewedSourceSha256s?: string[];
   negativeProxyProbe:
     | {
         mode?: 'probe';
@@ -323,6 +334,8 @@ export interface RuntimeObservationSummary {
       integrityMatched: boolean;
       sourceMapAvailable: boolean;
       sourceMapUrl?: string;
+      /** The served bytes equal a file in the unchanged-source review ZIP. */
+      reviewedSourceMatched?: boolean;
     }>;
     cleanupStatus: 'clean' | 'residue_detected' | 'not_tested';
     cleanupResidue: string[];

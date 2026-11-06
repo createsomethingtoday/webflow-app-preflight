@@ -95,6 +95,43 @@ interface TestPackageRow {
   status: string;
   license_expires_at: string;
   package_json: string;
+  review_json: string;
+}
+
+/**
+ * Hashes of the review version's unchanged-source files, if the developer
+ * supplied that review-ZIP shape. Read from the stored review so the runtime
+ * contract carries the same acceptance the static review applied.
+ */
+function reviewedSourceHashes(reviewJson: string): string[] {
+  try {
+    const review = JSON.parse(reviewJson) as {
+      artifact?: { sourceMaps?: { shape?: unknown; sourceFileSha256s?: unknown } };
+    };
+    const sourceMaps = review.artifact?.sourceMaps;
+    if (sourceMaps?.shape !== 'unchanged-source' || !Array.isArray(sourceMaps.sourceFileSha256s)) {
+      return [];
+    }
+    return sourceMaps.sourceFileSha256s.filter(
+      (value): value is string => typeof value === 'string' && HEX_SHA256.test(value)
+    );
+  } catch {
+    return [];
+  }
+}
+
+function reviewedSourceHashesFromContract(contractJson: string | null): Set<string> {
+  if (!contractJson) return new Set();
+  try {
+    const contract = JSON.parse(contractJson) as { reviewedSourceSha256s?: unknown };
+    return new Set(
+      Array.isArray(contract.reviewedSourceSha256s)
+        ? contract.reviewedSourceSha256s.filter((value): value is string => typeof value === 'string')
+        : []
+    );
+  } catch {
+    return new Set();
+  }
 }
 
 interface ObservationJobRow {
@@ -596,7 +633,7 @@ export async function listRuntimeTestPackages(
     `SELECT p.package_json, p.status AS package_status,
             j.id AS job_id, j.status AS job_status,
             j.approved_at, j.expires_at, j.consumed_at,
-            j.evidence_trust, j.evidence_manifest_json,
+            j.evidence_trust, j.evidence_manifest_json, j.contract_json,
             (SELECT COUNT(*)
                FROM runtime_observation_artifacts a
               WHERE a.observation_job_id = j.id) AS artifact_count
@@ -624,6 +661,7 @@ export async function listRuntimeTestPackages(
       consumed_at: string | null;
       evidence_trust: 'webflow_observed' | null;
       evidence_manifest_json: string | null;
+      contract_json: string | null;
       artifact_count: number;
     }>();
 
@@ -669,6 +707,7 @@ export async function listRuntimeTestPackages(
               item !== null && typeof item === 'object' && !Array.isArray(item)
           )
         : [];
+      const reviewedSource = reviewedSourceHashesFromContract(row.contract_json);
       const runtimeFiles = testPackage.runtimeArtifacts.map((pin) => {
         const observed = runtimeObservations.find((item) => item.url === pin.url);
         // Mirrors evaluateRuntimeSecurity: a runtime_child declaration counts
@@ -700,6 +739,10 @@ export async function listRuntimeTestPackages(
           sourceMapAvailable: observedSourceMap?.available === true,
           ...(typeof observedSourceMap?.url === 'string'
             ? { sourceMapUrl: observedSourceMap.url }
+            : {}),
+          ...(typeof observed?.observedSha256 === 'string' &&
+          reviewedSource.has(observed.observedSha256)
+            ? { reviewedSourceMatched: true }
             : {})
         };
       });
@@ -1185,6 +1228,7 @@ export function evaluateRuntimeSecurity(
   // an ordinary page-loaded script.
   const observedAsChild = (item: Record<string, unknown>): boolean =>
     item.loadedByPage === false && item.trustedRuntimeInitiator === true;
+  const reviewedSource = new Set(contract.reviewedSourceSha256s ?? []);
 
   const predicates: RuntimeSecurityPredicates = {
     publishedTarget:
@@ -1243,11 +1287,15 @@ export function evaluateRuntimeSecurity(
     // claim — but its absence is not automatically a violation, since a
     // partner may supply readable source privately. Like a no-proxy
     // declaration, it therefore yields a mandatory manual-review blocker.
+    // A served file whose bytes equal a file in the unchanged-source review
+    // ZIP is its own readable source: the reviewer holds exactly what ran.
     runtimeSourceMapAvailable: contract.runtimeArtifacts.every((pin) =>
       observations.some(
         (item) =>
           item.url === pin.url &&
-          (item.sourceMap as { available?: unknown } | undefined)?.available === true
+          ((item.sourceMap as { available?: unknown } | undefined)?.available === true ||
+            (typeof item.observedSha256 === 'string' &&
+              reviewedSource.has(item.observedSha256)))
       )
     )
   };
@@ -1277,7 +1325,7 @@ export function evaluateRuntimeSecurity(
         : 'The negative proxy canary was not blocked.'
       : null,
     !predicates.runtimeSourceMapAvailable
-      ? 'A pinned runtime exposed no reachable source map, so the executed bytes cannot be traced to readable source. A Webflow reviewer must manually confirm readable source matching the served runtime was supplied before this check can pass.'
+      ? 'A pinned runtime exposed no reachable source map and matched no file in an unchanged-source review ZIP, so the executed bytes cannot be traced to readable source. A Webflow reviewer must manually confirm readable source matching the served runtime was supplied before this check can pass.'
       : null
   ].filter((item): item is string => item !== null);
   return {
@@ -1730,10 +1778,11 @@ async function issueRuntimeObservationJob(
   env: Env
 ): Promise<StoredRuntimeObservationJob | null> {
   const row = await env.DB.prepare(
-    `SELECT id, review_version_id, owner_user_id, status,
-            license_expires_at, package_json
-       FROM runtime_test_packages
-      WHERE id = ?`
+    `SELECT p.id, p.review_version_id, p.owner_user_id, p.status,
+            p.license_expires_at, p.package_json, v.review_json
+       FROM runtime_test_packages p
+       JOIN review_versions v ON v.id = p.review_version_id
+      WHERE p.id = ?`
   )
     .bind(testPackageId)
     .first<TestPackageRow>();
@@ -1794,10 +1843,12 @@ async function issueRuntimeObservationJob(
       'The runtime test package names too many distinct hosts for one sandbox egress allowlist.'
     );
   }
+  const reviewedSourceSha256s = reviewedSourceHashes(row.review_json);
   const contract: RuntimeObservationJobContract = {
     schemaVersion: 'runtime_observation_job.v1',
     purpose: 'webflow_observation',
     testPackageId: testPackage.id,
+    ...(reviewedSourceSha256s.length > 0 ? { reviewedSourceSha256s } : {}),
     reviewId: testPackage.reviewId,
     reviewVersionId: testPackage.reviewVersionId,
     bundleSha256: testPackage.bundleSha256,

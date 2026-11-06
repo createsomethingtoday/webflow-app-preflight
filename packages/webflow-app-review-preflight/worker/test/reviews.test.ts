@@ -467,6 +467,58 @@ describe('review API', () => {
     expect(result.status).toBe('blocked');
   });
 
+  test('accepts a served runtime that is byte-identical to an unchanged-source review file', () => {
+    const pin = {
+      url: 'https://api.consentpro.com/v2/cdn/runtime.js',
+      sha256: 'a'.repeat(64),
+      integrity: 'sha256-runtime'
+    };
+    const manifest = {
+      runtimeReadyObserved: true,
+      runtimeArtifacts: [
+        {
+          url: pin.url,
+          observedSha256: pin.sha256,
+          loadedByPage: true,
+          domIntegrity: pin.integrity,
+          sourceMap: { available: false }
+        }
+      ],
+      runtimeCreatedScripts: [],
+      unreviewedRuntimeScripts: [],
+      negativeProxyCanary: { outcome: 'blocked' }
+    };
+    const contractWith = (reviewedSourceSha256s?: string[]) =>
+      ({
+        target: {
+          url: 'https://consent-pro-test.webflow.io/',
+          host: 'consent-pro-test.webflow.io'
+        },
+        runtimeArtifacts: [pin],
+        ...(reviewedSourceSha256s ? { reviewedSourceSha256s } : {}),
+        negativeProxyProbe: {
+          mode: 'probe',
+          method: 'GET',
+          urlTemplate: 'https://api.consentpro.com/v2/proxy?url={canaryUrl}'
+        }
+      }) as any;
+
+    // The review ZIP held the served file unchanged: the reviewer holds what ran.
+    const matched = evaluateRuntimeSecurity(manifest, contractWith(['c'.repeat(64), pin.sha256]));
+    expect(matched.predicates.runtimeSourceMapAvailable).toBe(true);
+    expect(matched.status).toBe('passed');
+    expect(matched.blockers).toEqual([]);
+
+    // Other reviewed files, or no unchanged-source ZIP, change nothing.
+    for (const contract of [contractWith(['c'.repeat(64)]), contractWith()]) {
+      const unmatched = evaluateRuntimeSecurity(manifest, contract);
+      expect(unmatched.predicates.runtimeSourceMapAvailable).toBe(false);
+      expect(unmatched.status).toBe('blocked');
+      expect(unmatched.blockers).toHaveLength(1);
+      expect(unmatched.blockers[0]).toMatch(/readable source/i);
+    }
+  });
+
   test('does not honor a runtime_child declaration for a script the page actually loaded', () => {
     const runtimeArtifacts = [
       {

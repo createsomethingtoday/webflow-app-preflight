@@ -108,8 +108,23 @@ function toHex(bytes: ArrayBuffer): string {
   return [...new Uint8Array(bytes)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
 }
 
-async function sha256(bundle: ArrayBuffer): Promise<string> {
-  return toHex(await crypto.subtle.digest('SHA-256', bundle));
+async function sha256(bundle: ArrayBuffer | Uint8Array): Promise<string> {
+  return toHex(await crypto.subtle.digest('SHA-256', bundle as BufferSource));
+}
+
+const REVIEWED_SOURCE_HASH_LIMIT = 500;
+
+/**
+ * SHA-256 of every file in an unchanged-source review ZIP. Runtime evidence
+ * compares the bytes a published site actually served against this list, so
+ * a runtime that ships one of these files unchanged counts as readable
+ * source without a source map — the same acceptance the static review
+ * applies to the bundle.
+ */
+async function reviewedSourceHashes(artifact: ReviewArtifact | null): Promise<string[]> {
+  if (!artifact || artifact.shape !== 'unchanged-source') return [];
+  const hashes = await Promise.all(artifact.sourceFiles.map((file) => sha256(file.data)));
+  return [...new Set(hashes)].slice(0, REVIEWED_SOURCE_HASH_LIMIT);
 }
 
 const PACKAGE_MANIFEST_NAMES = new Set(['package.json']);
@@ -744,7 +759,10 @@ export async function createBundleReview(
               sha256: await sha256(input.sourceMapArtifact.bytes),
               mapFileCount: externalSourceMaps.length,
               shape: reviewArtifact?.shape ?? 'source-maps',
-              sourceFileCount: reviewArtifact?.sourceFiles.length ?? 0
+              sourceFileCount: reviewArtifact?.sourceFiles.length ?? 0,
+              ...(reviewArtifact?.shape === 'unchanged-source'
+                ? { sourceFileSha256s: await reviewedSourceHashes(reviewArtifact) }
+                : {})
             }
           }
         : {})

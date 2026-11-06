@@ -174,9 +174,9 @@ export function runtimeIssues(testPackage: RuntimeTestPackageView): RuntimeIssue
   if (evidence.securityPredicates.runtimeSourceMapAvailable === false) {
     issues.push({
       title: 'Runtime is not traceable to source',
-      detail: 'A pinned runtime served no reachable source map, so the executed code cannot be read alongside the bytes that ran.',
-      nextMove: 'Publish a source map next to each runtime file, or supply readable source matching the served runtime for a Webflow reviewer to confirm manually.',
-      urls: failedFiles((file) => !file.sourceMapAvailable)
+      detail: 'A pinned runtime served no reachable source map and matched no file in an unchanged-source review ZIP, so the executed code cannot be read alongside the bytes that ran.',
+      nextMove: 'Publish a source map next to each runtime file, include the served file unchanged in the review ZIP, or supply readable source matching the served runtime for a Webflow reviewer to confirm manually.',
+      urls: failedFiles((file) => !file.sourceMapAvailable && !file.reviewedSourceMatched)
     });
   }
   return issues;
@@ -920,10 +920,18 @@ function RuntimeObservationCard({
                                 ? 'SRI matched'
                                 : 'SRI mismatch'}
                           </span>
-                          <span className={runtimeFile.sourceMapAvailable ? 'pass' : 'fail'}>
+                          <span
+                            className={
+                              runtimeFile.sourceMapAvailable || runtimeFile.reviewedSourceMatched
+                                ? 'pass'
+                                : 'fail'
+                            }
+                          >
                             {runtimeFile.sourceMapAvailable
                               ? 'Source map reachable'
-                              : 'No source map'}
+                              : runtimeFile.reviewedSourceMatched
+                                ? 'Matches review ZIP'
+                                : 'No source map'}
                           </span>
                         </div>
                       </li>
