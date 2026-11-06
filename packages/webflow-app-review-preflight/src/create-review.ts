@@ -109,21 +109,30 @@ function toHex(bytes: ArrayBuffer): string {
 }
 
 async function sha256(bundle: ArrayBuffer | Uint8Array): Promise<string> {
+  // Unzipped file data is typed Uint8Array<ArrayBufferLike>; digest wants an
+  // ArrayBuffer-backed view. The bytes are always a plain ArrayBuffer here.
   return toHex(await crypto.subtle.digest('SHA-256', bundle as BufferSource));
 }
 
-const REVIEWED_SOURCE_HASH_LIMIT = 500;
+// A served runtime is JavaScript; only those review files can be what ran.
+const REVIEWED_RUNTIME_SOURCE_PATTERN = /\.(js|mjs|cjs)$/;
+// Matches the ZIP reader's own file cap, so no hash is ever dropped silently.
+const REVIEWED_SOURCE_HASH_LIMIT = 2000;
 
 /**
- * SHA-256 of every file in an unchanged-source review ZIP. Runtime evidence
- * compares the bytes a published site actually served against this list, so
- * a runtime that ships one of these files unchanged counts as readable
- * source without a source map — the same acceptance the static review
- * applies to the bundle.
+ * SHA-256 of every JavaScript file in an unchanged-source review ZIP. Runtime
+ * evidence compares the bytes a published site actually served against this
+ * list, so a runtime that ships one of these files unchanged counts as
+ * readable source without a source map — the same acceptance the static
+ * review applies to the bundle. The file need not be in the bundle: a Data
+ * Client app's injected script is exactly the case this serves.
  */
 async function reviewedSourceHashes(artifact: ReviewArtifact | null): Promise<string[]> {
   if (!artifact || artifact.shape !== 'unchanged-source') return [];
-  const hashes = await Promise.all(artifact.sourceFiles.map((file) => sha256(file.data)));
+  const runtimeSources = artifact.sourceFiles.filter((file) =>
+    REVIEWED_RUNTIME_SOURCE_PATTERN.test(file.path.split('/').pop()?.toLowerCase() ?? '')
+  );
+  const hashes = await Promise.all(runtimeSources.map((file) => sha256(file.data)));
   return [...new Set(hashes)].slice(0, REVIEWED_SOURCE_HASH_LIMIT);
 }
 

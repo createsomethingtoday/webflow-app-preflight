@@ -102,8 +102,8 @@ export interface BundleReview {
       /** Source files found in an unchanged-source ZIP (0 for source maps). */
       sourceFileCount: number;
       /**
-       * SHA-256 of each unchanged-source file. Runtime evidence treats a
-       * served file with one of these hashes as readable source.
+       * SHA-256 of each unchanged-source JavaScript file. Runtime evidence
+       * treats a served file with one of these hashes as readable source.
        */
       sourceFileSha256s?: string[];
     };

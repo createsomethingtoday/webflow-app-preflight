@@ -517,6 +517,35 @@ describe('review API', () => {
       expect(unmatched.blockers).toHaveLength(1);
       expect(unmatched.blockers[0]).toMatch(/readable source/i);
     }
+
+    // Every pin must qualify, by a source map or by reviewed bytes.
+    const second = {
+      url: 'https://api.consentpro.com/v2/cdn/preferences.js',
+      sha256: 'b'.repeat(64),
+      integrity: 'sha256-preferences'
+    };
+    const twoPins = (secondHasSourceMap: boolean) => ({
+      ...manifest,
+      runtimeArtifacts: [
+        manifest.runtimeArtifacts[0],
+        {
+          url: second.url,
+          observedSha256: second.sha256,
+          loadedByPage: true,
+          domIntegrity: second.integrity,
+          sourceMap: secondHasSourceMap
+            ? { available: true, url: `${second.url}.map` }
+            : { available: false }
+        }
+      ]
+    });
+    const twoPinContract = { ...contractWith([pin.sha256]), runtimeArtifacts: [pin, second] };
+    expect(
+      evaluateRuntimeSecurity(twoPins(true), twoPinContract).predicates.runtimeSourceMapAvailable
+    ).toBe(true);
+    expect(
+      evaluateRuntimeSecurity(twoPins(false), twoPinContract).predicates.runtimeSourceMapAvailable
+    ).toBe(false);
   });
 
   test('does not honor a runtime_child declaration for a script the page actually loaded', () => {
@@ -4157,6 +4186,79 @@ describe('review API', () => {
     expect(evaluation.predicates.runtimeIntegrityMatched).toBe(true);
     expect(evaluation.predicates.runtimeHashMatched).toBe(true);
     expect(evaluation.blockers).not.toContainEqual(expect.stringMatching(/pinned SRI/));
+  });
+
+  test('carries unchanged-source review hashes on the observation contract', async () => {
+    const approveJob = async (reviewId: string) => {
+      const testPackageId = await createReadyRuntimePackage(reviewId);
+      const approved = await exports.default.fetch(
+        new Request(
+          `https://preflight.test/v1/runtime-test-packages/${testPackageId}/observation-jobs`,
+          {
+            method: 'POST',
+            headers: {
+              authorization: 'Bearer coordinator-test-token',
+              'content-type': 'application/json'
+            },
+            body: JSON.stringify({ approved: true, sandboxOwnershipVerified: true })
+          }
+        )
+      );
+      expect(approved.status).toBe(201);
+      return (
+        await approved.json<{
+          observationJob: { contract: { reviewedSourceSha256s?: string[] } };
+        }>()
+      ).observationJob.contract;
+    };
+    const createReview = async (form: FormData) => {
+      const response = await exports.default.fetch(
+        new Request('https://preflight.test/v1/reviews', {
+          method: 'POST',
+          headers: { authorization: 'Bearer test-token', origin: 'http://localhost:1337' },
+          body: form
+        })
+      );
+      expect(response.status).toBe(201);
+      return (await response.json<{ review: { id: string } }>()).review.id;
+    };
+
+    // The same bytes as the bundle's assets/index.js, shipped unchanged.
+    const indexSource = [
+      'const API = "https://api.consentpro.com";',
+      'const runtime = "/v2/cdn/runtime.js";',
+      'const script = document.createElement("script");',
+      'script.src = runtime;'
+    ].join('\n');
+    const reviewZip = new JSZip();
+    reviewZip.file('src/index.js', indexSource);
+    reviewZip.file('src/styles.css', 'body { margin: 0 }');
+    reviewZip.file('README.md', 'Shipped as-is: assets/ is copied into the bundle without a build step.');
+    const unchangedForm = new FormData();
+    unchangedForm.set(
+      'bundle',
+      new File([await createBundle()], 'unchanged-source.zip', { type: 'application/zip' })
+    );
+    unchangedForm.set(
+      'sourceMaps',
+      new File([await reviewZip.generateAsync({ type: 'uint8array' })], 'review.zip', {
+        type: 'application/zip'
+      })
+    );
+    const unchanged = await approveJob(await createReview(unchangedForm));
+    // Only JavaScript files qualify: the stylesheet is not a runtime.
+    expect(unchanged.reviewedSourceSha256s).toEqual([await sha256Hex(indexSource)]);
+
+    // No review ZIP: the contract carries no hashes at all.
+    const plainForm = new FormData();
+    plainForm.set(
+      'bundle',
+      new File([await createBundle({ seed: 'no-review-zip' })], 'plain.zip', {
+        type: 'application/zip'
+      })
+    );
+    const plain = await approveJob(await createReview(plainForm));
+    expect(plain).not.toHaveProperty('reviewedSourceSha256s');
   });
 
   test('gives uploading jobs a grace window before the cron expiry sweep reclaims them', async () => {
