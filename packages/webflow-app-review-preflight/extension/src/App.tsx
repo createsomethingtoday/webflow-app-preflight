@@ -127,8 +127,8 @@ export function runtimeIssues(testPackage: RuntimeTestPackageView): RuntimeIssue
     if (pageFiles.length > 0) {
       issues.push({
         title: 'Script integrity is missing or wrong',
-        detail: 'A page-loaded script does not use the SRI value saved in this test package.',
-        nextMove: 'Add the saved integrity value and crossorigin="anonymous" to each script tag. Make sure the CDN allows cross-origin SRI.',
+        detail: 'A page-loaded script has no integrity attribute, or its value does not match the reviewed bytes.',
+        nextMove: 'Add the saved integrity value (or a sha384/sha512 SRI of the same bytes) and crossorigin="anonymous" to each script tag. Make sure the CDN allows cross-origin SRI.',
         urls: pageFiles
       });
     }
@@ -1246,7 +1246,8 @@ openssl dgst -sha256 -binary /tmp/reviewed-runtime.js \\
                     />
                     <small>
                       This app calculates SRI from the SHA-256 above. For a page-loaded file,
-                      publish this exact value in the script's <code>integrity</code> attribute.
+                      publish this value in the script's <code>integrity</code> attribute; a
+                      sha384 or sha512 SRI of the same bytes also passes.
                       For a child file, it remains the human-readable form of the verified pin.
                     </small>
                   </label>

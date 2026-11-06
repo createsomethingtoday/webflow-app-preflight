@@ -130,7 +130,7 @@ curl --fail --silent --show-error --location \
   | grep -i '^access-control-allow-origin:'
 ```
 
-If the command prints a valid header, publish the script with the calculated `integrity` value and `crossorigin="anonymous"`.
+If the command prints a valid header, publish the script with the calculated `integrity` value and `crossorigin="anonymous"`. A `sha384-` or `sha512-` SRI of the same bytes also passes; browsers enforce the strongest algorithm in the attribute, and Preflight checks the same one.
 
 If it prints nothing, do not add those two attributes. The browser would block the runtime before it could initialize. Keep the calculated SHA-256 and SRI in the Runtime Test Package, run the observation, and expect a clear browser-SRI blocker. Ask the runtime vendor to add CORS before expecting that predicate to pass.
 
