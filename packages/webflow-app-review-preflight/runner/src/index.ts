@@ -7,7 +7,8 @@ import {
   type Browser,
   type CDPSession,
   type Page,
-  type Response as PlaywrightResponse
+  type Response as PlaywrightResponse,
+  type Route
 } from 'playwright';
 
 const SECRET_TEXT =
@@ -27,6 +28,23 @@ export const PLATFORM_ASSET_HOSTS: ReadonlySet<string> = new Set([
   'uploads-ssl.webflow.com',
   'd3e54v103j8qbb.cloudfront.net'
 ]);
+// Platform asset hosts are read-only CDNs: only safe methods, and a hard cap
+// of their own so an asset flood cannot push other evidence out of the log.
+const PLATFORM_ASSET_METHODS: ReadonlySet<string> = new Set(['GET', 'HEAD']);
+const MAX_PLATFORM_ASSET_REQUESTS = 2_000;
+
+/**
+ * The scope within which an unpinned script counts as a pinned runtime's
+ * sibling: its host — or, on a shared Webflow asset host, the host plus the
+ * first path segment (the owning site's asset directory), so a runtime hosted
+ * on the asset CDN is not confused with the test site's own webflow.js.
+ */
+export function runtimeScopeKey(url: URL, platformHosts: ReadonlySet<string>): string {
+  const host = url.hostname.toLowerCase();
+  if (!platformHosts.has(host)) return host;
+  const [first = ''] = url.pathname.split('/').filter(Boolean);
+  return `${host}/${first}`;
+}
 // Caps for reading attacker-controlled bytes into runner memory.
 const MAX_RUNTIME_ARTIFACT_BYTES = 16 * 1024 * 1024;
 const MAX_SOURCE_MAP_BYTES = 16 * 1024 * 1024;
@@ -232,15 +250,11 @@ async function collectTrustedExecutionEvidence(
   // (runtime.js?v=1 vs runtime.js?v=2) never collapse to one key. URLs are
   // sanitized only when they become serialized labels below.
   const pinnedUrls = new Set(pins.map((pin) => pin.url));
-  // A runtime pinned on a Webflow asset host shares that host with the site's
-  // own webflow.js and friends; those are platform files, not the runtime's
-  // siblings, so the host rule does not apply there. Scripts the pinned
-  // runtime itself initiates are still caught by the initiator check.
-  const runtimeHosts = new Set(
-    pins
-      .map((pin) => new URL(pin.url).hostname.toLowerCase())
-      .filter((host) => !platformHosts.has(host))
-  );
+  // A runtime pinned on a Webflow asset host shares that host with the test
+  // site's own webflow.js; the sibling rule is scoped to the runtime's asset
+  // directory there (see runtimeScopeKey). Scripts the pinned runtime itself
+  // initiates are caught by the initiator check regardless.
+  const runtimeScopes = new Set(pins.map((pin) => runtimeScopeKey(new URL(pin.url), platformHosts)));
   const executedDigestsByUrl = new Map<string, Set<string>>();
   const trustedRuntimeInitiatedUrls = new Set<string>();
   const runtimeCreatedScripts = new Set<string>();
@@ -254,7 +268,7 @@ async function collectTrustedExecutionEvidence(
     const initiatedByPinnedRuntime = [...initiatorUrls].some((url) => pinnedUrls.has(url));
     let isRuntimeHostScript = false;
     if (isValidUrl) {
-      isRuntimeHostScript = runtimeHosts.has(new URL(rawUrl).hostname.toLowerCase());
+      isRuntimeHostScript = runtimeScopes.has(runtimeScopeKey(new URL(rawUrl), platformHosts));
     }
     if (!pinnedUrls.has(rawUrl) && !initiatedByPinnedRuntime && !isRuntimeHostScript) continue;
 
@@ -290,7 +304,7 @@ async function collectTrustedExecutionEvidence(
     }
     let isRuntimeHostScript = false;
     if (isValidUrl) {
-      isRuntimeHostScript = runtimeHosts.has(new URL(rawUrl).hostname.toLowerCase());
+      isRuntimeHostScript = runtimeScopes.has(runtimeScopeKey(new URL(rawUrl), platformHosts));
     }
     if (!initiatedByPinnedRuntime && !isRuntimeHostScript) continue;
     const label = isValidUrl
@@ -635,7 +649,10 @@ async function capture(
   const startedAt = new Date();
   // validateObservationContract already confined these to PLATFORM_ASSET_HOSTS.
   const platformHosts = new Set(contract.controls.platformAssetHosts ?? []);
-  const allowedHosts = new Set([...contract.controls.allowedHosts, ...platformHosts]);
+  // Partner-declared hosts only: a source map must live beside the runtime,
+  // not on a shared CDN (and the worker re-checks map URLs against this set).
+  const partnerHosts = new Set(contract.controls.allowedHosts);
+  const allowedHosts = new Set([...partnerHosts, ...platformHosts]);
   await assertResolvedHostBoundary(allowedHosts);
   const network: Array<Record<string, unknown>> = [];
   const consoleMessages: Array<{ type: string; text: string }> = [];
@@ -680,6 +697,88 @@ async function capture(
   const requestBoundaryScripts = new Map<string, BrowserState['scripts'][number]>();
   const observedRuntimeArtifactRequests = new Set<string>();
   let requestCount = 0;
+  let platformRequestCount = 0;
+  // One decision for every request and every redirect hop: on the allowlist,
+  // and within its budget. Off-allowlist requests never consume the budget,
+  // otherwise adversarial noise could exhaust maxRequests and starve the
+  // pinned runtime request (a false "Declared runtime did not load" blocker).
+  // Platform asset hosts are read-only, never budgeted, and capped on their
+  // own so a site's CSS, images and webflow.js cannot starve the runtime
+  // request either.
+  const admit = (
+    target: URL,
+    method: string,
+    resourceType: string,
+    redirectedFrom?: string
+  ): boolean => {
+    const host = target.hostname.toLowerCase();
+    let permitted = ['http:', 'https:'].includes(target.protocol) && allowedHosts.has(host);
+    if (permitted) {
+      permitted = platformHosts.has(host)
+        ? PLATFORM_ASSET_METHODS.has(method) &&
+          (platformRequestCount += 1) <= MAX_PLATFORM_ASSET_REQUESTS
+        : (requestCount += 1) <= contract.controls.maxRequests;
+    }
+    recordNetwork({
+      phase: 'request',
+      url: sanitizeUrl(target.toString()),
+      method,
+      resourceType,
+      blocked: !permitted,
+      ...(redirectedFrom ? { redirectedFrom } : {})
+    });
+    return permitted;
+  };
+  // Chromium follows redirects before a route handler can see the hop, so a
+  // permitted host could bounce the browser to an off-allowlist one (loopback
+  // and metadata addresses included). Every admitted request is therefore
+  // fetched from the runner one hop at a time, each Location vetted exactly
+  // like a fresh request, and only the final response reaches the browser.
+  const MAX_REDIRECT_HOPS = 10;
+  const fulfillWithinAllowlist = async (route: Route, first: URL): Promise<void> => {
+    const request = route.request();
+    try {
+      let response = await route.fetch({
+        maxRedirects: 0,
+        timeout: contract.controls.requestTimeoutMs
+      });
+      let current = first;
+      let method = request.method();
+      for (let hop = 0; hop <= MAX_REDIRECT_HOPS; hop += 1) {
+        const status = response.status();
+        const location = response.headers()['location'];
+        if (!(status >= 300 && status < 400 && location)) break;
+        if (hop === MAX_REDIRECT_HOPS) {
+          await route.abort('blockedbyclient');
+          return;
+        }
+        let next: URL;
+        try {
+          next = new URL(location, current);
+        } catch {
+          await route.abort('blockedbyclient');
+          return;
+        }
+        // 307/308 keep the method and body; every other redirect becomes GET.
+        const keepMethod = status === 307 || status === 308;
+        method = keepMethod ? method : 'GET';
+        if (!admit(next, method, request.resourceType(), sanitizeUrl(current.toString()))) {
+          await route.abort('blockedbyclient');
+          return;
+        }
+        response = await context.request.fetch(next.toString(), {
+          method,
+          maxRedirects: 0,
+          timeout: contract.controls.requestTimeoutMs,
+          ...(keepMethod && request.postDataBuffer() ? { data: request.postDataBuffer()! } : {})
+        });
+        current = next;
+      }
+      await route.fulfill({ response });
+    } catch {
+      await route.abort('failed').catch(() => undefined);
+    }
+  };
   await context.route('**/*', async (route) => {
     const request = route.request();
     let url: URL;
@@ -710,44 +809,11 @@ async function capture(
         // Missing request-boundary attributes fail closed in the final predicate.
       }
     }
-    // Off-allowlist requests must not consume the request budget, otherwise
-    // adversarial noise can exhaust maxRequests and starve the pinned runtime
-    // request (surfaced as a false "Declared runtime did not load" blocker).
-    if (!allowedHosts.has(url.hostname.toLowerCase())) {
-      recordNetwork({
-        phase: 'request',
-        url: sanitizeUrl(url.toString()),
-        method: request.method(),
-        resourceType: request.resourceType(),
-        blocked: true
-      });
+    if (!admit(url, request.method(), request.resourceType())) {
       await route.abort('blockedbyclient');
       return;
     }
-    // Platform asset hosts are allowed but never budgeted: a site's own CSS,
-    // images and webflow.js must not starve the pinned runtime request either.
-    if (!platformHosts.has(url.hostname.toLowerCase())) {
-      requestCount += 1;
-      if (requestCount > contract.controls.maxRequests) {
-        recordNetwork({
-          phase: 'request',
-          url: sanitizeUrl(url.toString()),
-          method: request.method(),
-          resourceType: request.resourceType(),
-          blocked: true
-        });
-        await route.abort('blockedbyclient');
-        return;
-      }
-    }
-    recordNetwork({
-      phase: 'request',
-      url: sanitizeUrl(url.toString()),
-      method: request.method(),
-      resourceType: request.resourceType(),
-      blocked: false
-    });
-    await route.continue();
+    await fulfillWithinAllowlist(route, url);
   });
 
   const page = await context.newPage();
@@ -937,22 +1003,25 @@ async function capture(
         observeRuntimeArtifact(
           pin,
           artifactResponses.get(pin.url) ?? null,
-          allowedHosts,
+          partnerHosts,
           [...requestBoundaryScripts.values()],
           trustedExecution.executedDigestsByUrl,
           trustedExecution.trustedRuntimeInitiatedUrls
         )
       )
     );
-    const runtimeHosts = new Set(
-      contract.runtimeArtifacts.map((artifact) => new URL(artifact.url).hostname.toLowerCase())
+    // Same sibling scope as collectTrustedExecutionEvidence (see runtimeScopeKey).
+    const runtimeScopes = new Set(
+      contract.runtimeArtifacts.map((artifact) =>
+        runtimeScopeKey(new URL(artifact.url), platformHosts)
+      )
     );
     const pageWorldUnreviewedRuntimeScripts = installedState.scripts
       .filter((script) => {
         if (!script.src || script.src === '[invalid-url]' || pinnedUrls.has(script.src))
           return false;
         try {
-          return runtimeHosts.has(new URL(script.src).hostname.toLowerCase());
+          return runtimeScopes.has(runtimeScopeKey(new URL(script.src), platformHosts));
         } catch {
           return false;
         }

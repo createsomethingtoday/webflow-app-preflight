@@ -6,8 +6,12 @@
  * partner code cannot read anything back through, so allowing them does not
  * widen what a partner runtime can reach; its own host was always allowed.
  *
- * The runner keeps its own copy of this list and refuses any contract that
- * names a host outside it. A runner test pins the two copies to each other.
+ * The runner keeps its own copy of this list (PLATFORM_ASSET_HOSTS in
+ * runner/src/index.ts) and refuses any contract that names a host outside it.
+ * A runner test pins the two copies to each other. Changing this list means
+ * changing the runner copy too and redeploying the E2B runtime template
+ * BEFORE the worker; a worker on the new list with a runner on the old one
+ * rejects every job as an unsafe contract.
  */
 export const WEBFLOW_PLATFORM_ASSET_HOSTS = [
   'cdn.prod.website-files.com',

@@ -8,14 +8,21 @@ import {
   WEBFLOW_PLATFORM_ASSET_HOSTS,
   type RuntimeObservationJobContract
 } from '@create-something/webflow-app-review-preflight';
-import { afterEach, beforeEach, describe, expect, test } from 'vitest';
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import {
   PLATFORM_ASSET_HOSTS,
   redactText,
   runRuntimeObservation,
+  runtimeScopeKey,
   sanitizeUrl,
   validateObservationContract
 } from '../src/index.js';
+
+// Platform asset hosts are public names. Resolve them without the network so
+// the suite runs offline; loopback fixtures skip the lookup entirely.
+vi.mock('node:dns/promises', () => ({
+  lookup: async () => [{ address: '203.0.113.10', family: 4 }]
+}));
 
 // The adversarial fixtures allowlist loopback (127.0.0.1); loopback/private
 // hosts are a deliberate test opt-in (see RUNTIME_ALLOW_PRIVATE_HOSTS, FIX 1).
@@ -153,6 +160,11 @@ async function runAdversarialFixture({
     if (url.pathname === '/proxy') {
       response.writeHead(proxyStatus, { 'content-type': 'application/json' });
       response.end(JSON.stringify({ error: 'fixture_proxy_result' }));
+      return;
+    }
+    if (url.pathname === '/redirect-off') {
+      response.writeHead(302, { location: 'http://127.0.0.2:9/off' });
+      response.end();
       return;
     }
     response.writeHead(404);
@@ -405,10 +417,12 @@ describe('runtime observation runner boundaries', () => {
     const asset = 'https://cdn.prod.website-files.com/preflight-fixture/none.css';
     const markup = (integrity: string) => `
       <link rel="stylesheet" href="${asset}">
+      <img src="/redirect-off" alt="">
       <script src="/runtime-v1.js" integrity="${integrity}" crossorigin="anonymous"></script>`;
-    const requestFor = (log: unknown) =>
-      (log as { entries: Array<{ phase: string; url: string; blocked: boolean | null }> }).entries.find(
-        (entry) => entry.phase === 'request' && entry.url.startsWith(asset)
+    type Entry = { phase: string; url: string; method?: string; blocked: boolean | null };
+    const requestFor = (log: unknown, prefix: string) =>
+      (log as { entries: Entry[] }).entries.find(
+        (entry) => entry.phase === 'request' && entry.url.startsWith(prefix)
       );
 
     const allowed = await runAdversarialFixture({
@@ -416,12 +430,58 @@ describe('runtime observation runner boundaries', () => {
       markup,
       controls: { platformAssetHosts: ['cdn.prod.website-files.com'] }
     });
-    expect(requestFor(allowed.networkLog)).toMatchObject({ blocked: false });
+    expect(requestFor(allowed.networkLog, asset)).toMatchObject({ blocked: false });
     expect(allowed.manifest.runtimeReadyObserved).toBe(true);
+    // A redirect off the allowlist is still blocked at the hop.
+    expect(requestFor(allowed.networkLog, 'http://127.0.0.2:9/off')).toMatchObject({
+      blocked: true
+    });
 
     const confined = await runAdversarialFixture({ proxyStatus: 403, markup });
-    expect(requestFor(confined.networkLog)).toMatchObject({ blocked: true });
+    expect(requestFor(confined.networkLog, asset)).toMatchObject({ blocked: true });
   }, 60_000);
+
+  test('does not let platform asset requests consume the request budget', async () => {
+    const prefix = 'https://cdn.prod.website-files.com/preflight-fixture/i';
+    const images = Array.from(
+      { length: 120 },
+      (_, index) => `<img src="${prefix}${index}.png" alt="">`
+    ).join('');
+    const { manifest, networkLog } = await runAdversarialFixture({
+      proxyStatus: 403,
+      markup: (integrity) =>
+        `${images}<script src="/runtime-v1.js" integrity="${integrity}" crossorigin="anonymous"></script>`,
+      controls: { platformAssetHosts: ['cdn.prod.website-files.com'] }
+    });
+    const entries = (networkLog as { entries: Array<{ phase: string; url: string; blocked: boolean | null }> })
+      .entries;
+    const assetRequests = entries.filter(
+      (entry) => entry.phase === 'request' && entry.url.startsWith(prefix)
+    );
+    // More asset requests than the whole budget, none of them blocked, and the
+    // pinned runtime still loaded after them.
+    expect(assetRequests.length).toBeGreaterThan(100);
+    expect(assetRequests.every((entry) => entry.blocked === false)).toBe(true);
+    expect(manifest.runtimeReadyObserved).toBe(true);
+    const observations = manifest.runtimeArtifacts as Array<{ loadedByPage: boolean }>;
+    expect(observations[0]?.loadedByPage).toBe(true);
+  }, 90_000);
+
+  test('scopes the runtime-sibling rule to the asset directory on platform hosts', () => {
+    const platform = new Set(['cdn.prod.website-files.com']);
+    expect(runtimeScopeKey(new URL('https://api.partner.com/v2/runtime.js'), platform)).toBe(
+      'api.partner.com'
+    );
+    expect(
+      runtimeScopeKey(new URL('https://cdn.prod.website-files.com/site-a/runtime.js'), platform)
+    ).toBe('cdn.prod.website-files.com/site-a');
+    expect(
+      runtimeScopeKey(new URL('https://cdn.prod.website-files.com/site-b/js/webflow.js'), platform)
+    ).toBe('cdn.prod.website-files.com/site-b');
+    expect(runtimeScopeKey(new URL('https://cdn.prod.website-files.com/'), platform)).toBe(
+      'cdn.prod.website-files.com/'
+    );
+  });
 
   test('does not let reviewed page code forge a blocked proxy canary', async () => {
     const { result, manifest } = await runAdversarialFixture({

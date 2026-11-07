@@ -214,7 +214,7 @@ A hash pin proves *which* bytes ran. It does not make those bytes readable. **No
 
 ### What the sandbox can reach
 
-The browser reaches only the test site's host, the hosts of the pinned runtime files, and Webflow's own asset hosts (the asset CDN that serves compiled CSS, `webflow.js`, images and fonts, and the jQuery CDN). Everything else is blocked and recorded in the network log as blocked. Requests to Webflow's asset hosts do not count toward the 100-request budget, so a page with many images cannot starve the runtime request.
+The browser reaches only the test site's host, the hosts of the pinned runtime files, and Webflow's own asset hosts (the asset CDN that serves compiled CSS, `webflow.js`, images and fonts, and the jQuery CDN). Everything else is blocked and recorded in the network log as blocked. Requests to Webflow's asset hosts are read-only (GET and HEAD), do not count toward the 100-request budget, and have a cap of their own, so a page with many images cannot starve the runtime request. A source map must live on the runtime's own host; one on a shared asset host does not count.
 
 ### Proxy result
 
