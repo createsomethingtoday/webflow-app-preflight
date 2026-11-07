@@ -280,6 +280,13 @@ export interface RuntimeObservationJobContract {
   lifecycle: RuntimeLifecycleContract;
   controls: {
     allowedHosts: string[];
+    /**
+     * Webflow-owned asset hosts the sandbox may reach so the published page
+     * renders normally. Requests to them never consume `maxRequests`. The
+     * runner accepts only hosts from its own copy of the list. Absent on
+     * contracts issued before this existed.
+     */
+    platformAssetHosts?: string[];
     maxRequests: 100;
     requestTimeoutMs: 10_000;
     totalTimeoutMs: 90_000;

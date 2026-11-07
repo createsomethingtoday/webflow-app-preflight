@@ -7,6 +7,7 @@ import type {
   RuntimeTestPackageInput,
   RuntimeTestPackageView
 } from '@create-something/webflow-app-review-preflight';
+import { WEBFLOW_PLATFORM_ASSET_HOSTS } from '@create-something/webflow-app-review-preflight';
 import { serviceTokenAuthorized } from './service-auth';
 import { isPrivateOrLocalHostname } from './net';
 import type { AuthenticatedUser, Env } from './types';
@@ -1871,6 +1872,9 @@ async function issueRuntimeObservationJob(
     lifecycle: testPackage.lifecycle,
     controls: {
       allowedHosts: [...new Set(allowedHosts)].sort(),
+      // Webflow's own asset hosts, so the page renders as visitors see it.
+      // Kept separate from the partner-derived allowlist and its cap.
+      platformAssetHosts: [...WEBFLOW_PLATFORM_ASSET_HOSTS],
       maxRequests: 100,
       requestTimeoutMs: 10_000,
       totalTimeoutMs: 90_000,
