@@ -4,9 +4,13 @@ import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { RuntimeObservationJobContract } from '@create-something/webflow-app-review-preflight';
+import {
+  WEBFLOW_PLATFORM_ASSET_HOSTS,
+  type RuntimeObservationJobContract
+} from '@create-something/webflow-app-review-preflight';
 import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 import {
+  PLATFORM_ASSET_HOSTS,
   redactText,
   runRuntimeObservation,
   sanitizeUrl,
@@ -72,13 +76,15 @@ interface AdversarialFixtureOptions {
   proxyStatus: number;
   runtimeSource?: string | ((secondaryIntegrity: string) => string);
   secondaryRuntimeSource?: string;
+  controls?: Partial<RuntimeObservationJobContract['controls']>;
 }
 
 async function runAdversarialFixture({
   markup,
   proxyStatus,
   runtimeSource = 'document.body.setAttribute("data-runtime-ready", "");',
-  secondaryRuntimeSource
+  secondaryRuntimeSource,
+  controls = {}
 }: AdversarialFixtureOptions): Promise<{
   result: Awaited<ReturnType<typeof runRuntimeObservation>>;
   manifest: Record<string, unknown>;
@@ -178,7 +184,8 @@ async function runAdversarialFixture({
     controls: {
       ...contract().controls,
       allowedHosts: ['127.0.0.1', 'localhost'],
-      negativeProxyCanaryUrl: `${origin}/canary`
+      negativeProxyCanaryUrl: `${origin}/canary`,
+      ...controls
     }
   };
 
@@ -363,6 +370,58 @@ describe('runtime observation runner boundaries', () => {
       })
     ).toThrow('unsafe contract');
   });
+
+  test('accepts only Webflow-owned platform asset hosts on the contract', () => {
+    const safe = contract();
+    // The runner's copy must match the list the worker puts on contracts.
+    expect(new Set(WEBFLOW_PLATFORM_ASSET_HOSTS)).toEqual(PLATFORM_ASSET_HOSTS);
+    expect(() =>
+      validateObservationContract('job-1', {
+        ...safe,
+        controls: { ...safe.controls, platformAssetHosts: [...WEBFLOW_PLATFORM_ASSET_HOSTS] }
+      })
+    ).not.toThrow();
+    expect(() =>
+      validateObservationContract('job-1', {
+        ...safe,
+        controls: { ...safe.controls, platformAssetHosts: [] }
+      })
+    ).not.toThrow();
+    for (const platformAssetHosts of [
+      ['cdn.prod.website-files.com', 'evil.example'],
+      ['127.0.0.1'],
+      [42]
+    ]) {
+      expect(() =>
+        validateObservationContract('job-1', {
+          ...safe,
+          controls: { ...safe.controls, platformAssetHosts: platformAssetHosts as string[] }
+        })
+      ).toThrow('unsafe contract');
+    }
+  });
+
+  test('lets the page reach a platform asset host only when the contract names it', async () => {
+    const asset = 'https://cdn.prod.website-files.com/preflight-fixture/none.css';
+    const markup = (integrity: string) => `
+      <link rel="stylesheet" href="${asset}">
+      <script src="/runtime-v1.js" integrity="${integrity}" crossorigin="anonymous"></script>`;
+    const requestFor = (log: unknown) =>
+      (log as { entries: Array<{ phase: string; url: string; blocked: boolean | null }> }).entries.find(
+        (entry) => entry.phase === 'request' && entry.url.startsWith(asset)
+      );
+
+    const allowed = await runAdversarialFixture({
+      proxyStatus: 403,
+      markup,
+      controls: { platformAssetHosts: ['cdn.prod.website-files.com'] }
+    });
+    expect(requestFor(allowed.networkLog)).toMatchObject({ blocked: false });
+    expect(allowed.manifest.runtimeReadyObserved).toBe(true);
+
+    const confined = await runAdversarialFixture({ proxyStatus: 403, markup });
+    expect(requestFor(confined.networkLog)).toMatchObject({ blocked: true });
+  }, 60_000);
 
   test('does not let reviewed page code forge a blocked proxy canary', async () => {
     const { result, manifest } = await runAdversarialFixture({

@@ -212,6 +212,10 @@ For every declared file, check:
 
 A hash pin proves *which* bytes ran. It does not make those bytes readable. **No source map** therefore returns a blocker even when every other predicate passes: the executed code cannot be read next to the reviewed source. This is a manual-review blocker rather than a violation, because readable source may have been supplied privately. Publish a source map beside each runtime file, include the served file unchanged in the review ZIP (with its README), or supply matching readable source and let a reviewer confirm it.
 
+### What the sandbox can reach
+
+The browser reaches only the test site's host, the hosts of the pinned runtime files, and Webflow's own asset hosts (the asset CDN that serves compiled CSS, `webflow.js`, images and fonts, and the jQuery CDN). Everything else is blocked and recorded in the network log as blocked. Requests to Webflow's asset hosts do not count toward the 100-request budget, so a page with many images cannot starve the runtime request.
+
 ### Proxy result
 
 | Label | Meaning | Next move |

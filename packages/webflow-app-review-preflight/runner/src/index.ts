@@ -15,6 +15,18 @@ const SECRET_TEXT =
 const EMAIL = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi;
 const JOB_FETCH_TIMEOUT_MS = 10_000;
 const EVIDENCE_UPLOAD_TIMEOUT_MS = 30_000;
+// Webflow-owned asset hosts a published site needs to render. This is the
+// runner's own copy of WEBFLOW_PLATFORM_ASSET_HOSTS from the shared package
+// (the sandbox bundle carries no package code, so the list is repeated here;
+// a test pins the two copies to each other). A contract may only name hosts
+// from this set, and requests to them never consume the request budget.
+export const PLATFORM_ASSET_HOSTS: ReadonlySet<string> = new Set([
+  'cdn.prod.website-files.com',
+  'assets.website-files.com',
+  'assets-global.website-files.com',
+  'uploads-ssl.webflow.com',
+  'd3e54v103j8qbb.cloudfront.net'
+]);
 // Caps for reading attacker-controlled bytes into runner memory.
 const MAX_RUNTIME_ARTIFACT_BYTES = 16 * 1024 * 1024;
 const MAX_SOURCE_MAP_BYTES = 16 * 1024 * 1024;
@@ -213,13 +225,22 @@ async function collectTrustedExecutionEvidence(
   parsedScripts: ParsedScript[],
   scriptRequests: TrustedScriptRequest[],
   workerUrls: string[],
-  pins: RuntimeObservationJobContract['runtimeArtifacts']
+  pins: RuntimeObservationJobContract['runtimeArtifacts'],
+  platformHosts: ReadonlySet<string> = new Set()
 ): Promise<TrustedExecutionEvidence> {
   // Evidence maps are keyed on the RAW url so that distinct query strings
   // (runtime.js?v=1 vs runtime.js?v=2) never collapse to one key. URLs are
   // sanitized only when they become serialized labels below.
   const pinnedUrls = new Set(pins.map((pin) => pin.url));
-  const runtimeHosts = new Set(pins.map((pin) => new URL(pin.url).hostname.toLowerCase()));
+  // A runtime pinned on a Webflow asset host shares that host with the site's
+  // own webflow.js and friends; those are platform files, not the runtime's
+  // siblings, so the host rule does not apply there. Scripts the pinned
+  // runtime itself initiates are still caught by the initiator check.
+  const runtimeHosts = new Set(
+    pins
+      .map((pin) => new URL(pin.url).hostname.toLowerCase())
+      .filter((host) => !platformHosts.has(host))
+  );
   const executedDigestsByUrl = new Map<string, Set<string>>();
   const trustedRuntimeInitiatedUrls = new Set<string>();
   const runtimeCreatedScripts = new Set<string>();
@@ -318,7 +339,12 @@ export function validateObservationContract(
       ? contract.controls.negativeProxyCanaryUrl !== null
       : typeof contract.controls.negativeProxyCanaryUrl !== 'string') ||
     contract.controls.allowedHosts.length === 0 ||
-    contract.controls.allowedHosts.length > 12
+    contract.controls.allowedHosts.length > 12 ||
+    (contract.controls.platformAssetHosts !== undefined &&
+      (!Array.isArray(contract.controls.platformAssetHosts) ||
+        contract.controls.platformAssetHosts.some(
+          (host) => typeof host !== 'string' || !PLATFORM_ASSET_HOSTS.has(host)
+        )))
   ) {
     throw new Error(`Observation job ${jobId} has an unsafe contract.`);
   }
@@ -607,7 +633,9 @@ async function capture(
   browser: Browser
 ): Promise<CaptureResult> {
   const startedAt = new Date();
-  const allowedHosts = new Set(contract.controls.allowedHosts);
+  // validateObservationContract already confined these to PLATFORM_ASSET_HOSTS.
+  const platformHosts = new Set(contract.controls.platformAssetHosts ?? []);
+  const allowedHosts = new Set([...contract.controls.allowedHosts, ...platformHosts]);
   await assertResolvedHostBoundary(allowedHosts);
   const network: Array<Record<string, unknown>> = [];
   const consoleMessages: Array<{ type: string; text: string }> = [];
@@ -696,17 +724,21 @@ async function capture(
       await route.abort('blockedbyclient');
       return;
     }
-    requestCount += 1;
-    if (requestCount > contract.controls.maxRequests) {
-      recordNetwork({
-        phase: 'request',
-        url: sanitizeUrl(url.toString()),
-        method: request.method(),
-        resourceType: request.resourceType(),
-        blocked: true
-      });
-      await route.abort('blockedbyclient');
-      return;
+    // Platform asset hosts are allowed but never budgeted: a site's own CSS,
+    // images and webflow.js must not starve the pinned runtime request either.
+    if (!platformHosts.has(url.hostname.toLowerCase())) {
+      requestCount += 1;
+      if (requestCount > contract.controls.maxRequests) {
+        recordNetwork({
+          phase: 'request',
+          url: sanitizeUrl(url.toString()),
+          method: request.method(),
+          resourceType: request.resourceType(),
+          blocked: true
+        });
+        await route.abort('blockedbyclient');
+        return;
+      }
     }
     recordNetwork({
       phase: 'request',
@@ -897,7 +929,8 @@ async function capture(
       parsedScripts,
       scriptRequests,
       workerUrls,
-      contract.runtimeArtifacts
+      contract.runtimeArtifacts,
+      platformHosts
     );
     const runtimeArtifacts = await Promise.all(
       contract.runtimeArtifacts.map((pin) =>

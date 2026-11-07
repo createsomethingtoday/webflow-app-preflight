@@ -1,5 +1,6 @@
 import { env, exports } from 'cloudflare:workers';
 import JSZip from 'jszip';
+import { WEBFLOW_PLATFORM_ASSET_HOSTS } from '@create-something/webflow-app-review-preflight';
 import { afterEach, describe, expect, test, vi } from 'vitest';
 import {
   evaluateRuntimeSecurity,
@@ -2219,6 +2220,9 @@ describe('review API', () => {
         },
         controls: {
           allowedHosts: ['127.0.0.1'],
+          // Webflow's own asset hosts ride on every contract, apart from the
+          // partner-derived allowlist and its cap.
+          platformAssetHosts: [...WEBFLOW_PLATFORM_ASSET_HOSTS],
           evidenceTrust: 'webflow_observed'
         },
         boundaries: {

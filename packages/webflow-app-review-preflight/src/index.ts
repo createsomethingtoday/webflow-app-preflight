@@ -6,6 +6,7 @@ export {
 } from './hosted-runtime-review';
 export type { HostedRuntimeReviewArtifact } from './hosted-runtime-review';
 export { discoverRuntimeReferences } from './runtime-references';
+export { WEBFLOW_PLATFORM_ASSET_HOSTS } from './platform-hosts';
 // Companion run/mission builders are retired: the browser companion can no longer
 // produce evidence. Only the historical read path and its types remain.
 export type {
