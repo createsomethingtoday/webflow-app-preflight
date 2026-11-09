@@ -543,6 +543,11 @@ export async function createRuntimeTestPackage(
 
   const now = new Date();
   if (!user.siteId) {
+    if (user.authVia === 'oauth') {
+      throw new RuntimeTestPackageError(
+        'Runtime test packages need the Designer extension on the dedicated Webflow test site; they are not available with an OAuth token.'
+      );
+    }
     throw new RuntimeTestPackageError(
       'Open App Review Preflight from the dedicated Webflow test site before preparing a runtime package.'
     );

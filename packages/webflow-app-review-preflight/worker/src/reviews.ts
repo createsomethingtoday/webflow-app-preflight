@@ -186,8 +186,8 @@ export async function createReview(
   const statements = [
     env.DB.prepare(
       `INSERT INTO reviews
-        (id, owner_user_id, site_id, name, created_at, updated_at, latest_version_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`
+        (id, owner_user_id, site_id, name, created_at, updated_at, latest_version_id, auth_via)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
     ).bind(
       result.reviewId,
       user.id,
@@ -195,7 +195,8 @@ export async function createReview(
       name,
       result.createdAt,
       result.createdAt,
-      versionId
+      versionId,
+      user.authVia ?? 'designer'
     ),
     env.DB.prepare(
       `INSERT INTO review_versions
@@ -316,8 +317,8 @@ export async function createRuntimeReview(
   await env.DB.batch([
     env.DB.prepare(
       `INSERT INTO reviews
-        (id, owner_user_id, site_id, name, created_at, updated_at, latest_version_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`
+        (id, owner_user_id, site_id, name, created_at, updated_at, latest_version_id, auth_via)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
     ).bind(
       result.reviewId,
       user.id,
@@ -325,7 +326,8 @@ export async function createRuntimeReview(
       name,
       result.createdAt,
       result.createdAt,
-      versionId
+      versionId,
+      user.authVia ?? 'designer'
     ),
     env.DB.prepare(
       `INSERT INTO review_versions

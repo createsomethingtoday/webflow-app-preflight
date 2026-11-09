@@ -44,7 +44,7 @@ export async function authenticate(
     env.PREFLIGHT_DEV_TOKEN &&
     token === env.PREFLIGHT_DEV_TOKEN
   ) {
-    return { id: 'local-webflow-user', siteId: 'local-webflow-site' };
+    return { id: 'local-webflow-user', siteId: 'local-webflow-site', authVia: 'designer' };
   }
 
   if (
@@ -52,7 +52,11 @@ export async function authenticate(
     env.PREFLIGHT_REVIEWER_DEV_TOKEN &&
     token === env.PREFLIGHT_REVIEWER_DEV_TOKEN
   ) {
-    return { id: 'local-webflow-reviewer', siteId: 'local-webflow-review-site' };
+    return {
+      id: 'local-webflow-reviewer',
+      siteId: 'local-webflow-review-site',
+      authVia: 'designer'
+    };
   }
 
   // Webflow resolves an ID token only when the bearer token's authorization
@@ -93,10 +97,16 @@ export async function authenticate(
 
     return {
       id: resolved.id,
-      siteId: typeof resolved.siteId === 'string' ? resolved.siteId : null
+      siteId: typeof resolved.siteId === 'string' ? resolved.siteId : null,
+      authVia: 'designer'
     };
   }
-  return null;
+
+  // No stored app token resolves this bearer as a Designer ID token. The
+  // creator CLI sends a Webflow OAuth access token instead.
+  return env.PREFLIGHT_OAUTH_BEARER_ENABLED === 'true'
+    ? authenticateOAuthBearer(token, env)
+    : null;
 }
 
 /**
@@ -114,6 +124,67 @@ function unverifiedIdTokenSubject(idToken: string): string | null {
   } catch {
     return null;
   }
+}
+
+const OAUTH_REQUEST_TIMEOUT_MS = 5000;
+
+async function oauthGetJson(url: string, token: string): Promise<unknown | null> {
+  try {
+    const response = await fetch(url, {
+      headers: { authorization: `Bearer ${token}`, accept: 'application/json' },
+      signal: AbortSignal.timeout(OAUTH_REQUEST_TIMEOUT_MS)
+    });
+    if (!response.ok) return null;
+    return await response.json();
+  } catch {
+    return null;
+  }
+}
+
+function idList(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === 'string' && item !== '')
+    : [];
+}
+
+/**
+ * Creator CLI path: a Webflow OAuth access token as the bearer. Off unless
+ * PREFLIGHT_OAUTH_BEARER_ENABLED is 'true', and fails closed unless the token
+ * belongs to an application listed in PREFLIGHT_OAUTH_CLIENT_IDS. The identity
+ * has no Designer site (siteId null), so ownership is by user id alone.
+ */
+async function authenticateOAuthBearer(
+  token: string,
+  env: Env
+): Promise<AuthenticatedUser | null> {
+  const allowed = new Set(
+    (env.PREFLIGHT_OAUTH_CLIENT_IDS ?? '')
+      .split(',')
+      .map((value) => value.trim())
+      .filter(Boolean)
+  );
+  if (allowed.size === 0) return null;
+
+  const [user, introspection] = await Promise.all([
+    oauthGetJson('https://api.webflow.com/v2/token/authorized_by', token),
+    oauthGetJson('https://api.webflow.com/v2/token/introspect', token)
+  ]);
+  const userId = (user as { id?: unknown } | null)?.id;
+  if (typeof userId !== 'string' || !userId) return null;
+
+  const info = introspection as {
+    application?: { id?: unknown };
+    authorization?: { authorizedTo?: { workspaceIds?: unknown } };
+  } | null;
+  const applicationId = info?.application?.id;
+  if (typeof applicationId !== 'string' || !allowed.has(applicationId)) return null;
+
+  return {
+    id: userId,
+    siteId: null,
+    authVia: 'oauth',
+    workspaceIds: idList(info?.authorization?.authorizedTo?.workspaceIds)
+  };
 }
 
 async function sha256(value: string): Promise<string> {
