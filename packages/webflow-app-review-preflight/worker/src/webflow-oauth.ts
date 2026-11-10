@@ -183,6 +183,100 @@ export async function startWebflowOAuth(env: Env): Promise<Response> {
   });
 }
 
+async function exchangeCode(
+  env: Env,
+  code: string,
+  redirectUri: string | undefined
+): Promise<{ accessToken: string } | 'failed' | 'invalid'> {
+  const exchange = await fetch('https://api.webflow.com/oauth/access_token', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      client_id: env.WEBFLOW_CLIENT_ID,
+      client_secret: env.WEBFLOW_CLIENT_SECRET,
+      code,
+      grant_type: 'authorization_code',
+      ...(redirectUri ? { redirect_uri: redirectUri } : {})
+    })
+  });
+  if (!exchange.ok) return 'failed';
+  const body = (await exchange.json()) as AccessTokenResponse;
+  if (typeof body.access_token !== 'string' || !body.access_token) {
+    return 'invalid';
+  }
+  return { accessToken: body.access_token };
+}
+
+const WEBFLOW_USER_ID = /^[a-f0-9]{24}$/i;
+
+/**
+ * Stores the token under the Webflow user who granted it. Webflow resolves a
+ * Designer ID token only when the bearer token's authorization covers the ID
+ * token's site, so each developer needs their own token. Returns false when
+ * the owner cannot be identified; the caller decides how to recover.
+ */
+async function storeUserInstallation(
+  accessToken: string,
+  env: Env
+): Promise<boolean> {
+  let userId: unknown;
+  try {
+    const response = await fetch(
+      'https://api.webflow.com/beta/token/authorized_by',
+      {
+        headers: { authorization: `Bearer ${accessToken}` },
+        signal: AbortSignal.timeout(10_000)
+      }
+    );
+    if (!response.ok) return false;
+    userId = ((await response.json()) as { id?: unknown }).id;
+  } catch {
+    return false;
+  }
+  if (typeof userId !== 'string' || !WEBFLOW_USER_ID.test(userId)) return false;
+
+  const encrypted = await encryptAccessToken(accessToken, env);
+  if (!encrypted) return false;
+  const now = new Date().toISOString();
+  await env.DB.prepare(
+    `INSERT INTO webflow_oauth_user_installations
+       (user_id, access_token_ciphertext, access_token_iv, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT(user_id) DO UPDATE SET
+       access_token_ciphertext = excluded.access_token_ciphertext,
+       access_token_iv = excluded.access_token_iv,
+       updated_at = excluded.updated_at`
+  )
+    .bind(userId.toLowerCase(), encrypted.ciphertext, encrypted.iv, now, now)
+    .run();
+  return true;
+}
+
+/**
+ * A callback with no state comes from Webflow's own install flow (Marketplace
+ * or a shared authorize link), not from /start. The token is stored only under
+ * the user who granted it and never replaces the shared row, so a forged
+ * callback can add nothing but the forger's own token. When the code cannot be
+ * exchanged or its owner identified, the state-bound flow runs instead.
+ */
+async function completeDirectInstall(
+  request: Request,
+  env: Env,
+  code: string
+): Promise<Response> {
+  if (!(request.headers.get('accept') ?? '').includes('text/html')) {
+    return invalidCallback('state_mismatch');
+  }
+  const exchange = await exchangeCode(env, code, undefined);
+  if (
+    typeof exchange === 'object' &&
+    (await storeUserInstallation(exchange.accessToken, env))
+  ) {
+    return redirectTo(request, '/v1/oauth/webflow/complete');
+  }
+  return redirectTo(request, '/v1/oauth/webflow/start');
+}
+
 interface AccessTokenResponse {
   access_token?: unknown;
 }
@@ -198,6 +292,9 @@ export async function completeWebflowOAuth(
   const state = url.searchParams.get('state');
   const cookieState = cookieValue(request, STATE_COOKIE);
   if (!code) return invalidCallback('missing_code');
+  if (!state && !cookieState) {
+    return completeDirectInstall(request, env, code);
+  }
   if (!state || !cookieState || state !== cookieState) {
     return recoverInvalidBrowserCallback(request, env, 'state_mismatch');
   }
@@ -213,34 +310,25 @@ export async function completeWebflowOAuth(
     return recoverInvalidBrowserCallback(request, env, 'state_unavailable');
   }
 
-  const exchange = await fetch('https://api.webflow.com/oauth/access_token', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({
-      client_id: env.WEBFLOW_CLIENT_ID,
-      client_secret: env.WEBFLOW_CLIENT_SECRET,
-      code,
-      grant_type: 'authorization_code',
-      redirect_uri: env.WEBFLOW_OAUTH_REDIRECT_URI
-    })
-  });
-  if (!exchange.ok) {
+  const exchange = await exchangeCode(env, code, env.WEBFLOW_OAUTH_REDIRECT_URI);
+  if (exchange === 'failed') {
     return Response.json(
       { error: 'webflow_oauth_exchange_failed' },
       { status: 502, headers: { 'cache-control': 'no-store' } }
     );
   }
-  const body = (await exchange.json()) as AccessTokenResponse;
-  if (typeof body.access_token !== 'string' || !body.access_token) {
+  if (exchange === 'invalid') {
     return Response.json(
       { error: 'webflow_oauth_exchange_invalid' },
       { status: 502, headers: { 'cache-control': 'no-store' } }
     );
   }
 
-  const encrypted = await encryptAccessToken(body.access_token, env);
+  const encrypted = await encryptAccessToken(exchange.accessToken, env);
   if (!encrypted) return unavailable();
   const now = new Date().toISOString();
+  // The shared row stays as the fallback for users who connected before
+  // per-user storage, and as the token the health probe checks.
   await env.DB.prepare(
     `INSERT INTO webflow_oauth_installations
        (id, access_token_ciphertext, access_token_iv, created_at, updated_at)
@@ -252,6 +340,7 @@ export async function completeWebflowOAuth(
   )
     .bind(encrypted.ciphertext, encrypted.iv, now, now)
     .run();
+  await storeUserInstallation(exchange.accessToken, env);
 
   const completion = new URL('/v1/oauth/webflow/complete', request.url);
   return new Response(null, {
@@ -433,6 +522,26 @@ export async function storedWebflowAccessToken(env: Env): Promise<string | null>
        FROM webflow_oauth_installations
       WHERE id = 'active'`
   ).first<{ access_token_ciphertext: string; access_token_iv: string }>();
+  if (!row) return null;
+  return decryptAccessToken(
+    row.access_token_ciphertext,
+    row.access_token_iv,
+    env
+  );
+}
+
+export async function storedWebflowAccessTokenForUser(
+  env: Env,
+  userId: string
+): Promise<string | null> {
+  if (!WEBFLOW_USER_ID.test(userId)) return null;
+  const row = await env.DB.prepare(
+    `SELECT access_token_ciphertext, access_token_iv
+       FROM webflow_oauth_user_installations
+      WHERE user_id = ?`
+  )
+    .bind(userId.toLowerCase())
+    .first<{ access_token_ciphertext: string; access_token_iv: string }>();
   if (!row) return null;
   return decryptAccessToken(
     row.access_token_ciphertext,
