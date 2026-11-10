@@ -1,5 +1,8 @@
 import type { AuthenticatedUser, Env } from './types';
-import { webflowAccessToken } from './webflow-oauth';
+import {
+  storedWebflowAccessTokenForUser,
+  webflowAccessToken
+} from './webflow-oauth';
 
 interface ResolvedWebflowUser {
   id?: unknown;
@@ -52,26 +55,65 @@ export async function authenticate(
     return { id: 'local-webflow-reviewer', siteId: 'local-webflow-review-site' };
   }
 
-  const appAccessToken = await webflowAccessToken(env);
-  if (!appAccessToken) return null;
+  // Webflow resolves an ID token only when the bearer token's authorization
+  // covers the ID token's site. Try the token this user granted first, then
+  // the shared installation for users who connected before per-user storage.
+  const subject = unverifiedIdTokenSubject(token);
+  const userToken = subject
+    ? await storedWebflowAccessTokenForUser(env, subject)
+    : null;
+  const sharedToken = await webflowAccessToken(env);
+  const candidates = [userToken, sharedToken].filter(
+    (value, index, all): value is string =>
+      Boolean(value) && all.indexOf(value) === index
+  );
 
-  const response = await fetch('https://api.webflow.com/beta/token/resolve', {
-    method: 'POST',
-    headers: {
-      authorization: `Bearer ${appAccessToken}`,
-      'content-type': 'application/json'
-    },
-    body: JSON.stringify({ idToken: token })
-  });
+  for (const appAccessToken of candidates) {
+    const response = await fetch('https://api.webflow.com/beta/token/resolve', {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${appAccessToken}`,
+        'content-type': 'application/json'
+      },
+      body: JSON.stringify({ idToken: token })
+    });
 
-  if (!response.ok) return null;
-  const resolved = (await response.json()) as ResolvedWebflowUser;
-  if (typeof resolved.id !== 'string' || !resolved.id) return null;
+    if (!response.ok) {
+      console.warn(
+        JSON.stringify({
+          event: 'webflow_id_token_resolve_failed',
+          status: response.status,
+          tokenSource: appAccessToken === userToken ? 'user' : 'shared'
+        })
+      );
+      continue;
+    }
+    const resolved = (await response.json()) as ResolvedWebflowUser;
+    if (typeof resolved.id !== 'string' || !resolved.id) continue;
 
-  return {
-    id: resolved.id,
-    siteId: typeof resolved.siteId === 'string' ? resolved.siteId : null
-  };
+    return {
+      id: resolved.id,
+      siteId: typeof resolved.siteId === 'string' ? resolved.siteId : null
+    };
+  }
+  return null;
+}
+
+/**
+ * Reads the `sub` claim without verifying the signature. The value only picks
+ * which stored token to present; Webflow verifies the ID token itself and the
+ * identity always comes from Webflow's response.
+ */
+function unverifiedIdTokenSubject(idToken: string): string | null {
+  const payload = idToken.split('.')[1];
+  if (!payload) return null;
+  try {
+    const padded = payload.replace(/-/g, '+').replace(/_/g, '/');
+    const claims = JSON.parse(atob(padded)) as { sub?: unknown };
+    return typeof claims.sub === 'string' ? claims.sub : null;
+  } catch {
+    return null;
+  }
 }
 
 async function sha256(value: string): Promise<string> {

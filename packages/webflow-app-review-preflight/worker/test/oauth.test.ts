@@ -68,19 +68,89 @@ describe('Webflow OAuth installation', () => {
     expect(await identity.json()).toMatchObject({
       user: { id: 'webflow-user-id', siteId: 'webflow-site-id' }
     });
-    expect(outboundFetch).toHaveBeenCalledTimes(2);
+  });
 
-    const directInstallCallback = await fetchWorker(
+  const USER_A = 'aaaaaaaaaaaaaaaaaaaaaaaa';
+  const USER_B = 'bbbbbbbbbbbbbbbbbbbbbbbb';
+  const idTokenFor = (sub: string) =>
+    `header.${btoa(JSON.stringify({ sub })).replace(/=+$/, '')}.signature`;
+
+  // Mirrors Webflow: a token resolves only the ID tokens of its own grantor.
+  const webflowStub = (codes: Record<string, string>) =>
+    vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = input instanceof Request ? input : new Request(input, init);
+      const bearer = request.headers.get('authorization')?.slice('Bearer '.length);
+      if (request.url === 'https://api.webflow.com/oauth/access_token') {
+        const { code } = (await request.json()) as { code: string };
+        return codes[code]
+          ? Response.json({ access_token: `token-${codes[code]}` })
+          : Response.json({ error: 'invalid_grant' }, { status: 400 });
+      }
+      if (request.url === 'https://api.webflow.com/beta/token/authorized_by') {
+        return Response.json({ id: bearer?.slice('token-'.length) });
+      }
+      if (request.url === 'https://api.webflow.com/beta/token/resolve') {
+        const { idToken } = (await request.json()) as { idToken: string };
+        return idToken === idTokenFor(bearer?.slice('token-'.length) ?? '')
+          ? Response.json({ id: bearer!.slice('token-'.length), siteId: 'site' })
+          : Response.json({ message: 'ID token could not be resolved' }, { status: 400 });
+      }
+      return Response.json({ error: 'unexpected_outbound_request' }, { status: 500 });
+    });
+
+  const connect = async (code: string) => {
+    const start = await fetchWorker(
+      new Request('https://preflight.test/v1/oauth/webflow/start')
+    );
+    const state = new URL(start.headers.get('location')!).searchParams.get('state');
+    return fetchWorker(
       new Request(
-        'https://preflight.test/v1/oauth/webflow/callback?code=unused-direct-install-code',
-        { headers: { accept: 'text/html' } }
+        `https://preflight.test/v1/oauth/webflow/callback?code=${code}&state=${state}`,
+        { headers: { cookie: start.headers.get('set-cookie')!.split(';', 1)[0]! } }
       )
     );
-    expect(directInstallCallback.status).toBe(303);
-    expect(directInstallCallback.headers.get('location')).toBe(
+  };
+  const me = (sub: string) =>
+    fetchWorker(
+      new Request('https://preflight.test/v1/me', {
+        headers: { authorization: `Bearer ${idTokenFor(sub)}` }
+      })
+    );
+
+  test('keeps an earlier developer signed in after another developer connects', async () => {
+    vi.stubGlobal('fetch', webflowStub({ 'code-a': USER_A, 'code-b': USER_B }));
+
+    expect((await connect('code-a')).status).toBe(303);
+    expect((await connect('code-b')).status).toBe(303);
+
+    const first = await me(USER_A);
+    expect(first.status).toBe(200);
+    expect(await first.json()).toMatchObject({ user: { id: USER_A } });
+    const second = await me(USER_B);
+    expect(second.status).toBe(200);
+    expect(await second.json()).toMatchObject({ user: { id: USER_B } });
+  });
+
+  test('stores a direct Webflow install under its own user only', async () => {
+    vi.stubGlobal('fetch', webflowStub({ 'code-a': USER_A, 'code-b': USER_B }));
+    expect((await connect('code-a')).status).toBe(303);
+
+    const install = await fetchWorker(
+      new Request('https://preflight.test/v1/oauth/webflow/callback?code=code-b', {
+        headers: { accept: 'text/html' }
+      })
+    );
+    expect(install.status).toBe(303);
+    expect(install.headers.get('location')).toBe(
       'https://preflight.test/v1/oauth/webflow/complete'
     );
-    expect(outboundFetch).toHaveBeenCalledTimes(2);
+
+    expect((await me(USER_B)).status).toBe(200);
+    expect((await me(USER_A)).status).toBe(200);
+    // The shared row still holds the state-bound connection, not the install.
+    await env.DB.prepare('DELETE FROM webflow_oauth_user_installations').run();
+    expect((await me(USER_A)).status).toBe(200);
+    expect((await me(USER_B)).status).toBe(401);
   });
 
   test('uses a completed OAuth installation before the managed fallback token', async () => {
@@ -174,6 +244,7 @@ describe('Webflow OAuth installation', () => {
     await env.DB.prepare(
       "DELETE FROM webflow_oauth_installations WHERE id = 'active'"
     ).run();
+    vi.stubGlobal('fetch', webflowStub({}));
 
     const callback = await fetchWorker(
       new Request(
