@@ -73,14 +73,21 @@ export async function authenticate(
   );
 
   for (const appAccessToken of candidates) {
-    const response = await fetch('https://api.webflow.com/beta/token/resolve', {
-      method: 'POST',
-      headers: {
-        authorization: `Bearer ${appAccessToken}`,
-        'content-type': 'application/json'
-      },
-      body: JSON.stringify({ idToken: token })
-    });
+    // A transport failure here used to escape as a 500. Treat it like a
+    // refused token: try the next stored token, and answer 401 if none works.
+    let response: Response;
+    try {
+      response = await fetch('https://api.webflow.com/beta/token/resolve', {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${appAccessToken}`,
+          'content-type': 'application/json'
+        },
+        body: JSON.stringify({ idToken: token })
+      });
+    } catch {
+      continue;
+    }
 
     if (!response.ok) {
       console.warn(

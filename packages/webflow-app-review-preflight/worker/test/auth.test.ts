@@ -106,4 +106,19 @@ describe('authenticate', () => {
       workspaceIds: ['ws-1']
     });
   });
+
+  test('a transport failure on token resolve is a refusal, not a thrown error', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        throw new TypeError('network down');
+      })
+    );
+    await expect(
+      authenticate(
+        request('any-token'),
+        withOAuth({ PREFLIGHT_OAUTH_BEARER_ENABLED: 'true', PREFLIGHT_OAUTH_CLIENT_IDS: 'cli-app' })
+      )
+    ).resolves.toBeNull();
+  });
 });

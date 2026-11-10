@@ -1749,6 +1749,25 @@ describe('review API', () => {
     expect(versionCount?.count).toBe(1);
   });
 
+  test('answers 400, not 500, when the upload is not multipart', async () => {
+    const response = await exports.default.fetch(
+      new Request('https://preflight.test/v1/reviews', {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer test-token',
+          'content-type': 'application/json'
+        },
+        body: JSON.stringify({ bundle: 'not a file' })
+      })
+    );
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({
+      error: 'invalid_bundle',
+      message: 'Send the bundle as multipart/form-data with a "bundle" file field.'
+    });
+  });
+
   test('rejects corrupt zip content without storing review evidence', async () => {
     const countBefore = await env.DB.prepare('SELECT COUNT(*) AS count FROM reviews').first<{
       count: number;
