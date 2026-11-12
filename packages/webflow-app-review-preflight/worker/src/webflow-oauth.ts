@@ -125,17 +125,22 @@ function redirectTo(request: Request, path: string): Response {
 async function recoverInvalidBrowserCallback(
   request: Request,
   env: Env,
-  reason: string
+  reason: 'state_mismatch' | 'state_unavailable'
 ): Promise<Response> {
   if (!(request.headers.get('accept') ?? '').includes('text/html')) {
     return invalidCallback(reason);
   }
 
-  if (await storedWebflowAccessToken(env)) {
-    return redirectTo(request, '/v1/oauth/webflow/complete');
+  console.warn(
+    JSON.stringify({ event: 'webflow_oauth_callback_not_completed', reason })
+  );
+  // No token was stored on this path. With no connection at all, start again;
+  // otherwise say so plainly. Another developer's stored token must never make
+  // this developer's failed connection read as complete.
+  if (!(await storedWebflowAccessToken(env))) {
+    return redirectTo(request, '/v1/oauth/webflow/start');
   }
-
-  return redirectTo(request, '/v1/oauth/webflow/start');
+  return webflowOAuthIncompletePage();
 }
 
 function configuredForStart(env: Env): boolean {
@@ -340,7 +345,11 @@ export async function completeWebflowOAuth(
   )
     .bind(encrypted.ciphertext, encrypted.iv, now, now)
     .run();
-  await storeUserInstallation(exchange.accessToken, env);
+  if (!(await storeUserInstallation(exchange.accessToken, env))) {
+    console.warn(
+      JSON.stringify({ event: 'webflow_oauth_user_installation_not_stored' })
+    );
+  }
 
   const completion = new URL('/v1/oauth/webflow/complete', request.url);
   return new Response(null, {
@@ -353,7 +362,54 @@ export async function completeWebflowOAuth(
   });
 }
 
+interface OAuthPageCopy {
+  status: number;
+  tone: 'success' | 'warning';
+  title: string;
+  eyebrow: string;
+  lede: string;
+  note: string;
+  action: { href: string; label: string };
+  setCookie?: string;
+}
+
 export function webflowOAuthCompletePage(): Response {
+  return oauthPage({
+    status: 200,
+    tone: 'success',
+    title: 'Connection complete',
+    eyebrow: 'Setup checkpoint complete',
+    lede: 'The secure connection is ready. Return to Webflow and open the approved test site in Designer to begin runtime validation.',
+    note: '<strong>Credentials stayed private.</strong> The app token was encrypted server-side and was not shown in this browser.',
+    action: { href: 'https://webflow.com/dashboard', label: 'Return to Webflow' }
+  });
+}
+
+/**
+ * Shown when a callback could not be tied to the connection this browser
+ * started (the request expired, or it began in another tab or browser).
+ */
+export function webflowOAuthIncompletePage(): Response {
+  return oauthPage({
+    status: 400,
+    tone: 'warning',
+    title: 'Connection not completed',
+    eyebrow: 'Action needed',
+    lede: 'Preflight could not match this authorization to the connection request from this browser, so nothing was saved. This happens when the request is older than 15 minutes, or when it started in a different tab or browser. Connect again and finish in the tab that opens.',
+    note: '<strong>Nothing was stored.</strong> Preflight did not save a token from this attempt.',
+    action: { href: '/v1/oauth/webflow/start', label: 'Connect again' },
+    setCookie: stateCookie('', 0)
+  });
+}
+
+function oauthPage(copy: OAuthPageCopy): Response {
+  const warning = copy.tone === 'warning';
+  const accent = warning ? '#f3c831' : '#5bd69b';
+  const accentBackground = warning ? '#3a3116' : '#183428';
+  const accentBorder = warning ? '#5c4d1c' : '#28543f';
+  const icon = warning
+    ? '<path d="M12 7v6"/><path d="M12 17h.01"/>'
+    : '<path d="m5 12 4 4L19 6"/>';
   return new Response(
     `<!doctype html>
 <html lang="en">
@@ -361,7 +417,7 @@ export function webflowOAuthCompletePage(): Response {
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="color-scheme" content="dark">
-    <title>Connection complete · App Review Preflight</title>
+    <title>${copy.title} · App Review Preflight</title>
     <style>
       :root {
         color-scheme: dark;
@@ -374,8 +430,8 @@ export function webflowOAuthCompletePage(): Response {
         --border-1: #3d3d3d;
         --action: #146ef5;
         --action-hover: #2f80ff;
-        --success: #5bd69b;
-        --success-background: #183428;
+        --success: ${accent};
+        --success-background: ${accentBackground};
         --font: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       }
       * { box-sizing: border-box; }
@@ -429,7 +485,7 @@ export function webflowOAuthCompletePage(): Response {
         width: 48px;
         height: 48px;
         place-items: center;
-        border: 1px solid #28543f;
+        border: 1px solid ${accentBorder};
         border-radius: 50%;
         background: var(--success-background);
         color: var(--success);
@@ -491,13 +547,13 @@ export function webflowOAuthCompletePage(): Response {
       <main>
         <section class="card" aria-labelledby="completion-title">
           <div class="status" aria-hidden="true">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 4 4L19 6"/></svg>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">${icon}</svg>
           </div>
-          <p class="eyebrow">Setup checkpoint complete</p>
-          <h1 id="completion-title">Connection complete</h1>
-          <p class="lede">The secure connection is ready. Return to Webflow and open the approved test site in Designer to begin runtime validation.</p>
-          <div class="privacy"><span class="dot" aria-hidden="true"></span><span><strong>Credentials stayed private.</strong> The app token was encrypted server-side and was not shown in this browser.</span></div>
-          <a class="button" href="https://webflow.com/dashboard">Return to Webflow</a>
+          <p class="eyebrow">${copy.eyebrow}</p>
+          <h1 id="completion-title">${copy.title}</h1>
+          <p class="lede">${copy.lede}</p>
+          <div class="privacy"><span class="dot" aria-hidden="true"></span><span>${copy.note}</span></div>
+          <a class="button" href="${copy.action.href}">${copy.action.label}</a>
         </section>
       </main>
       <footer>App Review Preflight · Evidence supports review; it does not make the decision.</footer>
@@ -505,12 +561,13 @@ export function webflowOAuthCompletePage(): Response {
   </body>
 </html>`,
     {
-      status: 200,
+      status: copy.status,
       headers: {
         'content-type': 'text/html; charset=utf-8',
         'cache-control': 'no-store',
         'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'",
-        'x-content-type-options': 'nosniff'
+        'x-content-type-options': 'nosniff',
+        ...(copy.setCookie ? { 'set-cookie': copy.setCookie } : {})
       }
     }
   );
