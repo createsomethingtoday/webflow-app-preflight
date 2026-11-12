@@ -260,6 +260,71 @@ describe('Webflow OAuth installation', () => {
     expect(await callback.text()).not.toContain('unused-direct-install-code');
   });
 
+  test('does not report a connection when the browser state does not match', async () => {
+    vi.stubGlobal('fetch', webflowStub({ 'code-a': USER_A, 'code-b': USER_B }));
+    // Another developer is connected, so a shared token exists.
+    expect((await connect('code-a')).status).toBe(303);
+
+    const start = await fetchWorker(
+      new Request('https://preflight.test/v1/oauth/webflow/start')
+    );
+    const state = new URL(start.headers.get('location')!).searchParams.get('state');
+    const attempts = [
+      // The state cookie expired or was never sent.
+      { accept: 'text/html' },
+      // A newer connection request replaced the cookie.
+      { accept: 'text/html', cookie: 'webflow_oauth_state=another-state' }
+    ];
+    for (const headers of attempts) {
+      const callback = await fetchWorker(
+        new Request(
+          `https://preflight.test/v1/oauth/webflow/callback?code=code-b&state=${state}`,
+          { headers }
+        )
+      );
+      const html = await callback.text();
+
+      expect(callback.status).toBe(400);
+      expect(callback.headers.get('location')).toBeNull();
+      expect(html).toContain('Connection not completed');
+      expect(html).not.toContain('Connection complete');
+      expect(html).toContain('href="/v1/oauth/webflow/start"');
+      expect(html).not.toContain('code-b');
+    }
+
+    // The failed attempts stored nothing for the second developer.
+    await env.DB.prepare(
+      "DELETE FROM webflow_oauth_installations WHERE id = 'active'"
+    ).run();
+    expect((await me(USER_A)).status).toBe(200);
+    expect((await me(USER_B)).status).toBe(401);
+  });
+
+  test('does not report a connection when the state has already been used', async () => {
+    vi.stubGlobal('fetch', webflowStub({ 'code-a': USER_A }));
+    const start = await fetchWorker(
+      new Request('https://preflight.test/v1/oauth/webflow/start')
+    );
+    const state = new URL(start.headers.get('location')!).searchParams.get('state');
+    const replay = () =>
+      fetchWorker(
+        new Request(
+          `https://preflight.test/v1/oauth/webflow/callback?code=code-a&state=${state}`,
+          {
+            headers: {
+              accept: 'text/html',
+              cookie: start.headers.get('set-cookie')!.split(';', 1)[0]!
+            }
+          }
+        )
+      );
+    expect((await replay()).status).toBe(303);
+
+    const second = await replay();
+    expect(second.status).toBe(400);
+    expect(await second.text()).toContain('Connection not completed');
+  });
+
   test('renders a self-contained Webflow-style completion page', async () => {
     const response = await fetchWorker(
       new Request('https://preflight.test/v1/oauth/webflow/complete')
