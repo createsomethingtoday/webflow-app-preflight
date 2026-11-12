@@ -135,6 +135,11 @@ function unverifiedIdTokenSubject(idToken: string): string | null {
 
 const OAUTH_REQUEST_TIMEOUT_MS = 5000;
 
+// The creator CLI's access token, kept only while its request is handled so
+// the Worker can ask Webflow about one site. It lives beside the identity,
+// not on it, so it can never be stored or logged with the identity.
+const oauthTokens = new WeakMap<AuthenticatedUser, string>();
+
 async function oauthGetJson(url: string, token: string): Promise<unknown | null> {
   try {
     const response = await fetch(url, {
@@ -186,12 +191,33 @@ async function authenticateOAuthBearer(
   const applicationId = info?.application?.id;
   if (typeof applicationId !== 'string' || !allowed.has(applicationId)) return null;
 
-  return {
+  const identity: AuthenticatedUser = {
     id: userId,
     siteId: null,
     authVia: 'oauth',
     workspaceIds: idList(info?.authorization?.authorizedTo?.workspaceIds)
   };
+  oauthTokens.set(identity, token);
+  return identity;
+}
+
+/**
+ * True when a creator CLI sign-in can read the named Webflow site. Webflow
+ * answers for the token itself, so the site must be inside what the developer
+ * authorized. A Designer identity never passes: its site comes from the ID
+ * token, not from a name the caller sends.
+ */
+export async function oauthUserCanReadSite(
+  user: AuthenticatedUser,
+  siteId: string
+): Promise<boolean> {
+  const token = oauthTokens.get(user);
+  if (user.authVia !== 'oauth' || !token) return false;
+  const site = (await oauthGetJson(
+    `https://api.webflow.com/v2/sites/${encodeURIComponent(siteId)}`,
+    token
+  )) as { id?: unknown } | null;
+  return site?.id === siteId;
 }
 
 async function sha256(value: string): Promise<string> {

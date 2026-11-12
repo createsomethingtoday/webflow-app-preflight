@@ -375,6 +375,27 @@ ORDER BY created_at ASC;
 
 One job can be `approved` or `running` per review version and actor role, so a running developer test never blocks a reviewer replay. The scheduled task expires stale jobs and retries sandbox termination.
 
+## Run the same test from the creator CLI
+
+The creator CLI (`wf-app-validate runtime`) can prepare and run the same Runtime Test Package without the Designer. The server still creates the sandbox and the evidence.
+
+The CLI path is off until an operator sets both switches on the Worker:
+
+- `PREFLIGHT_OAUTH_BEARER_ENABLED` is `true`.
+- `PREFLIGHT_OAUTH_CLIENT_IDS` lists the application ID of the sign-in app.
+
+One rule is different for the CLI:
+
+| Designer                                         | CLI                                                                  |
+| ------------------------------------------------ | -------------------------------------------------------------------- |
+| Preflight binds the site from the Designer token | The developer names the test site with `siteId`                      |
+| No more proof is necessary                       | Webflow must confirm that the CLI sign-in can read that site         |
+| The published page must carry the bound site ID  | The published page must carry the named site ID                      |
+
+The server ignores a `sandboxInstallationId` that the CLI sends. It uses the site that Webflow confirmed.
+
+A receipt records how the review was created. `authVia` is `designer` or `oauth`. A reviewer can then tell a CLI review from a Designer review.
+
 ## Validation receipt
 
 Copy this block after the three-run loop:

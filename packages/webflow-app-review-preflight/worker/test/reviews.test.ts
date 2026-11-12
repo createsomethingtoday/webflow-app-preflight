@@ -1218,6 +1218,7 @@ describe('review API', () => {
     expect(verified.receipt.readiness).toBe('changes_required');
     expect(Object.keys(verified.receipt).sort()).toEqual([
       'appName',
+      'authVia',
       'bootTest',
       'bundleSha256',
       'clientIdBound',
@@ -4849,5 +4850,194 @@ describe('review API', () => {
       error: 'runtime_observation_dispatch_unavailable',
       message: expect.stringMatching(/RUNTIME_CANARY_URL/)
     });
+  });
+});
+
+describe('creator CLI runtime packages', () => {
+  const cliEnv = () =>
+    ({
+      DB: env.DB,
+      ARTIFACTS: env.ARTIFACTS,
+      ENVIRONMENT: 'production',
+      ALLOWED_ORIGINS: '',
+      WEBFLOW_APP_ACCESS_TOKEN: 'app-token',
+      PREFLIGHT_OAUTH_BEARER_ENABLED: 'true',
+      PREFLIGHT_OAUTH_CLIENT_IDS: 'cli-app'
+    }) as Env;
+
+  // Webflow as the creator CLI sees it: the bearer is not a Designer ID token,
+  // it belongs to the allowlisted app, and it can read only `readableSites`.
+  function stubCliWebflow(options: { readableSites: string[]; pageSiteId: string }) {
+    const siteLookups: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const request = input instanceof Request ? input : new Request(input, init);
+        const url = request.url;
+        if (url === 'https://api.webflow.com/beta/token/resolve') {
+          return Response.json({ error: 'invalid' }, { status: 401 });
+        }
+        if (url === 'https://api.webflow.com/v2/token/authorized_by') {
+          return Response.json({ id: 'cli-user' });
+        }
+        if (url === 'https://api.webflow.com/v2/token/introspect') {
+          return Response.json({
+            application: { id: 'cli-app' },
+            authorization: { authorizedTo: { workspaceIds: ['ws-1'], siteIds: [] } }
+          });
+        }
+        const site = url.match(/^https:\/\/api\.webflow\.com\/v2\/sites\/([^/?]+)$/);
+        if (site) {
+          siteLookups.push(`${site[1]}:${request.headers.get('authorization')}`);
+          return options.readableSites.includes(site[1])
+            ? Response.json({ id: site[1] })
+            : Response.json({ error: 'not_found' }, { status: 404 });
+        }
+        if (url === 'https://cli-test-site.webflow.io/') {
+          return new Response(
+            `<!doctype html><html data-wf-site="${options.pageSiteId}"><body></body></html>`,
+            { status: 200, headers: { 'content-type': 'text/html; charset=utf-8' } }
+          );
+        }
+        return Response.json({ error: 'unexpected_request' }, { status: 500 });
+      })
+    );
+    return siteLookups;
+  }
+
+  async function createCliReview(seed: string) {
+    const form = new FormData();
+    form.set(
+      'bundle',
+      new File([await createBundle({ seed })], 'consent-pro.zip', { type: 'application/zip' })
+    );
+    const response = await worker.fetch(
+      new Request('https://preflight.test/v1/reviews', {
+        method: 'POST',
+        headers: { authorization: 'Bearer cli-access-token' },
+        body: form
+      }),
+      cliEnv()
+    );
+    expect(response.status).toBe(201);
+    return response.json<{ review: { id: string }; submissionReceipt: { code: string } }>();
+  }
+
+  const packageRequest = (reviewId: string, extra: Record<string, unknown>) =>
+    new Request(`https://preflight.test/v1/reviews/${reviewId}/runtime-test-packages`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer cli-access-token', 'content-type': 'application/json' },
+      body: JSON.stringify({
+        targetUrl: 'https://cli-test-site.webflow.io/',
+        sandboxOwnershipConfirmed: true,
+        license: {
+          mode: 'installation_allowlist',
+          expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString()
+        },
+        runtimeArtifacts: [
+          {
+            url: 'https://api.consentpro.com/v2/cdn/runtime.js',
+            sha256: 'a'.repeat(64),
+            integrity: TEST_RUNTIME_INTEGRITY
+          }
+        ],
+        negativeProxyProbe: {
+          method: 'GET',
+          urlTemplate: 'https://api.consentpro.com/v2/proxy?url={canaryUrl}'
+        },
+        lifecycle: { readySelector: '[data-runtime-ready]' },
+        ...extra
+      })
+    });
+
+  test('prepares a runtime package when the CLI sign-in can read the named test site', async () => {
+    const siteLookups = stubCliWebflow({ readableSites: ['cli-site-1'], pageSiteId: 'cli-site-1' });
+    const created = await createCliReview('cli-runtime-ok');
+
+    const response = await worker.fetch(
+      packageRequest(created.review.id, { siteId: 'cli-site-1' }),
+      cliEnv()
+    );
+    expect(response.status).toBe(201);
+    expect(await response.json()).toMatchObject({
+      testPackage: { sandboxInstallationId: 'cli-site-1', status: 'ready' }
+    });
+    // Webflow was asked about that one site with the CLI's own token.
+    expect(siteLookups).toEqual(['cli-site-1:Bearer cli-access-token']);
+  });
+
+  test('ignores a sandboxInstallationId the CLI sends and uses the proven site', async () => {
+    stubCliWebflow({ readableSites: ['cli-site-1'], pageSiteId: 'cli-site-1' });
+    const created = await createCliReview('cli-runtime-spoof');
+
+    const response = await worker.fetch(
+      packageRequest(created.review.id, {
+        siteId: 'cli-site-1',
+        sandboxInstallationId: 'someone-elses-site',
+        // The exact optional shapes the creator CLI sends by default.
+        negativeProxyProbe: { mode: 'none_declared', declaration: 'no_proxy_surface' },
+        runtimeArtifacts: [
+          {
+            url: 'https://api.consentpro.com/v2/cdn/runtime.js',
+            sha256: 'a'.repeat(64),
+            integrity: TEST_RUNTIME_INTEGRITY,
+            loadMode: 'document'
+          }
+        ]
+      }),
+      cliEnv()
+    );
+    expect(response.status).toBe(201);
+    expect(await response.json()).toMatchObject({
+      testPackage: { sandboxInstallationId: 'cli-site-1' }
+    });
+  });
+
+  test('refuses a CLI package with no site, an unreadable site, or a page from another site', async () => {
+    stubCliWebflow({ readableSites: ['cli-site-1'], pageSiteId: 'another-webflow-site' });
+    const created = await createCliReview('cli-runtime-refused');
+
+    const noSite = await worker.fetch(packageRequest(created.review.id, {}), cliEnv());
+    expect(noSite.status).toBe(400);
+    await expect(noSite.json()).resolves.toMatchObject({
+      error: 'invalid_runtime_test_package',
+      message: expect.stringMatching(/siteId/)
+    });
+
+    const unreadable = await worker.fetch(
+      packageRequest(created.review.id, { siteId: 'cli-site-2' }),
+      cliEnv()
+    );
+    expect(unreadable.status).toBe(400);
+    await expect(unreadable.json()).resolves.toMatchObject({
+      error: 'invalid_runtime_test_package',
+      message: expect.stringMatching(/cannot read that Webflow site/)
+    });
+
+    const foreignPage = await worker.fetch(
+      packageRequest(created.review.id, { siteId: 'cli-site-1' }),
+      cliEnv()
+    );
+    expect(foreignPage.status).toBe(400);
+    await expect(foreignPage.json()).resolves.toMatchObject({
+      error: 'invalid_runtime_test_package',
+      message: expect.stringMatching(/published Webflow site/i)
+    });
+  });
+
+  test('a receipt says when the review came from the CLI', async () => {
+    stubCliWebflow({ readableSites: [], pageSiteId: 'cli-site-1' });
+    const created = await createCliReview('cli-receipt-label');
+
+    const verifyResponse = await worker.fetch(
+      new Request('https://preflight.test/v1/submission-receipts/verify', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ code: created.submissionReceipt.code })
+      }),
+      cliEnv()
+    );
+    const verified = await verifyResponse.json<{ receipt: { authVia: string; runtimeSecurityStatus: string } }>();
+    expect(verified.receipt).toMatchObject({ authVia: 'oauth', runtimeSecurityStatus: 'none' });
   });
 });

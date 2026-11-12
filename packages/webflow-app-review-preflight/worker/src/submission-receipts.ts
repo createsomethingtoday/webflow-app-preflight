@@ -29,6 +29,8 @@ export interface SubmissionReceiptVerification {
   readiness: BundleReview['summary']['readiness'];
   sourceMapStatus: string;
   runtimeSecurityStatus: 'passed' | 'blocked' | 'none';
+  /** How the review was created: the Designer extension or the creator CLI. */
+  authVia: 'designer' | 'oauth';
   installUrl: InstallUrlCheckSummary | null;
   createdAt: string;
   /**
@@ -156,9 +158,10 @@ export async function verifySubmissionReceipt(
 
   const row = await env.DB.prepare(
     `SELECT sr.id, sr.review_id, sr.review_version_id, sr.created_at, sr.bound_client_id,
-            v.review_json, v.source_map_sha256
+            v.review_json, v.source_map_sha256, r.auth_via
        FROM submission_receipts sr
        JOIN review_versions v ON v.id = sr.review_version_id
+       JOIN reviews r ON r.id = sr.review_id
       WHERE sr.code_sha256 = ?`
   )
     .bind(await sha256Hex(normalized))
@@ -170,6 +173,7 @@ export async function verifySubmissionReceipt(
       bound_client_id: string | null;
       review_json: string;
       source_map_sha256: string | null;
+      auth_via: string | null;
     }>();
   if (!row) return null;
 
@@ -248,6 +252,8 @@ export async function verifySubmissionReceipt(
     readiness: result.summary.readiness,
     sourceMapStatus: result.sourceMapSummary?.status ?? 'not_applicable',
     runtimeSecurityStatus,
+    // Rows from before the column existed are NULL and were all Designer reviews.
+    authVia: row.auth_via === 'oauth' ? 'oauth' : 'designer',
     installUrl: await installUrlCheckSummaryForVersion(row.review_version_id, env),
     createdAt: row.created_at,
     sourceMapsInBundle: (result.sourceMapSummary?.exposedSourceMapFiles?.length ?? 0) > 0,
