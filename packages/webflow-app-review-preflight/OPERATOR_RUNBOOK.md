@@ -386,11 +386,11 @@ The CLI path is off until an operator sets both switches on the Worker:
 
 One rule is different for the CLI:
 
-| Designer                                         | CLI                                                                  |
-| ------------------------------------------------ | -------------------------------------------------------------------- |
-| Preflight binds the site from the Designer token | The developer names the test site with `siteId`                      |
-| No more proof is necessary                       | Webflow must confirm that the CLI sign-in can read that site         |
-| The published page must carry the bound site ID  | The published page must carry the named site ID                      |
+| Designer                                         | CLI                                                          |
+| ------------------------------------------------ | ------------------------------------------------------------ |
+| Preflight binds the site from the Designer token | The developer names the test site with `siteId`              |
+| No more proof is necessary                       | Webflow must confirm that the CLI sign-in can read that site |
+| The published page must carry the bound site ID  | The published page must carry the named site ID              |
 
 The server ignores a `sandboxInstallationId` that the CLI sends. It uses the site that Webflow confirmed.
 
