@@ -20,6 +20,13 @@
   //                               origin (enforced by normalizeUrl). Without
   //                               it every probe-mode package fails with a
   //                               configuration error.
+  //   - PREFLIGHT_OAUTH_CLIENT_IDS comma-separated Webflow OAuth application
+  //                               IDs whose tokens the creator CLI path
+  //                               accepts (`application.id` from
+  //                               GET /v2/token/introspect). Set it as a
+  //                               secret, never in `vars`: a var and a secret
+  //                               with one name stop the deploy. Missing or
+  //                               empty keeps the CLI path closed.
   // NEVER bind PREFLIGHT_DEV_TOKEN or PREFLIGHT_REVIEWER_DEV_TOKEN here: the
   // Worker refuses to serve when they are present alongside non-localhost
   // ALLOWED_ORIGINS.
@@ -35,7 +42,8 @@
     "ENVIRONMENT": "production",
     "ALLOWED_ORIGINS": "chrome-extension://eiogakldgljpbbmplgckjkoglfgabblm,https://6a57b0fa70db1b7a0cd666ac.webflow-ext.com",
     "E2B_RUNTIME_TEMPLATE_ID": "app-review-companion-runtime:25557986-745c-4bd9-80bd-ffbd665239fa",
-    "WEBFLOW_OAUTH_REDIRECT_URI": "https://webflow-app-review-preflight.webflow-inc.workers.dev/v1/oauth/webflow/callback"
+    "WEBFLOW_OAUTH_REDIRECT_URI": "https://webflow-app-review-preflight.webflow-inc.workers.dev/v1/oauth/webflow/callback",
+    "PREFLIGHT_OAUTH_BEARER_ENABLED": "false"
   },
   "d1_databases": [
     {

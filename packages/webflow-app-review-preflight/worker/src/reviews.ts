@@ -143,12 +143,27 @@ function storedReview(
   };
 }
 
+/**
+ * A body that is not multipart (a JSON post, a truncated upload) makes
+ * `request.formData()` throw. That is the caller's input, not a server
+ * fault: answer 400 with a message a CLI can show.
+ */
+async function readUploadForm(request: Request): Promise<FormData> {
+  try {
+    return await request.formData();
+  } catch {
+    throw new ReviewInputError(
+      'Send the bundle as multipart/form-data with a "bundle" file field.'
+    );
+  }
+}
+
 export async function createReview(
   request: Request,
   env: Env,
   user: AuthenticatedUser
 ): Promise<{ review: StoredReview; submissionReceipt: SubmissionReceipt }> {
-  const form = await request.formData();
+  const form = await readUploadForm(request);
   const bundle = form.get('bundle');
 
   if (!(bundle instanceof File)) {
@@ -186,8 +201,8 @@ export async function createReview(
   const statements = [
     env.DB.prepare(
       `INSERT INTO reviews
-        (id, owner_user_id, site_id, name, created_at, updated_at, latest_version_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`
+        (id, owner_user_id, site_id, name, created_at, updated_at, latest_version_id, auth_via)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
     ).bind(
       result.reviewId,
       user.id,
@@ -195,7 +210,8 @@ export async function createReview(
       name,
       result.createdAt,
       result.createdAt,
-      versionId
+      versionId,
+      user.authVia ?? 'designer'
     ),
     env.DB.prepare(
       `INSERT INTO review_versions
@@ -316,8 +332,8 @@ export async function createRuntimeReview(
   await env.DB.batch([
     env.DB.prepare(
       `INSERT INTO reviews
-        (id, owner_user_id, site_id, name, created_at, updated_at, latest_version_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`
+        (id, owner_user_id, site_id, name, created_at, updated_at, latest_version_id, auth_via)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
     ).bind(
       result.reviewId,
       user.id,
@@ -325,7 +341,8 @@ export async function createRuntimeReview(
       name,
       result.createdAt,
       result.createdAt,
-      versionId
+      versionId,
+      user.authVia ?? 'designer'
     ),
     env.DB.prepare(
       `INSERT INTO review_versions
@@ -425,7 +442,7 @@ export async function addRevision(
 
   if (!currentRow) return null;
 
-  const form = await request.formData();
+  const form = await readUploadForm(request);
   const bundle = form.get('bundle');
   if (!(bundle instanceof File)) {
     throw new ReviewInputError('Choose a .zip app bundle to add a revision.');

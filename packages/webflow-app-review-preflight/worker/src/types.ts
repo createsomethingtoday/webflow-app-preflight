@@ -25,11 +25,15 @@ export interface Env {
   BOOT_TEST_ENABLED?: string;
   /** Optional replacement for the captured extension host Content-Security-Policy. */
   BOOT_TEST_CSP?: string;
+  PREFLIGHT_OAUTH_BEARER_ENABLED?: string;
+  PREFLIGHT_OAUTH_CLIENT_IDS?: string;
 }
 
 export interface AuthenticatedUser {
   id: string;
   siteId: string | null;
+  authVia?: 'designer' | 'oauth';
+  workspaceIds?: string[];
   companionSession?: {
     reviewId: string;
     reviewVersionId: string;

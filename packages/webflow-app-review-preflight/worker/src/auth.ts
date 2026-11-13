@@ -44,7 +44,7 @@ export async function authenticate(
     env.PREFLIGHT_DEV_TOKEN &&
     token === env.PREFLIGHT_DEV_TOKEN
   ) {
-    return { id: 'local-webflow-user', siteId: 'local-webflow-site' };
+    return { id: 'local-webflow-user', siteId: 'local-webflow-site', authVia: 'designer' };
   }
 
   if (
@@ -52,7 +52,19 @@ export async function authenticate(
     env.PREFLIGHT_REVIEWER_DEV_TOKEN &&
     token === env.PREFLIGHT_REVIEWER_DEV_TOKEN
   ) {
-    return { id: 'local-webflow-reviewer', siteId: 'local-webflow-review-site' };
+    return {
+      id: 'local-webflow-reviewer',
+      siteId: 'local-webflow-review-site',
+      authVia: 'designer'
+    };
+  }
+
+  // A Designer ID token is a JWT. A Webflow OAuth access token is not. While
+  // the creator CLI path is on, a bearer with no dot goes straight to that
+  // path: the resolve calls below cannot accept it, and each one would use the
+  // shared installation token and log a false resolve failure.
+  if (env.PREFLIGHT_OAUTH_BEARER_ENABLED === 'true' && !token.includes('.')) {
+    return authenticateOAuthBearer(token, env);
   }
 
   // Webflow resolves an ID token only when the bearer token's authorization
@@ -69,14 +81,21 @@ export async function authenticate(
   );
 
   for (const appAccessToken of candidates) {
-    const response = await fetch('https://api.webflow.com/beta/token/resolve', {
-      method: 'POST',
-      headers: {
-        authorization: `Bearer ${appAccessToken}`,
-        'content-type': 'application/json'
-      },
-      body: JSON.stringify({ idToken: token })
-    });
+    // A transport failure here used to escape as a 500. Treat it like a
+    // refused token: try the next stored token, and answer 401 if none works.
+    let response: Response;
+    try {
+      response = await fetch('https://api.webflow.com/beta/token/resolve', {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${appAccessToken}`,
+          'content-type': 'application/json'
+        },
+        body: JSON.stringify({ idToken: token })
+      });
+    } catch {
+      continue;
+    }
 
     if (!response.ok) {
       console.warn(
@@ -93,10 +112,16 @@ export async function authenticate(
 
     return {
       id: resolved.id,
-      siteId: typeof resolved.siteId === 'string' ? resolved.siteId : null
+      siteId: typeof resolved.siteId === 'string' ? resolved.siteId : null,
+      authVia: 'designer'
     };
   }
-  return null;
+
+  // No stored app token resolves this bearer as a Designer ID token. The
+  // creator CLI sends a Webflow OAuth access token instead.
+  return env.PREFLIGHT_OAUTH_BEARER_ENABLED === 'true'
+    ? authenticateOAuthBearer(token, env)
+    : null;
 }
 
 /**
@@ -114,6 +139,93 @@ function unverifiedIdTokenSubject(idToken: string): string | null {
   } catch {
     return null;
   }
+}
+
+const OAUTH_REQUEST_TIMEOUT_MS = 5000;
+
+// The creator CLI's access token, kept only while its request is handled so
+// the Worker can ask Webflow about one site. It lives beside the identity,
+// not on it, so it can never be stored or logged with the identity.
+const oauthTokens = new WeakMap<AuthenticatedUser, string>();
+
+async function oauthGetJson(url: string, token: string): Promise<unknown | null> {
+  try {
+    const response = await fetch(url, {
+      headers: { authorization: `Bearer ${token}`, accept: 'application/json' },
+      signal: AbortSignal.timeout(OAUTH_REQUEST_TIMEOUT_MS)
+    });
+    if (!response.ok) return null;
+    return await response.json();
+  } catch {
+    return null;
+  }
+}
+
+function idList(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === 'string' && item !== '')
+    : [];
+}
+
+/**
+ * Creator CLI path: a Webflow OAuth access token as the bearer. Off unless
+ * PREFLIGHT_OAUTH_BEARER_ENABLED is 'true', and fails closed unless the token
+ * belongs to an application listed in PREFLIGHT_OAUTH_CLIENT_IDS. The identity
+ * has no Designer site (siteId null), so ownership is by user id alone.
+ */
+async function authenticateOAuthBearer(
+  token: string,
+  env: Env
+): Promise<AuthenticatedUser | null> {
+  const allowed = new Set(
+    (env.PREFLIGHT_OAUTH_CLIENT_IDS ?? '')
+      .split(',')
+      .map((value) => value.trim())
+      .filter(Boolean)
+  );
+  if (allowed.size === 0) return null;
+
+  const [user, introspection] = await Promise.all([
+    oauthGetJson('https://api.webflow.com/v2/token/authorized_by', token),
+    oauthGetJson('https://api.webflow.com/v2/token/introspect', token)
+  ]);
+  const userId = (user as { id?: unknown } | null)?.id;
+  if (typeof userId !== 'string' || !userId) return null;
+
+  const info = introspection as {
+    application?: { id?: unknown };
+    authorization?: { authorizedTo?: { workspaceIds?: unknown } };
+  } | null;
+  const applicationId = info?.application?.id;
+  if (typeof applicationId !== 'string' || !allowed.has(applicationId)) return null;
+
+  const identity: AuthenticatedUser = {
+    id: userId,
+    siteId: null,
+    authVia: 'oauth',
+    workspaceIds: idList(info?.authorization?.authorizedTo?.workspaceIds)
+  };
+  oauthTokens.set(identity, token);
+  return identity;
+}
+
+/**
+ * True when a creator CLI sign-in can read the named Webflow site. Webflow
+ * answers for the token itself, so the site must be inside what the developer
+ * authorized. A Designer identity never passes: its site comes from the ID
+ * token, not from a name the caller sends.
+ */
+export async function oauthUserCanReadSite(
+  user: AuthenticatedUser,
+  siteId: string
+): Promise<boolean> {
+  const token = oauthTokens.get(user);
+  if (user.authVia !== 'oauth' || !token) return false;
+  const site = (await oauthGetJson(
+    `https://api.webflow.com/v2/sites/${encodeURIComponent(siteId)}`,
+    token
+  )) as { id?: unknown } | null;
+  return site?.id === siteId;
 }
 
 async function sha256(value: string): Promise<string> {
@@ -170,6 +282,10 @@ export function companionRoleForUser(
   env: Env
 ): 'developer' | 'reviewer' {
   if (user.companionSession) return user.companionSession.actorRole;
+  // The reviewer role needs a Designer ID token, which is short-lived and
+  // issued inside the Designer. A creator CLI token lasts until someone
+  // revokes it and sits in a file on a computer, so it is never a reviewer.
+  if (user.authVia === 'oauth') return 'developer';
   return new Set(
     (env.REVIEWER_USER_IDS ?? '')
       .split(',')

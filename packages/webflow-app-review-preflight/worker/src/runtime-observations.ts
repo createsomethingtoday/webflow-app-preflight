@@ -19,6 +19,7 @@ import {
   sanitizeRuntimeStaticScan
 } from './runtime-advisory';
 import { isPrivateOrLocalHostname } from './net';
+import { oauthUserCanReadSite } from './auth';
 import type { AuthenticatedUser, Env } from './types';
 import {
   E2BRuntimeLaunchError,
@@ -542,19 +543,38 @@ export async function createRuntimeTestPackage(
   if (!row) return null;
 
   const now = new Date();
-  if (!user.siteId) {
-    throw new RuntimeTestPackageError(
-      'Open App Review Preflight from the dedicated Webflow test site before preparing a runtime package.'
-    );
-  }
   const body = await readJson(request);
+  // The Designer names the test site through its ID token. The creator CLI has
+  // no Designer site, so it names the site and Webflow must confirm that the
+  // CLI's own token can read it. Either way the published page is then checked
+  // against that same site.
+  let sandboxSiteId = user.siteId;
+  if (!sandboxSiteId) {
+    if (user.authVia !== 'oauth') {
+      throw new RuntimeTestPackageError(
+        'Open App Review Preflight from the dedicated Webflow test site before preparing a runtime package.'
+      );
+    }
+    const requested = typeof body.siteId === 'string' ? body.siteId.trim() : '';
+    if (!INSTALLATION_ID.test(requested)) {
+      throw new RuntimeTestPackageError(
+        'Name the dedicated Webflow test site with siteId to prepare a runtime package from the CLI.'
+      );
+    }
+    if (!(await oauthUserCanReadSite(user, requested))) {
+      throw new RuntimeTestPackageError(
+        'This sign-in cannot read that Webflow site. Sign in again and authorize the dedicated test site or its workspace.'
+      );
+    }
+    sandboxSiteId = requested;
+  }
   const input = parsePackageInput(
-    { ...body, sandboxInstallationId: user.siteId },
+    { ...body, sandboxInstallationId: sandboxSiteId },
     env,
     now.getTime()
   );
   const target = new URL(input.targetUrl);
-  await verifyPublishedWebflowSiteOwnership(target.toString(), user.siteId, env);
+  await verifyPublishedWebflowSiteOwnership(target.toString(), sandboxSiteId, env);
   const id = crypto.randomUUID();
   const testPackage: RuntimeTestPackage = {
     schemaVersion: 'runtime_test_package.v1',

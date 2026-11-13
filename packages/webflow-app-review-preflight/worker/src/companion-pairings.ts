@@ -60,7 +60,9 @@ export async function createCompanionPairing(
       'Prepare a ready runtime test package before connecting the browser companion.'
     );
   }
-  const actorRole = reviewerIds(env).has(user.id) ? 'reviewer' : 'developer';
+  // A creator CLI token is never a reviewer (see companionRoleForUser).
+  const actorRole =
+    user.authVia !== 'oauth' && reviewerIds(env).has(user.id) ? 'reviewer' : 'developer';
   const version = await env.DB.prepare(
     `SELECT r.owner_user_id, p.id AS runtime_test_package_id
        FROM review_versions rv
