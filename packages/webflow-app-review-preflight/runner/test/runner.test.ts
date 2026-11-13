@@ -1,5 +1,6 @@
 import { defaultRuleset } from '@create-something/bundle-scanner-core';
 import { createHash } from 'node:crypto';
+import { createSocket } from 'node:dgram';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -23,10 +24,18 @@ import {
   validateObservationContract
 } from '../src/index.js';
 
-// Platform asset hosts are public names. Resolve them without the network so
-// the suite runs offline; loopback fixtures skip the lookup entirely.
+// Names resolve without the network so the suite runs offline. A test sets an
+// answer here. Any other name resolves to a multicast address: a TCP
+// connection to one fails at once on every platform, so a platform asset
+// request fails fast and never waits for a time-out.
+const dnsAnswers = vi.hoisted(
+  () =>
+    new Map<string, Array<{ address: string; family: number }>>([
+      ['localhost', [{ address: '127.0.0.1', family: 4 }]]
+    ])
+);
 vi.mock('node:dns/promises', () => ({
-  lookup: async () => [{ address: '203.0.113.10', family: 4 }]
+  lookup: async (host: string) => dnsAnswers.get(host) ?? [{ address: '224.0.0.1', family: 4 }]
 }));
 
 // The adversarial fixtures allowlist loopback (127.0.0.1); loopback/private
@@ -253,6 +262,9 @@ interface ServerFixtureOptions {
 async function runServerFixture(options: ServerFixtureOptions): Promise<{
   manifest?: Record<string, unknown>;
   scriptInventory?: Array<Record<string, unknown>>;
+  networkLog?: { entries: Array<Record<string, unknown>> };
+  // The path of each WebSocket handshake that reached the fixture server.
+  upgradeRequests: string[];
   rejection?: string;
   result?: Awaited<ReturnType<typeof runRuntimeObservation>>;
 }> {
@@ -289,6 +301,11 @@ async function runServerFixture(options: ServerFixtureOptions): Promise<{
     response.writeHead(404);
     response.end('not found');
   });
+  const upgradeRequests: string[] = [];
+  server.on('upgrade', (request, socket) => {
+    upgradeRequests.push(request.url ?? '');
+    socket.destroy();
+  });
 
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   const address = server.address() as AddressInfo;
@@ -322,7 +339,10 @@ async function runServerFixture(options: ServerFixtureOptions): Promise<{
     const scriptInventory = await readFile(join(outputDir, 'script-inventory.json'), 'utf8')
       .then((raw) => JSON.parse(raw) as Array<Record<string, unknown>>)
       .catch(() => undefined);
-    return { manifest, scriptInventory, rejection, result };
+    const networkLog = await readFile(join(outputDir, 'network-log.json'), 'utf8')
+      .then((raw) => JSON.parse(raw) as { entries: Array<Record<string, unknown>> })
+      .catch(() => undefined);
+    return { manifest, scriptInventory, networkLog, upgradeRequests, rejection, result };
   } finally {
     if (previous === undefined) delete process.env.RUNTIME_ALLOW_PRIVATE_HOSTS;
     else process.env.RUNTIME_ALLOW_PRIVATE_HOSTS = previous;
@@ -1240,4 +1260,150 @@ describe('advisory static scan of served runtime bytes', () => {
       findings: []
     });
   }, 90_000);
+});
+
+describe('pinned host addresses', () => {
+  const source =
+    'document.body.setAttribute("data-runtime-ready", "");\n//# sourceMappingURL=/runtime-v1.js.map';
+  const digest = createHash('sha256').update(source).digest();
+  const integrity = `sha256-${digest.toString('base64')}`;
+  const pageRoutes = (headMarkup = '') =>
+    new Map([
+      [
+        '/runtime-fixture',
+        {
+          contentType: 'text/html',
+          body: `<!doctype html><body>${headMarkup}<script src="/runtime-v1.js" integrity="${integrity}" crossorigin="anonymous"></script></body>`
+        }
+      ],
+      ['/runtime-v1.js', { contentType: 'application/javascript', body: source }],
+      [
+        '/runtime-v1.js.map',
+        {
+          contentType: 'application/json',
+          body: JSON.stringify({ version: 3, sources: [], names: [], mappings: '' })
+        }
+      ],
+      ['/proxy', { contentType: 'application/json', status: 403, body: '{}' }]
+    ]);
+
+  test('every connection goes to the address that was checked, not to a new DNS answer', async () => {
+    // The name exists only in the one answer that the runner checked. A second
+    // resolution, by the browser or by a request client, finds nothing.
+    dnsAnswers.set('pinned-fixture.test', [{ address: '127.0.0.1', family: 4 }]);
+    try {
+      const { manifest, rejection } = await runServerFixture({
+        routes: () => pageRoutes(),
+        buildContract: (origin) => {
+          const named = origin.replace('127.0.0.1', 'pinned-fixture.test');
+          const base = loopbackContract(
+            named,
+            [{ url: `${named}/runtime-v1.js`, sha256: digest.toString('hex'), integrity }],
+            { allowedHosts: ['pinned-fixture.test'] }
+          );
+          return { ...base, target: { url: base.target.url, host: 'pinned-fixture.test' } };
+        }
+      });
+      expect(rejection).toBeUndefined();
+      expect(manifest?.runtimeReadyObserved).toBe(true);
+      const artifacts = manifest?.runtimeArtifacts as Array<{
+        loadedByPage: boolean;
+        sourceMap: { available: boolean };
+      }>;
+      // The page and the runtime file loaded through the pinned proxy.
+      expect(artifacts[0]?.loadedByPage).toBe(true);
+      // The source map check is the runner's own request. It used the pin too.
+      expect(artifacts[0]?.sourceMap.available).toBe(true);
+    } finally {
+      dnsAnswers.delete('pinned-fixture.test');
+    }
+  }, 30_000);
+
+  test('a host with one private address in its answer fails the job before any request', async () => {
+    dnsAnswers.set('rebind-fixture.test', [
+      { address: '203.0.113.10', family: 4 },
+      { address: '127.0.0.1', family: 4 }
+    ]);
+    try {
+      const { manifest, rejection } = await runServerFixture({
+        allowPrivateHosts: false,
+        routes: () => pageRoutes(),
+        buildContract: (origin) => {
+          const named = origin.replace('127.0.0.1', 'rebind-fixture.test');
+          const base = loopbackContract(
+            named,
+            [{ url: `${named}/runtime-v1.js`, sha256: digest.toString('hex'), integrity }],
+            { allowedHosts: ['rebind-fixture.test'] }
+          );
+          return { ...base, target: { url: base.target.url, host: 'rebind-fixture.test' } };
+        }
+      });
+      expect(rejection).toMatch(/did not resolve to a public network address/);
+      expect(manifest).toBeUndefined();
+    } finally {
+      dnsAnswers.delete('rebind-fixture.test');
+    }
+  }, 30_000);
+
+  test('the page cannot send UDP to an address', async () => {
+    const udp = createSocket('udp4');
+    let datagrams = 0;
+    udp.on('message', () => {
+      datagrams += 1;
+    });
+    await new Promise<void>((resolve) => udp.bind(0, '127.0.0.1', resolve));
+    try {
+      // A WebRTC connection sends a STUN request over UDP to its ICE server.
+      // No route handler and no HTTP proxy sees that datagram.
+      const { manifest, rejection } = await runServerFixture({
+        routes: () =>
+          pageRoutes(
+            `<script>(async () => {
+              const peer = new RTCPeerConnection({ iceServers: [{ urls: "stun:127.0.0.1:${udp.address().port}" }] });
+              peer.createDataChannel("probe");
+              await peer.setLocalDescription(await peer.createOffer());
+            })();</script>`
+          ),
+        buildContract: (origin) =>
+          loopbackContract(origin, [
+            { url: `${origin}/runtime-v1.js`, sha256: digest.toString('hex'), integrity }
+          ])
+      });
+      expect(rejection).toBeUndefined();
+      expect(manifest?.runtimeReadyObserved).toBe(true);
+      expect(datagrams).toBe(0);
+    } finally {
+      udp.close();
+    }
+  }, 30_000);
+
+  test('a WebSocket reaches an allowed host only; any other host is refused and recorded', async () => {
+    let port = '';
+    const { manifest, networkLog, upgradeRequests, rejection } = await runServerFixture({
+      routes: (origin) => {
+        port = new URL(origin).port;
+        return pageRoutes(
+          `<script>new WebSocket("ws://127.0.0.1:${port}/allowed-socket");new WebSocket("ws://localhost:${port}/other-socket");</script>`
+        );
+      },
+      buildContract: (origin) =>
+        loopbackContract(
+          origin,
+          [{ url: `${origin}/runtime-v1.js`, sha256: digest.toString('hex'), integrity }],
+          // `localhost` is not on the allowlist here, although it is this machine.
+          { allowedHosts: ['127.0.0.1'] }
+        )
+    });
+    expect(rejection).toBeUndefined();
+    expect(manifest?.runtimeReadyObserved).toBe(true);
+    // Only the handshake for the allowed host reached the server.
+    expect(upgradeRequests).toEqual(['/allowed-socket']);
+    expect(networkLog?.entries).toContainEqual({
+      phase: 'request',
+      url: `connect://localhost:${port}`,
+      method: 'CONNECT',
+      resourceType: 'tunnel',
+      blocked: true
+    });
+  }, 30_000);
 });

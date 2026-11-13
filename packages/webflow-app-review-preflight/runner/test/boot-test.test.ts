@@ -337,6 +337,7 @@ describe('Designer Extension boot test', () => {
             fetch('${apiOrigin}/v1/boot-test-jobs/job-1/bundle').catch(() => {});
             new Worker(URL.createObjectURL(new Blob(["fetch('${apiOrigin}/from-worker').catch(() => {})"])));
             new WebSocket('${apiOrigin.replace('http', 'ws')}/socket');
+            new Worker(URL.createObjectURL(new Blob(["new WebSocket('${apiOrigin.replace('http', 'ws')}/worker-socket')"])));
             fetch('http://127.0.0.1:3000/run', { method: 'POST' }).catch(() => {});`
         });
       });
