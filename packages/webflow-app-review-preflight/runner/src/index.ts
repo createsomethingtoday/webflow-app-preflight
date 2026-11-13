@@ -47,7 +47,6 @@ const CSP_REPLAY_MAX_REQUESTS = 100;
 const CSP_REPLAY_MAX_PLATFORM_REQUESTS = 500;
 const CSP_REPLAY_MAX_VIOLATIONS = 50;
 const CSP_REPLAY_SETTLE_MS = 500;
-const CSP_REPLAY_BINDING = '__wfCspReplayReport';
 
 /**
  * The scope within which an unpinned script counts as a pinned runtime's
@@ -825,101 +824,79 @@ function boundedString(value: unknown, max: number): string {
 }
 
 /**
- * Reduces one raw `securitypolicyviolation` report to the stored shape. The
- * report carries only a directive name, a blocked-resource kind or host, and
- * the script location; no page content, line text or script sample survives.
+ * One Content Security Policy issue as the browser reports it over the
+ * DevTools protocol (`Audits.issueAdded`). The replay reads these and nothing
+ * from the page, because page code cannot create, change, or withhold them.
  */
-export function normalizeCspViolation(
+interface BrowserCspIssue {
+  violatedDirective?: unknown;
+  blockedURL?: unknown;
+  contentSecurityPolicyViolationType?: unknown;
+  isReportOnly?: unknown;
+  sourceCodeLocation?: { url?: unknown } | null;
+}
+
+/**
+ * Reduces one browser-reported policy issue to the stored shape: a directive
+ * name, a blocked-resource kind or host, and the script location. No page
+ * content, line text or script sample survives. A report-only issue does not
+ * come from the enforced replay policy and is dropped.
+ */
+export function normalizeCspIssue(
   raw: unknown,
   context: ViolationContext
 ): CspReplayViolation | null {
   if (!raw || typeof raw !== 'object') return null;
-  const record = raw as Record<string, unknown>;
-  const directive = boundedString(record.directive, 60);
-  const blockedUri = boundedString(record.blockedURI, 2048);
-  const sourceFile = boundedString(record.sourceFile, 2048);
+  const issue = raw as BrowserCspIssue;
+  if (issue.isReportOnly === true) return null;
+  const directive = boundedString(issue.violatedDirective, 60);
+  const kind = boundedString(issue.contentSecurityPolicyViolationType, 60);
+  const blockedUrl = boundedString(issue.blockedURL, 2048);
+  const location =
+    issue.sourceCodeLocation && typeof issue.sourceCodeLocation === 'object'
+      ? issue.sourceCodeLocation
+      : null;
+  const sourceFile = boundedString(location?.url, 2048);
 
   let blocked = 'unknown';
-  if (blockedUri === 'inline' || blockedUri === 'eval') {
-    blocked = blockedUri;
-  } else if (URL.canParse(blockedUri)) {
-    blocked = new URL(blockedUri).host.toLowerCase() || 'unknown';
-  } else if (/^[a-z-]{1,24}$/.test(blockedUri)) {
-    blocked = blockedUri;
+  if (kind === 'kInlineViolation') {
+    blocked = 'inline';
+  } else if (kind === 'kEvalViolation' || kind === 'kWasmEvalViolation') {
+    blocked = 'eval';
+  } else if (kind.startsWith('kTrustedTypes')) {
+    blocked = 'trusted-types';
+  } else if (URL.canParse(blockedUrl)) {
+    const url = new URL(blockedUrl);
+    blocked = ['http:', 'https:', 'ws:', 'wss:'].includes(url.protocol)
+      ? url.host.toLowerCase() || 'unknown'
+      : url.protocol.replace(':', '');
   }
 
   const documentKey = URL.canParse(context.documentUrl)
     ? `${new URL(context.documentUrl).host}${new URL(context.documentUrl).pathname}`
     : '';
   let source = 'document';
-  let sourceIsRuntime = false;
+  let fromRuntime = false;
   if (sourceFile && URL.canParse(sourceFile)) {
     const url = new URL(sourceFile);
     const key = `${url.host.toLowerCase()}${url.pathname}`;
     if (key !== documentKey) {
       source = key.slice(0, 300);
-      sourceIsRuntime =
+      // Attribution uses only the location the browser reports. A script
+      // that is a declared runtime, or sits in a declared runtime's scope,
+      // owns the violation.
+      fromRuntime =
         context.runtimeUrls.has(sourceFile) ||
+        context.runtimeUrls.has(`${url.origin}${url.pathname}`) ||
         context.runtimeScopes.has(runtimeScopeKey(url, context.platformHosts));
     }
   }
   return {
     directive: /^[a-z-]{1,60}$/.test(directive) ? directive : 'unknown',
-    blocked,
+    blocked: /^[a-z0-9.:[\]-]{1,255}$/.test(blocked) ? blocked : 'unknown',
     source,
-    fromRuntime: record.createdByRuntime === true || sourceIsRuntime
+    fromRuntime
   };
-}
-
-// Runs before any page script. It records which script and style elements a
-// declared runtime created (by call stack) and forwards every CSP violation
-// event to the runner. Nothing but three short strings and a flag leaves the
-// page.
-function installCspReplayProbe(args: { runtimeUrls: string[]; binding: string }): void {
-  const marker = Symbol.for('webflow.csp-replay.runtime-created');
-  const runtime = new Set(args.runtimeUrls);
-  const calledByRuntime = (): boolean => {
-    const stack = new Error().stack ?? '';
-    return stack.split('\n').some((line) => {
-      const match = /(https?:\/\/[^\s()]+?):\d+:\d+\)?\s*$/.exec(line);
-      return match !== null && runtime.has(match[1] as string);
-    });
-  };
-  const originalCreateElement = Document.prototype.createElement;
-  Document.prototype.createElement = function (
-    this: Document,
-    localName: string,
-    options?: ElementCreationOptions
-  ): HTMLElement {
-    const element = Reflect.apply(originalCreateElement, this, [
-      localName,
-      options
-    ]) as HTMLElement;
-    const name = String(localName).toLowerCase();
-    if (name === 'script' || name === 'style') {
-      Object.defineProperty(element, marker, { value: calledByRuntime() });
-    }
-    return element;
-  } as typeof Document.prototype.createElement;
-  document.addEventListener(
-    'securitypolicyviolation',
-    (event) => {
-      const target = event.target as unknown as Record<symbol, unknown> | null;
-      const send = (globalThis as unknown as Record<string, unknown>)[args.binding];
-      if (typeof send !== 'function') return;
-      try {
-        send({
-          directive: event.effectiveDirective || event.violatedDirective,
-          blockedURI: event.blockedURI,
-          sourceFile: event.sourceFile,
-          createdByRuntime: target?.[marker] === true
-        });
-      } catch {
-        // Reporting is best effort.
-      }
-    },
-    true
-  );
 }
 
 /**
@@ -959,16 +936,6 @@ async function runCspReplay(
       userAgent: `Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${browser.version()} Safari/537.36`
     });
     const replayContext = context;
-    await replayContext.exposeBinding(CSP_REPLAY_BINDING, (_source, payload: unknown) => {
-      const violation = normalizeCspViolation(payload, violationContext);
-      if (!violation || found.size >= CSP_REPLAY_MAX_VIOLATIONS) return;
-      const key = JSON.stringify(violation);
-      if (!found.has(key)) found.set(key, violation);
-    });
-    await replayContext.addInitScript(installCspReplayProbe, {
-      runtimeUrls: [...runtimeUrls],
-      binding: CSP_REPLAY_BINDING
-    });
     const { admit, fulfillWithinAllowlist } = createEgressGuard({
       context: replayContext,
       allowedHosts,
@@ -1007,6 +974,24 @@ async function runCspReplay(
       await fulfillWithinAllowlist(route, url);
     });
     const page = await replayContext.newPage();
+    // Violations come from the browser over the DevTools protocol, not from a
+    // listener or a binding in the page. Nothing the page runs can add a
+    // report, change one, or stop one from arriving.
+    const devtools = await replayContext.newCDPSession(page);
+    devtools.on('Audits.issueAdded', (event: { issue?: { code?: string; details?: unknown } }) => {
+      if (event.issue?.code !== 'ContentSecurityPolicyIssue') return;
+      const details = (event.issue.details ?? {}) as {
+        contentSecurityPolicyIssueDetails?: unknown;
+      };
+      const violation = normalizeCspIssue(
+        details.contentSecurityPolicyIssueDetails,
+        violationContext
+      );
+      if (!violation || found.size >= CSP_REPLAY_MAX_VIOLATIONS) return;
+      const key = JSON.stringify(violation);
+      if (!found.has(key)) found.set(key, violation);
+    });
+    await devtools.send('Audits.enable');
 
     const replay = async (): Promise<CspReplayEvidence> => {
       await page.goto(contract.target.url, {
