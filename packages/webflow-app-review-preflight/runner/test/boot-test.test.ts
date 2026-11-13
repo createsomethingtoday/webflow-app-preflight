@@ -8,7 +8,7 @@ import {
   type BootTestJobContract
 } from '@create-something/webflow-app-review-preflight';
 import { describe, expect, test } from 'vitest';
-import { runBootTest, validateBootTestContract } from '../src/boot-test.js';
+import { clampBootTestLabels, runBootTest, validateBootTestContract } from '../src/boot-test.js';
 import { extensionSiteRoot, readBundleZip } from '../src/boot-test-zip.js';
 
 const BROWSER_TEST_TIMEOUT_MS = 30_000;
@@ -483,5 +483,35 @@ describe('boot test contract and archive boundaries', () => {
       'index.html',
       'nested/index.html'
     ]);
+  });
+});
+
+describe('boot test label clamp', () => {
+  test('replaces labels the Worker would refuse and keeps the verdict fields', () => {
+    const clamped = clampBootTestLabels(
+      {
+        status: 'failed',
+        failures: ['bundled_file_missing'],
+        cspViolations: [
+          { directive: 'script-src-elem', blocked: 'a?b', source: 'document' },
+          { directive: 'script-src-elem', blocked: 'c?d', source: 'document' }
+        ],
+        missingFiles: ['dir/a?b.js', 'ok.js', 'x/\u00e9.js'],
+        uncaughtErrors: ['x'.repeat(500), 'Bearer abcdefghijkl'],
+        externalHostsRequested: [`${'a'.repeat(300)}.com`, 'my_host.com', 'api.example.test'],
+        renderedTextLength: 3,
+        renderedElementCount: 1
+      },
+      { ...BOOT_TEST_LIMITS }
+    );
+    expect(clamped).toMatchObject({
+      status: 'failed',
+      failures: ['bundled_file_missing'],
+      cspViolations: [{ directive: 'script-src-elem', blocked: '[unreadable]', source: 'document' }],
+      missingFiles: ['[unreadable]', 'ok.js'],
+      externalHostsRequested: ['[unreadable]', 'api.example.test'],
+      renderedTextLength: 3
+    });
+    expect(clamped.uncaughtErrors).toEqual(['x'.repeat(300), '[unreadable]']);
   });
 });

@@ -17,6 +17,7 @@ import {
   type E2BRuntimeLaunchStage
 } from './e2b-runtime-launcher';
 import { json } from './http';
+import { checkSandboxLimits, sandboxLimitResponse, type SandboxLimitHit } from './sandbox-limits';
 import type { AuthenticatedUser, Env } from './types';
 
 /**
@@ -290,6 +291,7 @@ interface BootTestVersionRow {
 type IssueOutcome =
   | { kind: 'issued' | 'active'; job: BootTestSummary }
   | { kind: 'unavailable'; message: string }
+  | { kind: 'limit_reached'; hit: SandboxLimitHit }
   | { kind: 'dispatch_failed'; message: string };
 
 /**
@@ -328,6 +330,12 @@ async function issueBootTest(
     .run();
   const existing = await activeJob(version.version_id, actorRole, env);
   if (existing) return { kind: 'active', job: summaryFromRow(existing) };
+
+  const hit = await checkSandboxLimits(env, {
+    userId: user.id,
+    exemptFromUserLimit: actorRole === 'reviewer' || companionRoleForUser(user, env) === 'reviewer'
+  });
+  if (hit) return { kind: 'limit_reached', hit };
 
   const id = crypto.randomUUID();
   const capability = randomCapability();
@@ -472,6 +480,8 @@ async function requestBootTest(
   switch (outcome.kind) {
     case 'unavailable':
       return json({ error: 'boot_test_unavailable', message: outcome.message }, 400, origin);
+    case 'limit_reached':
+      return sandboxLimitResponse(outcome.hit, origin);
     case 'dispatch_failed':
       return json({ error: 'boot_test_dispatch_unavailable', message: outcome.message }, 503, origin);
     case 'active':
@@ -536,6 +546,8 @@ async function requestReviewerBootTestReplay(
         'bootTest',
         'A boot test replay is already running for this version. Refresh this page to see the result.'
       );
+    case 'limit_reached':
+      return reviewerRedirect('bootTest', outcome.hit.message);
     case 'unavailable':
     case 'dispatch_failed':
       return reviewerRedirect('bootTest', outcome.message);
@@ -751,6 +763,9 @@ function safeLabel(value: unknown, maxLength: number): value is string {
 }
 
 const HOST = /^(?:[a-z0-9-]+(?:\.[a-z0-9-]+)*|\[[0-9a-f:.]+\])(?::\d{1,5})?$/i;
+const MAX_HOST_LENGTH = 260;
+// Stands in for a bundle-influenced label that fails its format or length rule.
+const UNREADABLE_LABEL = '[unreadable]';
 
 function stringList(
   value: unknown,
@@ -765,20 +780,43 @@ function stringList(
   );
 }
 
+/**
+ * Bundle code controls these labels, so a bad one is replaced instead of
+ * rejecting the result: the verdict must always land. Lists are cut to their
+ * cap first and de-duplicated after, and `replaced` counts what was changed.
+ */
+function tolerantLabels(
+  items: unknown[],
+  cap: number,
+  clean: (item: unknown) => string | null
+): { labels: string[]; replaced: number } {
+  const labels = new Set<string>();
+  let replaced = Math.max(0, items.length - cap);
+  for (const item of items.slice(0, cap)) {
+    const label = clean(item);
+    if (label === null) replaced += 1;
+    labels.add(label ?? UNREADABLE_LABEL);
+  }
+  return { labels: [...labels], replaced };
+}
+
 function fail(message: string): never {
   throw new BootTestResultError(message);
 }
 
 /**
  * Re-validates everything the runner returned against the job contract.
- * Anything malformed, over a cap, internally inconsistent, or carrying
- * secret-shaped text is rejected; nothing is stored.
+ * The identity and verdict fields are strict: anything malformed or
+ * internally inconsistent is rejected and nothing is stored. Free-text labels
+ * the bundle can influence (hosts, paths, messages) are tolerant: a bad one
+ * becomes `[unreadable]`, an over-long list is cut to its cap, and the count
+ * of such changes is kept as `labelsReplaced`.
  */
 export function validateBootTestEvidence(
   raw: unknown,
   jobId: string,
   contract: BootTestJobContract
-): BootTestResult {
+): BootTestResult & { labelsReplaced?: number } {
   const limits = contract.limits;
   if (
     !isRecord(raw) ||
@@ -833,48 +871,74 @@ export function validateBootTestEvidence(
       BOOT_TEST_FAILURES.includes(item as BootTestFailure)
     ) ||
     !Array.isArray(result.cspViolations) ||
-    result.cspViolations.length > limits.cspViolations ||
-    !stringList(result.missingFiles, limits.missingFiles, (item) =>
-      safeLabel(item, limits.messageLength)
-    ) ||
+    !Array.isArray(result.missingFiles) ||
     !Array.isArray(result.uncaughtErrors) ||
-    result.uncaughtErrors.length > limits.uncaughtErrors ||
-    !result.uncaughtErrors.every(
-      (item) =>
-        typeof item === 'string' && item.length <= limits.messageLength && !SECRET_VALUE.test(item)
-    ) ||
-    !stringList(
-      result.externalHostsRequested,
-      limits.externalHosts,
-      (item) => typeof item === 'string' && item.length <= 260 && HOST.test(item)
-    ) ||
+    !Array.isArray(result.externalHostsRequested) ||
     !boundedInteger(result.renderedTextLength, 10_000_000) ||
     !boundedInteger(result.renderedElementCount, 10_000_000)
   ) {
     fail('The boot test result is malformed or exceeds its caps.');
   }
 
+  let labelsReplaced = 0;
+  const label =
+    (maxLength: number) =>
+    (item: unknown): string | null =>
+      safeLabel(item, maxLength) ? item : null;
   const cspViolations: BootTestCspViolation[] = [];
-  for (const item of result.cspViolations as unknown[]) {
-    if (
-      !isRecord(item) ||
-      !hasExactKeys(item, ['directive', 'blocked', 'source']) ||
-      typeof item.directive !== 'string' ||
-      !/^[a-z-]{1,40}$/.test(item.directive) ||
-      !safeLabel(item.blocked, limits.messageLength) ||
-      !safeLabel(item.source, limits.messageLength)
-    ) {
+  const seenViolations = new Set<string>();
+  const cspItems = result.cspViolations as unknown[];
+  labelsReplaced += Math.max(0, cspItems.length - limits.cspViolations);
+  for (const item of cspItems.slice(0, limits.cspViolations)) {
+    // The object shape comes from the runner, not the bundle: keep it strict.
+    if (!isRecord(item) || !hasExactKeys(item, ['directive', 'blocked', 'source'])) {
       fail('A CSP violation in the boot test result is malformed.');
     }
-    const violation = item as Record<string, string>;
-    cspViolations.push({
-      directive: violation.directive!,
-      blocked: violation.blocked!,
-      source: violation.source!
-    });
+    const clean = label(limits.messageLength);
+    const directive =
+      typeof item.directive === 'string' && /^[a-z-]{1,40}$/.test(item.directive)
+        ? item.directive
+        : 'unknown';
+    const blocked = clean(item.blocked);
+    const source = clean(item.source);
+    labelsReplaced += Number(directive !== item.directive) + Number(blocked === null) + Number(source === null);
+    const violation = {
+      directive,
+      blocked: blocked ?? UNREADABLE_LABEL,
+      source: source ?? UNREADABLE_LABEL
+    };
+    const key = `${violation.directive}\n${violation.blocked}\n${violation.source}`;
+    if (seenViolations.has(key)) continue;
+    seenViolations.add(key);
+    cspViolations.push(violation);
   }
+  const missing = tolerantLabels(
+    result.missingFiles as unknown[],
+    limits.missingFiles,
+    label(limits.messageLength)
+  );
+  const hosts = tolerantLabels(
+    result.externalHostsRequested as unknown[],
+    limits.externalHosts,
+    (item) =>
+      typeof item === 'string' && item.length <= MAX_HOST_LENGTH && HOST.test(item) ? item : null
+  );
+  const errors = tolerantLabels(
+    result.uncaughtErrors as unknown[],
+    limits.uncaughtErrors,
+    (item) => {
+      if (typeof item !== 'string' || SECRET_VALUE.test(item)) return null;
+      return item.slice(0, limits.messageLength);
+    }
+  );
+  labelsReplaced += missing.replaced + hosts.replaced + errors.replaced;
 
-  const typed = result as unknown as BootTestResult;
+  const typed = {
+    ...(result as unknown as BootTestResult),
+    missingFiles: missing.labels,
+    externalHostsRequested: hosts.labels,
+    uncaughtErrors: errors.labels
+  };
   const failures = new Set(typed.failures);
   const blank = typed.renderedTextLength === 0 && typed.renderedElementCount === 0;
   const consistent =
@@ -895,11 +959,12 @@ export function validateBootTestEvidence(
     status: typed.status,
     failures: BOOT_TEST_FAILURES.filter((failure) => failures.has(failure)),
     cspViolations,
-    missingFiles: [...typed.missingFiles],
-    uncaughtErrors: [...typed.uncaughtErrors],
-    externalHostsRequested: [...typed.externalHostsRequested],
+    missingFiles: typed.missingFiles,
+    uncaughtErrors: typed.uncaughtErrors,
+    externalHostsRequested: typed.externalHostsRequested,
     renderedTextLength: typed.renderedTextLength,
-    renderedElementCount: typed.renderedElementCount
+    renderedElementCount: typed.renderedElementCount,
+    ...(labelsReplaced > 0 ? { labelsReplaced } : {})
   };
 }
 

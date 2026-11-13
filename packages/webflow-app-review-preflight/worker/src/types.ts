@@ -25,6 +25,12 @@ export interface Env {
   BOOT_TEST_ENABLED?: string;
   /** Optional replacement for the captured extension host Content-Security-Policy. */
   BOOT_TEST_CSP?: string;
+  /** Sandbox jobs one developer may start in 24 hours. Positive integer; default 30. */
+  SANDBOX_DAILY_LIMIT_PER_USER?: string;
+  /** Sandboxes that may be active at once. Positive integer; default 20. */
+  SANDBOX_ACTIVE_LIMIT?: string;
+  /** Sandboxes one developer may have active at once. Positive integer; default 3. */
+  SANDBOX_ACTIVE_LIMIT_PER_USER?: string;
   PREFLIGHT_OAUTH_BEARER_ENABLED?: string;
   PREFLIGHT_OAUTH_CLIENT_IDS?: string;
 }

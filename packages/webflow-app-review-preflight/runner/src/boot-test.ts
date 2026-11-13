@@ -282,6 +282,60 @@ async function measureRenderedContent(cdp: CDPSession): Promise<RenderedContent>
   return { textLength, elementCount };
 }
 
+// The Worker's rules for bundle-influenced labels, applied before upload so
+// one odd host or path cannot make the Worker refuse the whole verdict.
+const UNREADABLE_LABEL = '[unreadable]';
+const MAX_HOST_LENGTH = 260;
+const HOST = /^(?:[a-z0-9-]+(?:\.[a-z0-9-]+)*|\[[0-9a-f:.]+\])(?::\d{1,5})?$/i;
+const SECRET_VALUE =
+  /(?:Bearer\s+[A-Za-z0-9._~+/=-]{8,}|-----BEGIN [^-]*PRIVATE KEY-----|\bsk-[A-Za-z0-9_-]{12,})/i;
+
+function isSafeLabel(value: string, maxLength: number): boolean {
+  return (
+    value.length > 0 &&
+    value.length <= maxLength &&
+    /^[\x20-\x7e]+$/.test(value) &&
+    !value.includes('://') &&
+    !/[?#]/.test(value) &&
+    !value.split('/').includes('..') &&
+    !SECRET_VALUE.test(value)
+  );
+}
+
+/** Replaces labels the Worker would reject with `[unreadable]`; lists stay unique and within caps. */
+export function clampBootTestLabels(
+  result: BootTestResult,
+  limits: BootTestJobContract['limits']
+): BootTestResult {
+  const list = (items: string[], cap: number, keep: (item: string) => boolean) => [
+    ...new Set(items.slice(0, cap).map((item) => (keep(item) ? item : UNREADABLE_LABEL)))
+  ];
+  const label = (value: string) => (isSafeLabel(value, limits.messageLength) ? value : UNREADABLE_LABEL);
+  const seen = new Set<string>();
+  const cspViolations = result.cspViolations
+    .slice(0, limits.cspViolations)
+    .map((item) => ({ ...item, blocked: label(item.blocked), source: label(item.source) }))
+    .filter((item) => {
+      const key = `${item.directive}\n${item.blocked}\n${item.source}`;
+      return seen.has(key) ? false : Boolean(seen.add(key));
+    });
+  return {
+    ...result,
+    cspViolations,
+    missingFiles: list(result.missingFiles, limits.missingFiles, (item) =>
+      isSafeLabel(item, limits.messageLength)
+    ),
+    uncaughtErrors: result.uncaughtErrors
+      .slice(0, limits.uncaughtErrors)
+      .map((item) => (SECRET_VALUE.test(item) ? UNREADABLE_LABEL : item.slice(0, limits.messageLength))),
+    externalHostsRequested: list(
+      result.externalHostsRequested,
+      limits.externalHosts,
+      (item) => item.length <= MAX_HOST_LENGTH && HOST.test(item)
+    )
+  };
+}
+
 function emptyResult(status: BootTestResult['status']): BootTestResult {
   return {
     status,
@@ -449,7 +503,7 @@ export async function bootExtension(
     if (blockedBundleScripts.size > 0) failures.push('bundled_script_blocked_by_csp');
     if (missingFiles.length > 0) failures.push('bundled_file_missing');
 
-    return finalize({
+    const result = finalize({
       failures,
       cspViolations: [...cspViolations.values()].slice(0, limits.cspViolations),
       missingFiles: [...new Set(missingFiles)].sort().slice(0, limits.missingFiles),
@@ -458,6 +512,7 @@ export async function bootExtension(
       renderedTextLength: rendered.textLength,
       renderedElementCount: rendered.elementCount
     });
+    return clampBootTestLabels(result, limits);
   } finally {
     await browser?.close().catch(() => undefined);
     await proxy.close();

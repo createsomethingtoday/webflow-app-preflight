@@ -19,7 +19,8 @@ import {
   sanitizeRuntimeStaticScan
 } from './runtime-advisory';
 import { isPrivateOrLocalHostname } from './net';
-import { oauthUserCanReadSite } from './auth';
+import { companionRoleForUser, oauthUserCanReadSite } from './auth';
+import { checkSandboxLimits, SandboxLimitError } from './sandbox-limits';
 import type { AuthenticatedUser, Env } from './types';
 import {
   E2BRuntimeLaunchError,
@@ -2160,6 +2161,12 @@ export async function requestRuntimeObservationRun(
   await expireActiveRuntimeObservationJobs(testPackageId, env);
   const active = await activeRuntimeObservationJob(testPackageId, env);
   if (active) return active;
+
+  const hit = await checkSandboxLimits(env, {
+    userId: user.id,
+    exemptFromUserLimit: options.includeAll === true || companionRoleForUser(user, env) === 'reviewer'
+  });
+  if (hit) throw new SandboxLimitError(hit);
 
   let job: StoredRuntimeObservationJob | null;
   try {
