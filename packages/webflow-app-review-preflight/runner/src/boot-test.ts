@@ -10,7 +10,7 @@ import type {
 } from '@create-something/webflow-app-review-preflight';
 import { chromium, type Browser, type CDPSession } from 'playwright';
 import { BUNDLE_ZIP_LIMITS, extensionSiteRoot, readBundleZip } from './boot-test-zip.js';
-import { readCapped, redactText } from './index.js';
+import { CHROMIUM_LAUNCH_ARGS, readCapped, redactText } from './index.js';
 
 /**
  * Designer Extension boot test.
@@ -22,7 +22,8 @@ import { readCapped, redactText } from './index.js';
  * only that server: a route handler aborts every other origin, WebSockets
  * are closed before they connect, and the browser's proxy points at a local
  * socket that accepts and drops every connection, so traffic that escapes
- * the route handler still cannot leave the sandbox.
+ * the route handler still cannot leave the sandbox or reach another loopback
+ * port. WebRTC may use that proxy only, so the page cannot send UDP.
  *
  * The result is advisory. It never changes readiness, a finding, or a
  * runtime-observation security status.
@@ -401,10 +402,13 @@ export async function bootExtension(
 
     browser = await chromium.launch({
       headless: true,
-      // Loopback bypasses the dead-end proxy; the route handler below admits
-      // only the static server's exact origin.
-      proxy: { server: proxy.url, bypass: '127.0.0.1' },
-      args: ['--disable-blink-features=AutomationControlled']
+      // Only the static server's exact host and port bypass the dead-end
+      // proxy. A connection that no route handler sees (a WebSocket made in a
+      // Worker, for example) to any other loopback port goes to the proxy
+      // and stops there. `<-loopback>` removes Chromium's built-in bypass for
+      // all loopback addresses; the rule after it puts one port back.
+      proxy: { server: proxy.url, bypass: `<-loopback>, ${new URL(origin).host}` },
+      args: [...CHROMIUM_LAUNCH_ARGS]
     });
     const context = await browser.newContext({
       viewport: contract.controls.viewport,

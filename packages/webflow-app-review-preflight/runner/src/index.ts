@@ -1,6 +1,19 @@
 import { createHash } from 'node:crypto';
+import type { LookupAddress } from 'node:dns';
 import { lookup } from 'node:dns/promises';
 import { mkdir, writeFile } from 'node:fs/promises';
+import { createServer as createHttpServer, request as httpRequest, type IncomingMessage } from 'node:http';
+import { request as httpsRequest } from 'node:https';
+import {
+  BlockList,
+  connect as connectTcp,
+  isIP,
+  type AddressInfo,
+  type LookupFunction,
+  type Socket
+} from 'node:net';
+import { pipeline, Readable, type Transform } from 'node:stream';
+import { createBrotliDecompress, createGunzip, createInflate } from 'node:zlib';
 import {
   defaultConfig,
   defaultRuleset,
@@ -148,64 +161,304 @@ function sha256(bytes: Uint8Array | string): string {
   return createHash('sha256').update(bytes).digest('hex');
 }
 
-function isPrivateNetworkAddress(address: string): boolean {
-  const normalized = address.toLowerCase().split('%')[0] ?? '';
-  if (
-    normalized === '::1' ||
-    normalized.startsWith('fc') ||
-    normalized.startsWith('fd') ||
-    normalized.startsWith('fe8') ||
-    normalized.startsWith('fe9') ||
-    normalized.startsWith('fea') ||
-    normalized.startsWith('feb')
-  ) {
-    return true;
-  }
-  const ipv4 = normalized.startsWith('::ffff:') ? normalized.slice('::ffff:'.length) : normalized;
-  const parts = ipv4.split('.').map(Number);
-  if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part))) return false;
-  const [a, b] = parts;
+// Addresses a job must never reach: loopback, private, link-local (cloud
+// metadata), carrier-grade NAT, and the unspecified, benchmark, multicast and
+// reserved ranges. An IPv4-mapped IPv6 address matches its IPv4 rule.
+const NON_PUBLIC_NETWORKS = new BlockList();
+for (const [network, prefix] of [
+  ['0.0.0.0', 8],
+  ['10.0.0.0', 8],
+  ['100.64.0.0', 10],
+  ['127.0.0.0', 8],
+  ['169.254.0.0', 16],
+  ['172.16.0.0', 12],
+  ['192.0.0.0', 24],
+  ['192.168.0.0', 16],
+  ['198.18.0.0', 15],
+  ['224.0.0.0', 3]
+] as const) {
+  NON_PUBLIC_NETWORKS.addSubnet(network, prefix, 'ipv4');
+}
+for (const [network, prefix] of [
+  ['::', 127],
+  ['fc00::', 7],
+  ['fe80::', 10],
+  ['ff00::', 8]
+] as const) {
+  NON_PUBLIC_NETWORKS.addSubnet(network, prefix, 'ipv6');
+}
+
+/**
+ * Launch switches for every browser that this runner starts.
+ *
+ * The first removes the automation hint, so a runtime that looks for it
+ * behaves as it does in production. The second lets WebRTC use the proxy
+ * only. Without it a page can send UDP (STUN) straight to any address,
+ * loopback and metadata addresses included, and no route handler or proxy
+ * sees that traffic.
+ */
+export const CHROMIUM_LAUNCH_ARGS: readonly string[] = [
+  '--disable-blink-features=AutomationControlled',
+  '--force-webrtc-ip-handling-policy=disable_non_proxied_udp'
+];
+
+/** One spelling for each host: lower case, no IPv6 brackets, no zone id. */
+function hostKey(host: string): string {
   return (
-    a === 0 ||
-    a === 10 ||
-    a === 127 ||
-    (a === 169 && b === 254) ||
-    (a === 172 && b! >= 16 && b! <= 31) ||
-    (a === 192 && b === 168)
+    host
+      .toLowerCase()
+      .replace(/^\[|\]$/g, '')
+      .split('%')[0] ?? ''
   );
+}
+
+/** True only for an IP literal in a non-public range. A host name is never one. */
+export function isPrivateNetworkAddress(address: string): boolean {
+  const literal = hostKey(address);
+  const family = isIP(literal);
+  return family !== 0 && NON_PUBLIC_NETWORKS.check(literal, family === 6 ? 'ipv6' : 'ipv4');
 }
 
 function privateHostsAllowed(): boolean {
   return process.env.RUNTIME_ALLOW_PRIVATE_HOSTS === '1';
 }
 
-async function assertResolvedHostBoundary(hosts: Set<string>): Promise<void> {
+/** The vetted addresses of every allowed host, resolved once for the job. */
+export type HostPins = ReadonlyMap<string, readonly LookupAddress[]>;
+
+const MAX_PINNED_ADDRESSES_PER_HOST = 8;
+
+/**
+ * Resolves every allowed host once and returns the addresses the job may
+ * connect to. A host that is, or resolves to, a loopback or private-network
+ * address fails the job: reaching one lets the sandboxed browser hit the
+ * template's own launch endpoint (http://127.0.0.1:3000/run) or a cloud
+ * metadata surface. RUNTIME_ALLOW_PRIVATE_HOSTS=1 permits those addresses for
+ * trusted local fixtures only.
+ *
+ * These pins are the only name resolution in the job. The egress proxy and
+ * the runner's own requests connect to the pinned addresses and never ask DNS
+ * again, so the address that was checked is the address that is used. A
+ * DNS-rebinding server gets no second answer.
+ */
+export async function resolveHostPins(hosts: ReadonlySet<string>): Promise<HostPins> {
   const allowPrivate = privateHostsAllowed();
+  const pins = new Map<string, readonly LookupAddress[]>();
   for (const host of hosts) {
-    if (host === 'localhost' || isPrivateNetworkAddress(host)) {
-      // Loopback / RFC1918 hosts are exactly what this boundary exists to block:
-      // reaching them lets the sandboxed browser hit the template's own launch
-      // endpoint (http://127.0.0.1:3000/run) or cloud metadata surfaces. They are
-      // permitted ONLY as an explicit test/integration opt-in.
-      if (allowPrivate) continue;
+    const name = hostKey(host);
+    if (!allowPrivate && (name === 'localhost' || isPrivateNetworkAddress(name))) {
       throw new Error(
         `Allowed host ${host} is a loopback or private-network address; ` +
           'set RUNTIME_ALLOW_PRIVATE_HOSTS=1 only in trusted local fixtures to permit it.'
       );
     }
-    const addresses = await lookup(host, { all: true, verbatim: true });
+    const family = isIP(name);
+    const addresses =
+      family !== 0
+        ? [{ address: name, family }]
+        : await lookup(name, { all: true, verbatim: true });
     if (
       addresses.length === 0 ||
-      addresses.some(({ address }) => isPrivateNetworkAddress(address))
+      (!allowPrivate && addresses.some(({ address }) => isPrivateNetworkAddress(address)))
     ) {
       throw new Error(`Allowed host ${host} did not resolve to a public network address.`);
     }
-    // TOCTOU: we resolve here, but the browser resolves the host again when it
-    // actually connects. A DNS-rebinding server can return a public address now
-    // and a private one at navigation time. The CDP Network.responseReceived
-    // private-IP detection (privateNetworkResponses) is the defense-in-depth
-    // backstop for that window.
+    pins.set(name, addresses.slice(0, MAX_PINNED_ADDRESSES_PER_HOST));
   }
+  return pins;
+}
+
+/** A `lookup` for Node sockets that answers from the pins and never from DNS. */
+function pinnedLookup(pins: HostPins): LookupFunction {
+  return (hostname, options, callback) => {
+    const addresses = pins.get(hostKey(hostname));
+    if (!addresses || addresses.length === 0) {
+      const error: NodeJS.ErrnoException = new Error(`Host ${hostname} has no pinned address.`);
+      error.code = 'ENOTFOUND';
+      callback(error, '', 0);
+      return;
+    }
+    if (options.all) callback(null, [...addresses]);
+    else callback(null, addresses[0]!.address, addresses[0]!.family);
+  };
+}
+
+export interface PinnedEgressProxy {
+  /** The proxy server address to give to a browser context. */
+  url: string;
+  /** Called once for each refused `host:port`. */
+  onRefused: ((authority: string) => void) | null;
+  close(): Promise<void>;
+}
+
+const CONNECT_AUTHORITY = /^(\[[0-9a-f:.]{2,45}\]|[a-z0-9._-]{1,253}):(\d{1,5})$/i;
+const MAX_REPORTED_REFUSALS = 50;
+
+/**
+ * The only network path of an observation context: a loopback CONNECT proxy.
+ * Playwright's request client (every routed request and redirect hop) and
+ * Chromium itself (WebSockets, preconnects) both connect through it. It opens
+ * a tunnel to an allowed host only, at the pinned addresses of that host
+ * only, and it checks the connected address again before any byte flows. The
+ * page cannot make it resolve a name, so a changed DNS answer changes nothing.
+ *
+ * A refused or failed tunnel closes without an HTTP reply. A reply would
+ * reach the page as if the origin sent it; a closed socket is a network error.
+ */
+export async function startPinnedEgressProxy(options: {
+  pins: HostPins;
+  connectTimeoutMs: number;
+}): Promise<PinnedEgressProxy> {
+  const lookupPinned = pinnedLookup(options.pins);
+  const sockets = new Set<Socket>();
+  const reported = new Set<string>();
+  const track = (socket: Socket): void => {
+    sockets.add(socket);
+    socket.on('error', () => undefined);
+    socket.once('close', () => sockets.delete(socket));
+  };
+  // The route handler answers every page request from the runner, so nothing
+  // legitimate asks this proxy to forward a plain HTTP request.
+  const server = createHttpServer((_request, response) => {
+    response.writeHead(403, { connection: 'close' }).end();
+  });
+  const proxy: PinnedEgressProxy = {
+    url: '',
+    onRefused: null,
+    close: () =>
+      new Promise<void>((resolve) => {
+        for (const socket of sockets) socket.destroy();
+        server.close(() => resolve());
+      })
+  };
+  server.on('connection', track);
+  server.on('connect', (request: IncomingMessage, client: Socket, head: Buffer) => {
+    const match = CONNECT_AUTHORITY.exec(request.url ?? '');
+    const host = hostKey(match?.[1] ?? '');
+    const port = Number(match?.[2] ?? 0);
+    const refuse = (): void => {
+      const authority = match ? `${host}:${port}` : '[invalid-authority]';
+      if (!reported.has(authority) && reported.size < MAX_REPORTED_REFUSALS) {
+        reported.add(authority);
+        proxy.onRefused?.(authority);
+      }
+      client.destroy();
+    };
+    const addresses = options.pins.get(host);
+    if (
+      !match ||
+      port < 1 ||
+      port > 65_535 ||
+      !addresses ||
+      (!privateHostsAllowed() && addresses.some(({ address }) => isPrivateNetworkAddress(address)))
+    ) {
+      refuse();
+      return;
+    }
+    const upstream = connectTcp({ host, port, lookup: lookupPinned });
+    track(upstream);
+    upstream.setTimeout(options.connectTimeoutMs, () => upstream.destroy());
+    upstream.once('connect', () => {
+      // The pins hold vetted addresses only. This check of the address that
+      // the socket reached makes the boundary hold even if a pin were wrong.
+      const remote = upstream.remoteAddress;
+      if (!remote || (!privateHostsAllowed() && isPrivateNetworkAddress(remote))) {
+        refuse();
+        upstream.destroy();
+        return;
+      }
+      upstream.setTimeout(0);
+      client.write('HTTP/1.1 200 Connection Established\r\n\r\n');
+      if (head.length > 0) upstream.write(head);
+      upstream.pipe(client);
+      client.pipe(upstream);
+    });
+    upstream.once('close', () => client.destroy());
+    client.once('close', () => upstream.destroy());
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  // A proxy that outlives its job must not keep the runner process alive.
+  server.unref();
+  proxy.url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  return proxy;
+}
+
+const CONTENT_DECODERS: Readonly<Record<string, () => Transform>> = {
+  gzip: createGunzip,
+  'x-gzip': createGunzip,
+  deflate: createInflate,
+  br: createBrotliDecompress
+};
+// Statuses that a web Response must carry without a body.
+const NULL_BODY_STATUSES = new Set([204, 205, 304]);
+
+/**
+ * One GET from the runner itself, without redirects, connected to the pinned
+ * addresses of the host only. It returns a web Response with the decoded
+ * body as a stream, so the caller keeps its capped read.
+ */
+export function pinnedGet(
+  pins: HostPins,
+  url: URL | string,
+  timeoutMs: number
+): Promise<Response> {
+  const target = new URL(url);
+  if (!['http:', 'https:'].includes(target.protocol) || !pins.has(hostKey(target.hostname))) {
+    return Promise.reject(new Error('The request host has no pinned address.'));
+  }
+  const send = target.protocol === 'https:' ? httpsRequest : httpRequest;
+  return new Promise<Response>((resolve, reject) => {
+    const request = send(
+      target,
+      {
+        method: 'GET',
+        agent: false,
+        lookup: pinnedLookup(pins),
+        signal: AbortSignal.timeout(timeoutMs),
+        headers: { accept: '*/*', 'accept-encoding': 'gzip, deflate, br', 'user-agent': 'node' }
+      },
+      (incoming) => {
+        const status = incoming.statusCode ?? 0;
+        const decoders: Transform[] = [];
+        for (const encoding of String(incoming.headers['content-encoding'] ?? '')
+          .toLowerCase()
+          .split(',')
+          .map((value) => value.trim())
+          .filter((value) => value && value !== 'identity')
+          .reverse()) {
+          const create = CONTENT_DECODERS[encoding];
+          if (!create) {
+            incoming.destroy();
+            reject(new Error('The response has an unsupported content encoding.'));
+            return;
+          }
+          decoders.push(create());
+        }
+        if (status < 200 || status > 599) {
+          incoming.destroy();
+          reject(new Error(`Unexpected HTTP status ${status}.`));
+          return;
+        }
+        if (NULL_BODY_STATUSES.has(status)) {
+          incoming.resume();
+          resolve(new Response(null, { status }));
+          return;
+        }
+        const headers = new Headers();
+        const declared = incoming.headers['content-length'];
+        // A declared length describes the encoded bytes; it only applies to
+        // the stream when nothing decodes it.
+        if (declared && decoders.length === 0) headers.set('content-length', declared);
+        const body =
+          decoders.length === 0
+            ? incoming
+            : (pipeline([incoming, ...decoders], () => undefined) as unknown as Readable);
+        resolve(new Response(Readable.toWeb(body) as ReadableStream<Uint8Array>, { status, headers }));
+      }
+    );
+    request.once('error', reject);
+    request.end();
+  });
 }
 
 export function redactText(value: string): string {
@@ -572,20 +825,13 @@ export async function readCapped(response: Response, maxBytes: number): Promise<
   return merged;
 }
 
-async function readCappedBody(url: string, maxBytes: number): Promise<Uint8Array> {
-  const response = await fetch(url, {
-    redirect: 'manual',
-    signal: AbortSignal.timeout(5_000)
-  });
+async function readCappedBody(pins: HostPins, url: string, maxBytes: number): Promise<Uint8Array> {
+  const response = await pinnedGet(pins, url, 5_000);
   return readCapped(response, maxBytes);
 }
 
-async function sourceMapReachable(url: URL, maxBytes: number): Promise<boolean> {
-  const response = await fetch(url, {
-    method: 'GET',
-    redirect: 'manual',
-    signal: AbortSignal.timeout(5_000)
-  });
+async function sourceMapReachable(pins: HostPins, url: URL, maxBytes: number): Promise<boolean> {
+  const response = await pinnedGet(pins, url, 5_000);
   if (!response.ok) {
     await response.body?.cancel().catch(() => {});
     return false;
@@ -598,6 +844,7 @@ async function sourceMapReachable(url: URL, maxBytes: number): Promise<boolean> 
 async function observeRuntimeArtifact(
   pin: RuntimeObservationJobContract['runtimeArtifacts'][number],
   response: PlaywrightResponse | null,
+  pins: HostPins,
   allowedHosts: Set<string>,
   scripts: BrowserState['scripts'],
   executedDigestsByUrl: Map<string, Set<string>>,
@@ -606,7 +853,7 @@ async function observeRuntimeArtifact(
 ): Promise<RuntimeArtifactObservation> {
   const bytes = response
     ? new Uint8Array(await response.body())
-    : await readCappedBody(pin.url, MAX_RUNTIME_ARTIFACT_BYTES);
+    : await readCappedBody(pins, pin.url, MAX_RUNTIME_ARTIFACT_BYTES);
   const source = new TextDecoder().decode(bytes);
   servedSources?.set(pin.url, source);
   const match = source.match(/[#@]\s*sourceMappingURL=([^\s*]+)/);
@@ -621,7 +868,7 @@ async function observeRuntimeArtifact(
       allowedHosts.has(sourceMapUrl.hostname.toLowerCase())
     ) {
       try {
-        const available = await sourceMapReachable(sourceMapUrl, MAX_SOURCE_MAP_BYTES);
+        const available = await sourceMapReachable(pins, sourceMapUrl, MAX_SOURCE_MAP_BYTES);
         sourceMap = { available, url: sanitizeUrl(sourceMapUrl.toString()) };
       } catch {
         sourceMap = { available: false, url: sanitizeUrl(sourceMapUrl.toString()) };
@@ -909,6 +1156,7 @@ async function runCspReplay(
   contract: RuntimeObservationJobContract,
   browser: Browser,
   hosts: { allowedHosts: ReadonlySet<string>; platformHosts: ReadonlySet<string> },
+  egress: PinnedEgressProxy,
   timeoutMs: number
 ): Promise<CspReplayEvidence> {
   const { allowedHosts, platformHosts } = hosts;
@@ -933,6 +1181,7 @@ async function runCspReplay(
       viewport: { width: 1280, height: 720 },
       serviceWorkers: 'block',
       acceptDownloads: false,
+      proxy: { server: egress.url },
       userAgent: `Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${browser.version()} Safari/537.36`
     });
     const replayContext = context;
@@ -1129,7 +1378,9 @@ interface CaptureResult {
 
 async function captureObservation(
   contract: RuntimeObservationJobContract,
-  browser: Browser
+  browser: Browser,
+  pins: HostPins,
+  egress: PinnedEgressProxy
 ): Promise<CaptureResult> {
   const startedAt = new Date();
   // validateObservationContract already confined these to PLATFORM_ASSET_HOSTS.
@@ -1138,7 +1389,6 @@ async function captureObservation(
   // not on a shared CDN (and the worker re-checks map URLs against this set).
   const partnerHosts = new Set(contract.controls.allowedHosts);
   const allowedHosts = new Set([...partnerHosts, ...platformHosts]);
-  await assertResolvedHostBoundary(allowedHosts);
   const network: Array<Record<string, unknown>> = [];
   const consoleMessages: Array<{ type: string; text: string }> = [];
   const pageErrors: string[] = [];
@@ -1154,10 +1404,21 @@ async function captureObservation(
     else droppedPageErrors += 1;
   };
   const artifactResponses = new Map<string, PlaywrightResponse>();
+  // The route handler never sees a WebSocket or a preconnect. The proxy
+  // refuses those for a host off the allowlist, and the refusal is evidence.
+  egress.onRefused = (authority) =>
+    recordNetwork({
+      phase: 'request',
+      url: `connect://${authority}`,
+      method: 'CONNECT',
+      resourceType: 'tunnel',
+      blocked: true
+    });
   const context = await browser.newContext({
     viewport: { width: 1280, height: 720 },
     serviceWorkers: 'block',
     acceptDownloads: false,
+    proxy: { server: egress.url },
     userAgent: `Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${browser.version()} Safari/537.36`
   });
   await context.addInitScript(() => {
@@ -1268,9 +1529,13 @@ async function captureObservation(
       });
     }
   });
+  const egressPort = Number(new URL(egress.url).port);
   cdp.on('Network.responseReceived', (event) => {
     const remoteAddress = event.response.remoteIPAddress;
     if (!remoteAddress || !isPrivateNetworkAddress(remoteAddress)) return;
+    // A response that came through the egress proxy shows the proxy's own
+    // loopback address. The proxy holds the address boundary for it.
+    if (remoteAddress === '127.0.0.1' && event.response.remotePort === egressPort) return;
     try {
       const responseHost = new URL(event.response.url).hostname.toLowerCase();
       if (responseHost !== 'localhost' && !isPrivateNetworkAddress(responseHost)) {
@@ -1415,6 +1680,7 @@ async function captureObservation(
         observeRuntimeArtifact(
           pin,
           artifactResponses.get(pin.url) ?? null,
+          pins,
           partnerHosts,
           [...requestBoundaryScripts.values()],
           trustedExecution.executedDigestsByUrl,
@@ -1597,6 +1863,7 @@ async function captureObservation(
   } finally {
     if (budgetTimer) clearTimeout(budgetTimer);
     await context.close();
+    egress.onRefused = null;
   }
 }
 
@@ -1605,24 +1872,36 @@ async function capture(
   browser: Browser,
   replayTimeoutMs: number
 ): Promise<CaptureResult> {
-  const result = await captureObservation(contract, browser);
-  if (result.status !== 'complete') return result;
-  // Advisory static scan of the bytes the observation just hashed. It only
-  // adds `runtimeStaticScan`; no security field reads it.
-  result.manifest.runtimeStaticScan = scanRuntimeSources(result.servedSources ?? new Map());
-  delete result.servedSources;
-  // Advisory replay under a strict CSP, after the observation is final. It has
-  // its own time limit and request budget and can only add `cspReplay`; it
-  // never changes any field the Worker's security evaluation reads.
   const platformHosts = new Set(contract.controls.platformAssetHosts ?? []);
   const allowedHosts = new Set([...contract.controls.allowedHosts, ...platformHosts]);
-  result.manifest.cspReplay = await runCspReplay(
-    contract,
-    browser,
-    { allowedHosts, platformHosts },
-    replayTimeoutMs
-  );
-  return result;
+  // The one name resolution of the job. Both browser contexts and the
+  // runner's own requests connect through these pins.
+  const pins = await resolveHostPins(allowedHosts);
+  const egress = await startPinnedEgressProxy({
+    pins,
+    connectTimeoutMs: contract.controls.requestTimeoutMs
+  });
+  try {
+    const result = await captureObservation(contract, browser, pins, egress);
+    if (result.status !== 'complete') return result;
+    // Advisory static scan of the bytes the observation just hashed. It only
+    // adds `runtimeStaticScan`; no security field reads it.
+    result.manifest.runtimeStaticScan = scanRuntimeSources(result.servedSources ?? new Map());
+    delete result.servedSources;
+    // Advisory replay under a strict CSP, after the observation is final. It has
+    // its own time limit and request budget and can only add `cspReplay`; it
+    // never changes any field the Worker's security evaluation reads.
+    result.manifest.cspReplay = await runCspReplay(
+      contract,
+      browser,
+      { allowedHosts, platformHosts },
+      egress,
+      replayTimeoutMs
+    );
+    return result;
+  } finally {
+    await egress.close();
+  }
 }
 
 async function fetchJob(
@@ -1696,7 +1975,7 @@ export async function runRuntimeObservation(
   const ownsBrowser = !input.browser;
   const browser = input.browser ?? (await chromium.launch({
     headless: true,
-    args: ['--disable-blink-features=AutomationControlled']
+    args: [...CHROMIUM_LAUNCH_ARGS]
   }));
   try {
     // capture() owns the total-runtime budget internally so that a timeout still
