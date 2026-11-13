@@ -59,6 +59,14 @@ export async function authenticate(
     };
   }
 
+  // A Designer ID token is a JWT. A Webflow OAuth access token is not. While
+  // the creator CLI path is on, a bearer with no dot goes straight to that
+  // path: the resolve calls below cannot accept it, and each one would use the
+  // shared installation token and log a false resolve failure.
+  if (env.PREFLIGHT_OAUTH_BEARER_ENABLED === 'true' && !token.includes('.')) {
+    return authenticateOAuthBearer(token, env);
+  }
+
   // Webflow resolves an ID token only when the bearer token's authorization
   // covers the ID token's site. Try the token this user granted first, then
   // the shared installation for users who connected before per-user storage.
@@ -274,6 +282,10 @@ export function companionRoleForUser(
   env: Env
 ): 'developer' | 'reviewer' {
   if (user.companionSession) return user.companionSession.actorRole;
+  // The reviewer role needs a Designer ID token, which is short-lived and
+  // issued inside the Designer. A creator CLI token lasts until someone
+  // revokes it and sits in a file on a computer, so it is never a reviewer.
+  if (user.authVia === 'oauth') return 'developer';
   return new Set(
     (env.REVIEWER_USER_IDS ?? '')
       .split(',')

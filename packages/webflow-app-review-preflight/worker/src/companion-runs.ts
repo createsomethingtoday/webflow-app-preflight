@@ -22,6 +22,8 @@ function reviewerIds(env: Env): Set<string> {
 
 function actorRoleForUser(user: AuthenticatedUser, env: Env): 'developer' | 'reviewer' {
   if (user.companionSession) return user.companionSession.actorRole;
+  // A creator CLI token is never a reviewer (see companionRoleForUser).
+  if (user.authVia === 'oauth') return 'developer';
   return reviewerIds(env).has(user.id) ? 'reviewer' : 'developer';
 }
 

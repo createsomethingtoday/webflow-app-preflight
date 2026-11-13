@@ -1,6 +1,6 @@
 import { env } from 'cloudflare:workers';
 import { afterEach, describe, expect, test, vi } from 'vitest';
-import { authenticate } from '../src/auth';
+import { authenticate, companionRoleForUser } from '../src/auth';
 import type { Env } from '../src/types';
 
 const request = (token: string) =>
@@ -105,6 +105,33 @@ describe('authenticate', () => {
       authVia: 'oauth',
       workspaceIds: ['ws-1']
     });
+  });
+
+  test('flag on sends a bearer that is not a JWT straight to the OAuth path', async () => {
+    const calls = stubWebflow({ resolveOk: false, applicationId: 'cli-app' });
+    const user = await authenticate(
+      request('0123456789abcdef'),
+      withOAuth({ PREFLIGHT_OAUTH_BEARER_ENABLED: 'true', PREFLIGHT_OAUTH_CLIENT_IDS: 'cli-app' })
+    );
+    expect(user?.authVia).toBe('oauth');
+    // The shared installation token is not spent on a resolve that cannot pass.
+    expect(calls.some((url) => url.endsWith('/beta/token/resolve'))).toBe(false);
+  });
+
+  test('flag on still resolves a JWT-shaped bearer as a Designer ID token first', async () => {
+    const calls = stubWebflow({ resolveOk: true });
+    const user = await authenticate(
+      request('aaa.bbb.ccc'),
+      withOAuth({ PREFLIGHT_OAUTH_BEARER_ENABLED: 'true', PREFLIGHT_OAUTH_CLIENT_IDS: 'cli-app' })
+    );
+    expect(user).toEqual({ id: 'designer-user', siteId: 'designer-site', authVia: 'designer' });
+    expect(calls.some((url) => url.includes('/v2/token/'))).toBe(false);
+  });
+
+  test('a creator CLI identity is never a reviewer, even when its user id is listed', () => {
+    const listed = withOAuth({ REVIEWER_USER_IDS: 'oauth-user, designer-user' });
+    expect(companionRoleForUser({ id: 'oauth-user', siteId: null, authVia: 'oauth' }, listed)).toBe('developer');
+    expect(companionRoleForUser({ id: 'designer-user', siteId: 'site', authVia: 'designer' }, listed)).toBe('reviewer');
   });
 
   test('a transport failure on token resolve is a refusal, not a thrown error', async () => {

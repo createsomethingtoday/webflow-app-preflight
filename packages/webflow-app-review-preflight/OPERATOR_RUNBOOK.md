@@ -396,6 +396,13 @@ The server ignores a `sandboxInstallationId` that the CLI sends. It uses the sit
 
 A receipt records how the review was created. `authVia` is `designer` or `oauth`. A reviewer can then tell a CLI review from a Designer review.
 
+A CLI sign-in is never a reviewer, even when its user ID is in `REVIEWER_USER_IDS`. The reviewer role needs a Designer ID token.
+
+Open items from the 2026-11-13 security review, to close before the CLI switch goes on:
+
+- There is no cap on the sandbox runs one user can start. Add a daily cap for each user before a long-lived token can start runs.
+- "This token can read the site" is a weaker proof than "the Designer is open on the site" when the authorization covers a whole workspace. Decide if the CLI must hold a site-level authorization.
+
 ## Validation receipt
 
 Copy this block after the three-run loop:
