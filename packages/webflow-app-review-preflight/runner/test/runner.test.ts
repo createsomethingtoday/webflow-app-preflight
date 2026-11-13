@@ -13,7 +13,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import {
   PLATFORM_ASSET_HOSTS,
   buildReplayCsp,
-  normalizeCspViolation,
+  normalizeCspIssue,
   redactText,
   runRuntimeObservation,
   scanRuntimeSources,
@@ -962,13 +962,15 @@ describe('strict-CSP replay', () => {
       runtimeScopes: new Set(['runtime.test']),
       platformHosts: new Set<string>()
     };
+    // The shape Chromium sends in Audits.issueAdded for a blocked request.
     expect(
-      normalizeCspViolation(
+      normalizeCspIssue(
         {
-          directive: 'script-src-elem',
-          blockedURI: 'https://other.test/x.js?token=abc',
-          sourceFile: 'https://runtime.test/run.js',
-          sample: 'secret page text'
+          violatedDirective: 'script-src-elem',
+          contentSecurityPolicyViolationType: 'kURLViolation',
+          blockedURL: 'https://other.test/x.js?token=abc',
+          isReportOnly: false,
+          sourceCodeLocation: { url: 'https://runtime.test/run.js', lineNumber: 3, columnNumber: 9 }
         },
         context
       )
@@ -979,8 +981,13 @@ describe('strict-CSP replay', () => {
       fromRuntime: true
     });
     expect(
-      normalizeCspViolation(
-        { directive: 'script-src-elem', blockedURI: 'inline', sourceFile: 'https://site.test/page' },
+      normalizeCspIssue(
+        {
+          violatedDirective: 'script-src-elem',
+          contentSecurityPolicyViolationType: 'kInlineViolation',
+          isReportOnly: false,
+          sourceCodeLocation: { url: 'https://site.test/page', lineNumber: 1, columnNumber: 1 }
+        },
         context
       )
     ).toEqual({
@@ -989,7 +996,24 @@ describe('strict-CSP replay', () => {
       source: 'document',
       fromRuntime: false
     });
-    expect(normalizeCspViolation('nope', context)).toBeNull();
+    expect(
+      normalizeCspIssue(
+        { violatedDirective: 'script-src', contentSecurityPolicyViolationType: 'kEvalViolation' },
+        context
+      )
+    ).toEqual({ directive: 'script-src', blocked: 'eval', source: 'document', fromRuntime: false });
+    // A report-only issue is not a violation of the enforced replay policy.
+    expect(
+      normalizeCspIssue(
+        {
+          violatedDirective: 'script-src-elem',
+          contentSecurityPolicyViolationType: 'kInlineViolation',
+          isReportOnly: true
+        },
+        context
+      )
+    ).toBeNull();
+    expect(normalizeCspIssue('nope', context)).toBeNull();
   });
 
   test('records an inline script created by the runtime as a runtime violation', async () => {
@@ -1044,6 +1068,74 @@ describe('strict-CSP replay', () => {
     expect(replay.runtimeReadyObserved).toBe(true);
     expect(replay.violations.length).toBeGreaterThan(0);
     expect(replay.violations.every((violation) => violation.fromRuntime === false)).toBe(true);
+  }, 60_000);
+
+  test('runtime code cannot hide its own violation from the replay', async () => {
+    const { manifest } = await runAdversarialFixture({
+      proxyStatus: 403,
+      // The runtime first attacks every page-side reporting path it could
+      // reach, then injects an inline script.
+      runtimeSource: `
+        for (const target of [window, document]) {
+          target.addEventListener('securitypolicyviolation', (event) => {
+            event.stopImmediatePropagation();
+            event.preventDefault();
+          }, true);
+        }
+        for (const name of Object.getOwnPropertyNames(window)) {
+          if (/csp|replay|report/i.test(name)) {
+            try { delete window[name]; } catch {}
+            try { window[name] = () => {}; } catch {}
+          }
+        }
+        const realCreate = Document.prototype.createElement;
+        Document.prototype.createElement = function (...args) {
+          return Reflect.apply(realCreate, this, args);
+        };
+        const inline = document.createElement('script');
+        inline.textContent = 'window.__hiddenInline = true';
+        document.head.appendChild(inline);
+        document.body.setAttribute('data-runtime-ready', '');`,
+      markup: scriptTag
+    });
+    const replay = manifest.cspReplay as Replay;
+    expect(replay.status).toBe('violations');
+    expect(replay.violations).toContainEqual(
+      expect.objectContaining({
+        blocked: 'inline',
+        source: expect.stringMatching(/\/runtime-v1\.js$/),
+        fromRuntime: true
+      })
+    );
+  }, 60_000);
+
+  test('page code cannot invent a violation', async () => {
+    const { manifest } = await runAdversarialFixture({
+      proxyStatus: 403,
+      // No real violation happens. The runtime only dispatches a synthetic
+      // event and calls every reporting name a page-side probe might expose.
+      runtimeSource: `
+        const fake = {
+          documentURI: location.href,
+          violatedDirective: 'script-src-elem',
+          effectiveDirective: 'script-src-elem',
+          originalPolicy: "default-src 'self'",
+          disposition: 'enforce',
+          blockedURI: 'inline',
+          sourceFile: location.origin + '/runtime-v1.js',
+          statusCode: 200
+        };
+        document.dispatchEvent(new SecurityPolicyViolationEvent('securitypolicyviolation', fake));
+        for (const name of ['__wfCspReplayReport', '__cspReplayReport', 'reportCspViolation']) {
+          try { window[name]?.({ directive: 'script-src-elem', blockedURI: 'inline', sourceFile: fake.sourceFile, createdByRuntime: true }); } catch {}
+        }
+        document.body.setAttribute('data-runtime-ready', '');`,
+      markup: scriptTag
+    });
+    const replay = manifest.cspReplay as Replay;
+    expect(replay.status).toBe('clean');
+    expect(replay.runtimeReadyObserved).toBe(true);
+    expect(replay.violations).toEqual([]);
   }, 60_000);
 
   test('a replay time-out reports not_run and leaves the observation unchanged', async () => {
