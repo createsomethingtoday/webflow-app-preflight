@@ -1,4 +1,5 @@
 import type {
+  BootTestSummary,
   BundleReview,
   CreateHostedRuntimeReviewInput,
   RuntimeTestPackageInput,
@@ -7,6 +8,7 @@ import type {
 
 export type { RuntimeTestPackageInput, RuntimeTestPackageView };
 export type { CreateHostedRuntimeReviewInput };
+export type { BootTestSummary };
 
 export interface ReviewVersion {
   id: string;
@@ -104,6 +106,8 @@ export interface PreflightIdentity {
   id: string;
   siteId: string | null;
   companionRole: 'developer' | 'reviewer';
+  /** Features this Worker serves. Absent on older Workers, which means off. */
+  features?: { bootTest?: boolean };
 }
 
 export interface ReviewerHandoff {
@@ -134,4 +138,6 @@ export interface PreflightApi {
     reviewVersionId: string,
     runtimeTestPackageId: string
   ): Promise<ReviewerHandoff>;
+  listBootTests(reviewId: string): Promise<BootTestSummary[]>;
+  requestBootTest(reviewId: string): Promise<BootTestSummary>;
 }

@@ -23,6 +23,7 @@ export type {
   BootTestEvidence,
   BootTestFailure,
   BootTestJobContract,
+  BootTestReplayComparison,
   BootTestResult,
   BootTestStatus,
   BootTestSummary

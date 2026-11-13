@@ -196,6 +196,7 @@ A reviewer uses a separate identity and a server-owned workspace.
 7. Select **Run independent replay**.
 8. Select **Refresh status** until the replay finishes.
 9. Record the reviewer observation job ID and result.
+10. If the **Designer Extension boot test** card is present, select **Run independent boot test replay**. Select **Refresh status** until it finishes. Record whether the replay reproduced the developer run or differs.
 
 The reviewer replay must use the same package ID, review-version ID, and bundle SHA-256. It creates a third job and does not replace either developer run.
 
@@ -352,6 +353,8 @@ The scheduled Worker task expires stale jobs and retries sandbox termination. Ne
 
 The boot test opens the bundle's `index.html` in a fresh sandbox browser under the extension host's Content-Security-Policy and reports `passed`, `failed`, or `error`. The result is advisory: it never changes readiness, a finding, or a runtime security status.
 
+Developers select **Run boot test** in the Designer Extension. Reviewers select **Run independent boot test replay** in the reviewer workspace, which then shows both results and whether the replay reproduced the developer run. The submission receipt reports only the latest completed developer run.
+
 To turn it on:
 
 1. Apply migration `0015_boot_test_jobs.sql`.
@@ -363,14 +366,14 @@ The default policy is the header the extension host sent on 2026-11-13 (`DESIGNE
 Check a version's boot tests in D1:
 
 ```sql
-SELECT id, status, result_status, evidence_trust, approved_at, completed_at,
-       expires_at, sandbox_id, sandbox_termination_status
+SELECT id, actor_role, requested_by_user_id, status, result_status, evidence_trust,
+       approved_at, completed_at, expires_at, sandbox_id, sandbox_termination_status
 FROM boot_test_jobs
 WHERE review_version_id = '<review-version-id>'
 ORDER BY created_at ASC;
 ```
 
-One job can be `approved` or `running` per review version. The scheduled task expires stale jobs and retries sandbox termination.
+One job can be `approved` or `running` per review version and actor role, so a running developer test never blocks a reviewer replay. The scheduled task expires stale jobs and retries sandbox termination.
 
 ## Validation receipt
 

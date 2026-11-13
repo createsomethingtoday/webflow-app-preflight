@@ -120,6 +120,8 @@ export interface BootTestEvidence {
 export interface BootTestSummary {
   id: string;
   reviewVersionId: string;
+  /** `developer` for a run from the Designer Extension, `reviewer` for a workspace replay. */
+  actorRole: 'developer' | 'reviewer';
   status: 'approved' | 'running' | 'complete' | 'failed' | 'expired';
   trust: 'webflow_observed' | null;
   advisory: true;
@@ -128,3 +130,19 @@ export interface BootTestSummary {
   completedAt: string | null;
   bootTest: BootTestResult | null;
 }
+
+/**
+ * How a reviewer replay compares with the developer's run of the same
+ * version, in the vocabulary of the runtime replay:
+ * - `reproduced_pass`: both passed.
+ * - `reproduced_failure`: both failed with the same set of failures.
+ * - `mixed_evidence`: the status or the failure set differs.
+ * - `infrastructure_incomplete`: at least one run could not run (`error`).
+ * - `not_compared`: one of the two runs has no result yet.
+ */
+export type BootTestReplayComparison =
+  | 'reproduced_pass'
+  | 'reproduced_failure'
+  | 'mixed_evidence'
+  | 'infrastructure_incomplete'
+  | 'not_compared';

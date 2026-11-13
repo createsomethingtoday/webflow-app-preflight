@@ -610,7 +610,8 @@ describe('review API', () => {
         id: 'local-webflow-user',
         siteId: 'local-webflow-site',
         companionRole: 'developer'
-      }
+      },
+      features: { bootTest: false }
     });
 
     const reviewer = await exports.default.fetch(
@@ -627,7 +628,8 @@ describe('review API', () => {
         id: 'local-webflow-reviewer',
         siteId: 'local-webflow-review-site',
         companionRole: 'reviewer'
-      }
+      },
+      features: { bootTest: false }
     });
   });
 

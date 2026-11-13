@@ -1,6 +1,7 @@
 import { useEffect, useId, useRef, useState } from 'react';
 import type { ReviewGuidance } from '@create-something/webflow-app-review-preflight';
 import type {
+  BootTestSummary,
   PreflightIdentity,
   PreflightApi,
   CreateHostedRuntimeReviewInput,
@@ -1582,6 +1583,244 @@ function InstallUrlCard({
   );
 }
 
+type BootTestRunResult = NonNullable<BootTestSummary['bootTest']>;
+
+export interface BootTestFinding {
+  title: string;
+  detail: string;
+  nextMove: string;
+  files: string[];
+}
+
+const NON_FILE_CSP_TARGETS = new Set(['inline', 'eval', 'trusted-types']);
+
+// Plain-language findings for a failed boot test, one per failure.
+export function bootTestFindings(result: BootTestRunResult): BootTestFinding[] {
+  const blockedScripts = [
+    ...new Set(
+      result.cspViolations
+        .filter(
+          (violation) =>
+            /^(?:script-src|worker-src)/.test(violation.directive) &&
+            !NON_FILE_CSP_TARGETS.has(violation.blocked)
+        )
+        .map((violation) => violation.blocked)
+    )
+  ];
+  return result.failures.map((failure) => {
+    switch (failure) {
+      case 'blank_panel':
+        return {
+          title: 'The panel was blank',
+          detail: 'After 3 seconds, the panel showed no text and no visible elements.',
+          nextMove:
+            'Open index.html from a local web server. Fix any error that stops the first screen from rendering.',
+          files: []
+        };
+      case 'bundled_script_blocked_by_csp':
+        return {
+          title: 'A security policy blocked your script',
+          detail: 'A Content-Security-Policy stopped a script file from your bundle.',
+          nextMove:
+            'Check the Content-Security-Policy meta tag in index.html. Allow your own script files, or remove the tag.',
+          files: blockedScripts
+        };
+      case 'bundled_file_missing':
+        return {
+          title: 'A file is missing from the bundle',
+          detail: 'index.html asks for files that are not in the ZIP.',
+          nextMove:
+            'Check the file paths in index.html. Build the extension again. Upload the new bundle.',
+          files: result.missingFiles
+        };
+    }
+  });
+}
+
+function bootTestPill(run: BootTestSummary | null): string {
+  if (!run) return 'Not run';
+  if (run.status === 'approved' || run.status === 'running') return 'Running';
+  if (!run.bootTest) return 'Did not finish';
+  if (run.bootTest.status === 'passed') return 'Passed';
+  if (run.bootTest.status === 'failed') return 'Failed';
+  return 'Could not run';
+}
+
+function BootTestCard({
+  review,
+  bootTests,
+  busy,
+  error,
+  onRun,
+  onRefresh
+}: {
+  review: StoredReview;
+  bootTests: BootTestSummary[];
+  busy: boolean;
+  error: string | null;
+  onRun: () => void;
+  onRefresh: () => void;
+}) {
+  // The developer's latest run of the version on screen. Reviewer replays
+  // appear in the reviewer workspace instead.
+  const latest =
+    bootTests.find(
+      (run) => run.reviewVersionId === review.latestVersion.id && run.actorRole !== 'reviewer'
+    ) ?? null;
+  const running = latest?.status === 'approved' || latest?.status === 'running';
+  const result = latest?.bootTest ?? null;
+  const findings = result?.status === 'failed' ? bootTestFindings(result) : [];
+  const pill = bootTestPill(latest);
+
+  return (
+    <section className="runtime-card observation-card boot-test-card" aria-labelledby="boot-test-title">
+      <div className="runtime-heading">
+        <div>
+          <span className="eyebrow">Webflow browser test</span>
+          <h2 id="boot-test-title">Check that the extension opens</h2>
+        </div>
+        <span
+          className={`manual-pill ${result?.status === 'passed' ? 'approved' : ''}`}
+          aria-label={`Boot test: ${pill}`}
+        >
+          {pill}
+        </span>
+      </div>
+      <p>
+        Webflow opens your bundle's index.html in a fresh browser. It uses the same security
+        policy as the Designer. This result is advisory. It does not change readiness or the
+        feedback above.
+      </p>
+      {error ? (
+        <div className="error-banner" role="alert">
+          {error}
+        </div>
+      ) : null}
+      <div className="observation-status" role="status">
+        {!latest ? (
+          <div className="checkpoint-row pending">
+            <div>
+              <strong>Ready to test</strong>
+              <p>Run the boot test to check this bundle.</p>
+            </div>
+          </div>
+        ) : running ? (
+          <div className="checkpoint-row active">
+            <div>
+              <strong>Boot test running</strong>
+              <p>Webflow is opening the extension. Select Refresh results in a minute.</p>
+            </div>
+          </div>
+        ) : !result ? (
+          <div className="observation-results">
+            <div className="neutral">
+              <strong>The boot test did not finish</strong>
+              <span>Run the boot test again.</span>
+            </div>
+          </div>
+        ) : result.status === 'passed' ? (
+          <div className="observation-results">
+            <div className="pass">
+              <strong>The extension opened</strong>
+              <span>The panel showed content. No bundled file was blocked or missing.</span>
+            </div>
+          </div>
+        ) : result.status === 'error' ? (
+          <div className="observation-results">
+            <div className="neutral">
+              <strong>The boot test could not run</strong>
+              <span>
+                This is a problem with the test, not your bundle. Run the boot test again. If it
+                fails again, tell your reviewer.
+              </span>
+            </div>
+          </div>
+        ) : (
+          <>
+            <div className="observation-results">
+              <div className="fail">
+                <strong>The extension may open as a blank panel</strong>
+                <span>Fix each item below. Upload the new bundle. Then run the boot test again.</span>
+              </div>
+            </div>
+            <section className="runtime-issues" aria-labelledby="boot-test-issues-title">
+              <div className="runtime-issues-heading">
+                <h3 id="boot-test-issues-title">What to fix</h3>
+                <span>{findings.length}</span>
+              </div>
+              <ol>
+                {findings.map((finding) => (
+                  <li key={finding.title}>
+                    <div className="runtime-issue-number" aria-hidden="true" />
+                    <div>
+                      <strong>{finding.title}</strong>
+                      <p>{finding.detail}</p>
+                      {finding.files.length > 0 ? (
+                        <ul className="runtime-issue-files" aria-label={`Files: ${finding.title}`}>
+                          {finding.files.map((file) => (
+                            <li key={file}><code>{file}</code></li>
+                          ))}
+                        </ul>
+                      ) : null}
+                      <div className="runtime-issue-action">
+                        <span>Next step</span>
+                        <p>{finding.nextMove}</p>
+                      </div>
+                    </div>
+                  </li>
+                ))}
+              </ol>
+            </section>
+          </>
+        )}
+        {result && result.status !== 'error' ? (
+          <details className="artifact-details">
+            <summary>More details (for information)</summary>
+            <ul>
+              <li>
+                <span>Rendered content</span>
+                <code>
+                  {result.renderedTextLength} characters · {result.renderedElementCount} elements
+                </code>
+              </li>
+              {result.externalHostsRequested.length > 0 ? (
+                <li>
+                  <span>Requests to other sites. The test blocks them. This is not a failure.</span>
+                  <code>{result.externalHostsRequested.join(', ')}</code>
+                </li>
+              ) : null}
+              {result.uncaughtErrors.map((message, index) => (
+                <li key={`error-${index}`}>
+                  <span>Browser error</span>
+                  <code>{message}</code>
+                </li>
+              ))}
+              {result.cspViolations.map((violation) => (
+                <li key={`${violation.directive}:${violation.blocked}:${violation.source}`}>
+                  <span>Security policy report</span>
+                  <code>
+                    {violation.directive}: {violation.blocked} from {violation.source}
+                  </code>
+                </li>
+              ))}
+            </ul>
+          </details>
+        ) : null}
+        {!running ? (
+          <button className="button button-primary" disabled={busy} onClick={onRun}>
+            {busy ? 'Starting boot test…' : latest ? 'Run boot test again' : 'Run boot test'}
+          </button>
+        ) : null}
+        {latest ? (
+          <button className="button button-secondary" disabled={busy} onClick={onRefresh}>
+            Refresh results
+          </button>
+        ) : null}
+      </div>
+    </section>
+  );
+}
+
 function ReviewDetail({
   review,
   comparison,
@@ -1601,6 +1840,7 @@ function ReviewDetail({
   reviewerHandoff,
   reviewerMode,
   onCreateReviewerHandoff,
+  bootTest,
   onBack
 }: {
   review: StoredReview;
@@ -1621,6 +1861,13 @@ function ReviewDetail({
   reviewerHandoff: ReviewerHandoff | null;
   reviewerMode: boolean;
   onCreateReviewerHandoff: (testPackageId: string) => void;
+  /** Null when the Worker does not serve the boot test or the review has no bundle. */
+  bootTest: {
+    runs: BootTestSummary[];
+    error: string | null;
+    onRun: () => void;
+    onRefresh: () => void;
+  } | null;
   onBack: () => void;
 }) {
   const result = review.latestVersion.result;
@@ -1697,6 +1944,17 @@ function ReviewDetail({
             </div>
           )}
         </section>
+      ) : null}
+
+      {bootTest && !runtimeOnly ? (
+        <BootTestCard
+          review={review}
+          bootTests={bootTest.runs}
+          busy={busy}
+          error={bootTest.error}
+          onRun={bootTest.onRun}
+          onRefresh={bootTest.onRefresh}
+        />
       ) : null}
 
       <RuntimeObservationCard
@@ -1799,6 +2057,13 @@ export function App({
   const [installUrlCheck, setInstallUrlCheck] = useState<InstallUrlCheck | null>(null);
   const [installUrlError, setInstallUrlError] = useState<string | null>(null);
   const [connectionNeedsReauth, setConnectionNeedsReauth] = useState(false);
+  const [bootTests, setBootTests] = useState<BootTestSummary[]>([]);
+  const [bootTestError, setBootTestError] = useState<string | null>(null);
+  // The Worker reports the boot test on /v1/me only when BOOT_TEST_ENABLED is
+  // on. Older Workers omit the flag, so the card stays hidden.
+  const bootTestEnabled = identity?.features?.bootTest === true;
+  const bundleReview =
+    review !== null && review.latestVersion.result.artifact.kind !== 'runtime_manifest';
 
   const refreshHistory = async () => {
     const items = await api.listReviews();
@@ -1830,6 +2095,24 @@ export function App({
       reportError(cause, 'Saved runs are unavailable.');
     });
   }, []);
+
+  useEffect(() => {
+    setBootTests([]);
+    setBootTestError(null);
+    if (!review || !bootTestEnabled || !bundleReview) return;
+    let current = true;
+    api
+      .listBootTests(review.id)
+      .then((items) => {
+        if (current) setBootTests(items);
+      })
+      .catch((cause: unknown) => {
+        if (current) reportError(cause, 'Boot test results are unavailable.', setBootTestError);
+      });
+    return () => {
+      current = false;
+    };
+  }, [review?.id, review?.latestVersion.id, bootTestEnabled, bundleReview]);
 
   useEffect(() => {
     api.getIdentity().then(setIdentity).catch((cause: unknown) => {
@@ -1943,6 +2226,23 @@ export function App({
           onRefreshRuntimePackages={() => run(async () => {
             await refreshRuntimePackages(review.id);
           })}
+          bootTest={bootTestEnabled && bundleReview ? {
+            runs: bootTests,
+            error: bootTestError,
+            onRun: () => {
+              setBootTestError(null);
+              void run(async () => {
+                await api.requestBootTest(review.id);
+                setBootTests(await api.listBootTests(review.id));
+              }, setBootTestError);
+            },
+            onRefresh: () => {
+              setBootTestError(null);
+              void run(async () => {
+                setBootTests(await api.listBootTests(review.id));
+              }, setBootTestError);
+            }
+          } : null}
           onCreateReviewerHandoff={(testPackageId) => run(async () => {
             const handoff = await api.createReviewerHandoff(
               review.id,

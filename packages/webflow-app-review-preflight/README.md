@@ -181,13 +181,27 @@ Success (`200`) returns reconciliation metadata only, with no findings, evidence
 
 Static rules do not run the bundle. The boot test does: it catches a panel that opens blank, a bundled script that the Content-Security-Policy blocks, and a file that `index.html` references but the ZIP does not contain. It is advisory evidence, off by default behind `BOOT_TEST_ENABLED`, and it never changes `readiness`, a static finding, or a runtime security status.
 
-1. The review owner calls `POST /v1/reviews/:reviewId/boot-tests` for the latest version. The Worker allows one active job per review version, writes a contract with a random nonce, a 15-minute expiry, and the extension host policy, and stores only the SHA-256 of a one-time capability.
+1. In the Designer Extension, the review owner selects **Run boot test** on a bundle review (`POST /v1/reviews/:reviewId/boot-tests`, latest version). The Worker writes a contract with a random nonce, a 15-minute expiry, and the extension host policy, and stores only the SHA-256 of a one-time capability. One job can be active per review version and actor role.
 2. The Worker starts a fresh E2B sandbox with the same launcher as a runtime observation and sends `jobKind: "boot_test"` to the template's `/run` route. The sandbox receives no account credential or token beyond the job capability.
 3. The runner reads the contract (`GET /v1/boot-test-jobs/:id`) and downloads that version's exact bundle (`GET /v1/boot-test-jobs/:id/bundle`). Both routes accept only the job capability while the job runs. The runner checks the bundle SHA-256 against the contract.
 4. The runner serves the bundle from a static server on `127.0.0.1` with the policy on every response, stubs `window.webflow`, and opens `index.html` in headless Chromium. The browser can reach only that server: a route handler aborts every other origin (other loopback ports included), WebSockets close before they connect, and the browser's proxy is a local socket that drops every connection.
 5. The runner uploads one JSON result (`POST /v1/boot-test-jobs/:id/result`). The Worker checks every binding, field, cap, and label, rejects internally inconsistent or secret-shaped results, stores the result as `webflow_observed`, consumes the job, and terminates the sandbox.
 
-`status` is `failed` only for `bundled_script_blocked_by_csp`, `bundled_file_missing`, or `blank_panel` (no visible text and no rendered element after the settle time). Blocked external requests and uncaught errors are informational. `error` means the test itself could not run. `GET /v1/reviews/:reviewId/boot-tests` lists results; `bootTestSummaryForVersion` in `worker/src/boot-tests.ts` returns the latest status for one version.
+`status` is `failed` only for `bundled_script_blocked_by_csp`, `bundled_file_missing`, or `blank_panel` (no visible text and no rendered element after the settle time). Blocked external requests and uncaught errors are informational. `error` means the test itself could not run.
+
+The extension learns that the Worker serves the boot test from `features.bootTest` on `GET /v1/me`. While the switch is off, or on an older Worker, the card stays hidden. The card shows the developer's latest run for the version on screen: passed, failed (each failure with the blocked or missing files and a next step), or could not run. Informational lists stay collapsed.
+
+### Reviewer boot test replay
+
+The reviewer workspace uses the existing reviewer authorization unchanged: a reviewer identity creates a one-time handoff from the Designer Extension (**Create reviewer workspace**), and the explicit POST on `/reviewer/connect` mints an HttpOnly session bound to one review version and Runtime Test Package. With the switch on, the workspace adds a **Designer Extension boot test** card:
+
+- the developer's latest completed run and the reviewer's latest completed replay of the session's review version, with a note when a newer run is in progress
+- **Run independent boot test replay**, which posts to `/reviewer/review-versions/:reviewVersionId/boot-test-replay`. The Worker accepts only a reviewer session whose review version matches the path. A Designer identity, a developer, or a session for another version gets `401` or `403`.
+- a replay comparison, in the runtime replay vocabulary: `reproduced_pass` (both passed), `reproduced_failure` (both failed with the same failure set), `mixed_evidence` (status or failure set differs), `infrastructure_incomplete` (a run could not run), or `not_compared` (one side has no result yet)
+
+Each job records `actor_role` (`developer` or `reviewer`) and the requesting user. The replay runs the same immutable version and bundle SHA-256 and goes through the same result validation. It never overwrites the developer's run.
+
+`bootTestSummaryForVersion` in `worker/src/boot-tests.ts` feeds the submission receipt. It reports the latest completed **developer** run for the version, or `not_run`. Reviewer replays never change it, so the receipt shows what the developer saw at submit time.
 
 ## Security boundaries
 

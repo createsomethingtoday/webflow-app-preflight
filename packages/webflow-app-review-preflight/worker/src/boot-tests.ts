@@ -5,10 +5,11 @@ import {
   type BootTestCspViolation,
   type BootTestFailure,
   type BootTestJobContract,
+  type BootTestReplayComparison,
   type BootTestResult,
   type BootTestSummary
 } from '@create-something/webflow-app-review-preflight';
-import { authenticate, companionRoleForUser } from './auth';
+import { authenticate, authenticateCompanion, companionRoleForUser } from './auth';
 import {
   E2BRuntimeLaunchError,
   launchRuntimeObservationInE2B,
@@ -48,18 +49,21 @@ const ROUTES = {
   review: /^\/v1\/reviews\/([^/]+)\/boot-tests$/,
   job: /^\/v1\/boot-test-jobs\/([^/]+)$/,
   bundle: /^\/v1\/boot-test-jobs\/([^/]+)\/bundle$/,
-  result: /^\/v1\/boot-test-jobs\/([^/]+)\/result$/
+  result: /^\/v1\/boot-test-jobs\/([^/]+)\/result$/,
+  reviewerReplay: /^\/reviewer\/review-versions\/([^/]+)\/boot-test-replay$/
 };
 
 export class BootTestResultError extends Error {}
 export class BootTestConfigurationError extends Error {}
 
 type BootTestJobStatus = BootTestSummary['status'];
+type BootTestActorRole = BootTestSummary['actorRole'];
 
 interface BootTestJobRow {
   id: string;
   review_version_id: string;
   requested_by_user_id: string;
+  actor_role: BootTestActorRole;
   status: BootTestJobStatus;
   capability_sha256: string;
   contract_json: string;
@@ -125,6 +129,7 @@ function summaryFromRow(row: BootTestJobRow): BootTestSummary {
   return {
     id: row.id,
     reviewVersionId: row.review_version_id,
+    actorRole: row.actor_role,
     status: expired ? 'expired' : row.status,
     trust: row.evidence_trust,
     advisory: true,
@@ -155,8 +160,11 @@ async function recordEvent(
 }
 
 /**
- * Status of the most recent completed boot test for a review version, for
- * the submission receipt. A test that never produced a result is `not_run`.
+ * Status of the most recent completed developer boot test for a review
+ * version, for the submission receipt. Reviewer replays never change it: the
+ * receipt reports what the developer saw when they submitted, and a later
+ * replay must not rewrite that. A version with no developer result is
+ * `not_run`.
  */
 export async function bootTestSummaryForVersion(
   reviewVersionId: string,
@@ -166,7 +174,8 @@ export async function bootTestSummaryForVersion(
   const row = await env.DB.prepare(
     `SELECT result_status
        FROM boot_test_jobs
-      WHERE review_version_id = ? AND status = 'complete' AND result_status IS NOT NULL
+      WHERE review_version_id = ? AND actor_role = 'developer'
+        AND status = 'complete' AND result_status IS NOT NULL
       ORDER BY completed_at DESC, created_at DESC
       LIMIT 1`
   )
@@ -243,14 +252,19 @@ export async function reconcileBootTestJobs(env: Env): Promise<{ reconciled: num
   return { reconciled, failed };
 }
 
-async function activeJob(reviewVersionId: string, env: Env): Promise<BootTestJobRow | null> {
+async function activeJob(
+  reviewVersionId: string,
+  actorRole: BootTestActorRole,
+  env: Env
+): Promise<BootTestJobRow | null> {
   return env.DB.prepare(
     `SELECT * FROM boot_test_jobs
-      WHERE review_version_id = ? AND status IN ('approved', 'running') AND expires_at > ?
+      WHERE review_version_id = ? AND actor_role = ?
+        AND status IN ('approved', 'running') AND expires_at > ?
       ORDER BY created_at DESC
       LIMIT 1`
   )
-    .bind(reviewVersionId, new Date().toISOString())
+    .bind(reviewVersionId, actorRole, new Date().toISOString())
     .first<BootTestJobRow>();
 }
 
@@ -265,53 +279,43 @@ function safeLaunchMessage(stage: E2BRuntimeLaunchStage): string {
   }
 }
 
-async function requestBootTest(
-  reviewId: string,
-  request: Request,
-  env: Env,
+interface BootTestVersionRow {
+  review_id: string;
+  version_id: string;
+  artifact_sha256: string;
+  compressed_bytes: number;
+  artifact_kind: string | null;
+}
+
+type IssueOutcome =
+  | { kind: 'issued' | 'active'; job: BootTestSummary }
+  | { kind: 'unavailable'; message: string }
+  | { kind: 'dispatch_failed'; message: string };
+
+/**
+ * Issues one job for an exact review version and starts its sandbox. The
+ * caller has already authorized the actor; this function records the role.
+ * One job may be active per version and actor role.
+ */
+async function issueBootTest(
+  version: BootTestVersionRow,
+  actorRole: BootTestActorRole,
   user: AuthenticatedUser,
-  origin: string | null
-): Promise<Response> {
-  // Only the review owner, on the site that owns the review, may start a test.
-  const version = await env.DB.prepare(
-    `SELECT r.id AS review_id, v.id AS version_id, v.artifact_sha256, v.compressed_bytes,
-            json_extract(v.review_json, '$.artifact.kind') AS artifact_kind
-       FROM reviews r
-       JOIN review_versions v ON v.id = r.latest_version_id
-      WHERE r.id = ? AND r.owner_user_id = ? AND r.site_id IS ?`
-  )
-    .bind(reviewId, user.id, user.siteId)
-    .first<{
-      review_id: string;
-      version_id: string;
-      artifact_sha256: string;
-      compressed_bytes: number;
-      artifact_kind: string | null;
-    }>();
-  if (!version) return json({ error: 'review_not_found' }, 404, origin);
+  request: Request,
+  env: Env
+): Promise<IssueOutcome> {
   if (version.artifact_kind === 'runtime_manifest') {
-    return json(
-      {
-        error: 'boot_test_unavailable',
-        message: 'A boot test needs an uploaded Designer Extension bundle.'
-      },
-      400,
-      origin
-    );
+    return { kind: 'unavailable', message: 'A boot test needs an uploaded Designer Extension bundle.' };
   }
   if (!(version.compressed_bytes > 0 && version.compressed_bytes <= MAX_BUNDLE_BYTES)) {
-    return json({ error: 'boot_test_unavailable', message: 'The bundle size is out of range.' }, 400, origin);
+    return { kind: 'unavailable', message: 'The bundle size is out of range.' };
   }
 
   let policy: string;
   try {
     policy = bootTestPolicy(env);
   } catch (error) {
-    return json(
-      { error: 'boot_test_dispatch_unavailable', message: (error as Error).message },
-      503,
-      origin
-    );
+    return { kind: 'dispatch_failed', message: (error as Error).message };
   }
 
   const nowMs = Date.now();
@@ -322,10 +326,8 @@ async function requestBootTest(
   )
     .bind(now, version.version_id, now)
     .run();
-  const existing = await activeJob(version.version_id, env);
-  if (existing) {
-    return json({ bootTest: summaryFromRow(existing), deduplicated: true }, 200, origin);
-  }
+  const existing = await activeJob(version.version_id, actorRole, env);
+  if (existing) return { kind: 'active', job: summaryFromRow(existing) };
 
   const id = crypto.randomUUID();
   const capability = randomCapability();
@@ -355,14 +357,15 @@ async function requestBootTest(
   try {
     await env.DB.prepare(
       `INSERT INTO boot_test_jobs
-        (id, review_version_id, requested_by_user_id, status, capability_sha256, nonce,
-         contract_json, approved_at, expires_at, created_at, updated_at)
-       VALUES (?, ?, ?, 'approved', ?, ?, ?, ?, ?, ?, ?)`
+        (id, review_version_id, requested_by_user_id, actor_role, status, capability_sha256,
+         nonce, contract_json, approved_at, expires_at, created_at, updated_at)
+       VALUES (?, ?, ?, ?, 'approved', ?, ?, ?, ?, ?, ?, ?)`
     )
       .bind(
         id,
         version.version_id,
         user.id,
+        actorRole,
         await sha256(capability),
         nonce,
         JSON.stringify(contract),
@@ -373,17 +376,20 @@ async function requestBootTest(
       )
       .run();
   } catch (error) {
-    // The partial unique index allows one active job per version; a
-    // concurrent request that won the race is returned instead.
-    const raced = await activeJob(version.version_id, env);
-    if (raced) return json({ bootTest: summaryFromRow(raced), deduplicated: true }, 200, origin);
+    // The partial unique index allows one active job per version and role;
+    // a concurrent request that won the race is returned instead.
+    const raced = await activeJob(version.version_id, actorRole, env);
+    if (raced) return { kind: 'active', job: summaryFromRow(raced) };
     throw error;
   }
-  await recordEvent(env, version.version_id, user.id, 'boot_test_requested', {
-    bootTestJobId: id,
-    nonce,
-    expiresAt
-  }, now);
+  await recordEvent(
+    env,
+    version.version_id,
+    user.id,
+    actorRole === 'reviewer' ? 'boot_test_replay_requested' : 'boot_test_requested',
+    { bootTestJobId: id, actorRole, nonce, expiresAt },
+    now
+  );
 
   let sandboxId: string | null = null;
   try {
@@ -430,19 +436,180 @@ async function requestBootTest(
       .run();
     await recordEvent(env, version.version_id, user.id, 'boot_test_dispatch_failed', {
       bootTestJobId: id,
+      actorRole,
       stage
     }, failedAt);
-    return json(
-      { error: 'boot_test_dispatch_unavailable', message: safeLaunchMessage(stage) },
-      503,
-      origin
-    );
+    return { kind: 'dispatch_failed', message: safeLaunchMessage(stage) };
   }
 
   const row = await env.DB.prepare('SELECT * FROM boot_test_jobs WHERE id = ?')
     .bind(id)
     .first<BootTestJobRow>();
-  return json({ bootTest: summaryFromRow(row!), deduplicated: false }, 201, origin);
+  return { kind: 'issued', job: summaryFromRow(row!) };
+}
+
+const VERSION_COLUMNS = `r.id AS review_id, v.id AS version_id, v.artifact_sha256, v.compressed_bytes,
+            json_extract(v.review_json, '$.artifact.kind') AS artifact_kind`;
+
+async function requestBootTest(
+  reviewId: string,
+  request: Request,
+  env: Env,
+  user: AuthenticatedUser,
+  origin: string | null
+): Promise<Response> {
+  // Only the review owner, on the site that owns the review, may start a test.
+  const version = await env.DB.prepare(
+    `SELECT ${VERSION_COLUMNS}
+       FROM reviews r
+       JOIN review_versions v ON v.id = r.latest_version_id
+      WHERE r.id = ? AND r.owner_user_id = ? AND r.site_id IS ?`
+  )
+    .bind(reviewId, user.id, user.siteId)
+    .first<BootTestVersionRow>();
+  if (!version) return json({ error: 'review_not_found' }, 404, origin);
+  const outcome = await issueBootTest(version, 'developer', user, request, env);
+  switch (outcome.kind) {
+    case 'unavailable':
+      return json({ error: 'boot_test_unavailable', message: outcome.message }, 400, origin);
+    case 'dispatch_failed':
+      return json({ error: 'boot_test_dispatch_unavailable', message: outcome.message }, 503, origin);
+    case 'active':
+      return json({ bootTest: outcome.job, deduplicated: true }, 200, origin);
+    case 'issued':
+      return json({ bootTest: outcome.job, deduplicated: false }, 201, origin);
+  }
+}
+
+function reviewerRedirect(parameter: string, value: string): Response {
+  return new Response(null, {
+    status: 303,
+    headers: {
+      location: `/reviewer?${parameter}=${encodeURIComponent(value)}`,
+      'cache-control': 'no-store'
+    }
+  });
+}
+
+/**
+ * Reviewer replay of the exact version in the reviewer's workspace session.
+ * It uses the same authorization as the runtime replay: an HttpOnly reviewer
+ * session minted from a one-time handoff, bound to one review version. A
+ * Designer identity, a developer session, or another version is refused.
+ */
+async function requestReviewerBootTestReplay(
+  reviewVersionId: string,
+  request: Request,
+  env: Env,
+  origin: string | null
+): Promise<Response> {
+  const user = await authenticateCompanion(request, env);
+  if (!user) return json({ error: 'unauthorized' }, 401, origin);
+  if (
+    user.companionSession?.actorRole !== 'reviewer' ||
+    user.companionSession.reviewVersionId !== reviewVersionId
+  ) {
+    return json(
+      {
+        error: 'boot_test_replay_forbidden',
+        message: 'Only an authenticated reviewer may replay the boot test for this exact review version.'
+      },
+      403,
+      origin
+    );
+  }
+  const version = await env.DB.prepare(
+    `SELECT ${VERSION_COLUMNS}
+       FROM review_versions v
+       JOIN reviews r ON r.id = v.review_id
+      WHERE v.id = ? AND r.id = ?`
+  )
+    .bind(reviewVersionId, user.companionSession.reviewId)
+    .first<BootTestVersionRow>();
+  if (!version) return json({ error: 'review_version_not_found' }, 404, origin);
+  const outcome = await issueBootTest(version, 'reviewer', user, request, env);
+  switch (outcome.kind) {
+    case 'issued':
+      return reviewerRedirect('bootTestStarted', outcome.job.id);
+    case 'active':
+      return reviewerRedirect(
+        'bootTest',
+        'A boot test replay is already running for this version. Refresh this page to see the result.'
+      );
+    case 'unavailable':
+    case 'dispatch_failed':
+      return reviewerRedirect('bootTest', outcome.message);
+  }
+}
+
+/**
+ * Compares the reviewer's latest replay with the developer's latest run of
+ * the same version. Only the status and the set of failures count.
+ */
+export function compareBootTestRuns(
+  developer: BootTestResult | null,
+  reviewer: BootTestResult | null
+): BootTestReplayComparison {
+  if (!developer || !reviewer) return 'not_compared';
+  if (developer.status === 'error' || reviewer.status === 'error') return 'infrastructure_incomplete';
+  const sameFailures =
+    developer.failures.length === reviewer.failures.length &&
+    developer.failures.every((failure) => reviewer.failures.includes(failure));
+  if (developer.status !== reviewer.status || !sameFailures) return 'mixed_evidence';
+  return developer.status === 'passed' ? 'reproduced_pass' : 'reproduced_failure';
+}
+
+export interface ReviewerBootTestView {
+  /** The latest completed developer run, or the latest developer job when none completed. */
+  developer: BootTestSummary | null;
+  /** The latest completed reviewer replay, or the latest replay job when none completed. */
+  reviewer: BootTestSummary | null;
+  developerInProgress: boolean;
+  reviewerInProgress: boolean;
+  /** Compares the two latest completed results only. */
+  comparison: BootTestReplayComparison;
+}
+
+/**
+ * The developer's and the reviewer's latest results for one version, for the
+ * reviewer workspace. Null when the feature is off.
+ */
+export async function reviewerBootTestView(
+  reviewVersionId: string,
+  env: Env
+): Promise<ReviewerBootTestView | null> {
+  if (!bootTestsEnabled(env)) return null;
+  const latest = async (actorRole: BootTestActorRole) => {
+    const query = (completedOnly: boolean) =>
+      env.DB.prepare(
+        `SELECT * FROM boot_test_jobs
+          WHERE review_version_id = ? AND actor_role = ?
+            ${completedOnly ? "AND status = 'complete'" : ''}
+          ORDER BY created_at DESC
+          LIMIT 1`
+      )
+        .bind(reviewVersionId, actorRole)
+        .first<BootTestJobRow>();
+    const [completed, newest] = await Promise.all([query(true), query(false)]);
+    const newestSummary = newest ? summaryFromRow(newest) : null;
+    return {
+      shown: completed ? summaryFromRow(completed) : newestSummary,
+      inProgress:
+        newestSummary !== null &&
+        (newestSummary.status === 'approved' || newestSummary.status === 'running')
+    };
+  };
+  const [developer, reviewer] = await Promise.all([latest('developer'), latest('reviewer')]);
+  return {
+    developer: developer.shown,
+    reviewer: reviewer.shown,
+    developerInProgress: developer.inProgress,
+    reviewerInProgress: reviewer.inProgress,
+    comparison: compareBootTestRuns(
+      developer.shown?.bootTest ?? null,
+      reviewer.shown?.bootTest ?? null
+    )
+  };
 }
 
 async function listBootTests(
@@ -812,9 +979,13 @@ export async function handleBootTestRequest(
   const job = pathname.match(ROUTES.job);
   const bundle = pathname.match(ROUTES.bundle);
   const result = pathname.match(ROUTES.result);
-  if (!review && !job && !bundle && !result) return null;
+  const reviewerReplay = pathname.match(ROUTES.reviewerReplay);
+  if (!review && !job && !bundle && !result && !reviewerReplay) return null;
   if (!bootTestsEnabled(env)) return json({ error: 'not_found' }, 404, origin);
 
+  if (reviewerReplay && request.method === 'POST') {
+    return requestReviewerBootTestReplay(routeId(reviewerReplay), request, env, origin);
+  }
   if (job && request.method === 'GET') return getBootTestJob(routeId(job), request, env, origin);
   if (bundle && request.method === 'GET') {
     return getBootTestBundle(routeId(bundle), request, env, origin);

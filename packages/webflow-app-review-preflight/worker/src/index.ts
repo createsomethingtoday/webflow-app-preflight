@@ -43,7 +43,7 @@ import {
   verifySubmissionReceipt
 } from './submission-receipts';
 import type { Env } from './types';
-import { handleBootTestRequest, reconcileBootTestJobs } from './boot-tests';
+import { bootTestsEnabled, handleBootTestRequest, reconcileBootTestJobs } from './boot-tests';
 import { getCompanionRun } from './companion-runs';
 import {
   CompanionPairingInputError,
@@ -537,7 +537,9 @@ async function handle(request: Request, env: Env): Promise<Response> {
           id: user.id,
           siteId: user.siteId,
           companionRole: companionRoleForUser(user, env)
-        }
+        },
+        // Lets the Designer Extension show only the features this Worker serves.
+        features: { bootTest: bootTestsEnabled(env) }
       },
       200,
       origin

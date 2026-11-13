@@ -6,7 +6,11 @@ import {
   type BootTestJobContract
 } from '@create-something/webflow-app-review-preflight';
 import { afterEach, describe, expect, test, vi } from 'vitest';
-import { bootTestSummaryForVersion, validateBootTestEvidence } from '../src/boot-tests';
+import {
+  bootTestSummaryForVersion,
+  compareBootTestRuns,
+  validateBootTestEvidence
+} from '../src/boot-tests';
 import worker from '../src/index';
 import type { Env } from '../src/types';
 
@@ -150,9 +154,10 @@ describe('Designer Extension boot test API', () => {
         call(`/v1/reviews/${reviewId}/boot-tests`, { token: 'test-token' }, workerEnv),
         call('/v1/boot-test-jobs/some-job', { token: 'x'.repeat(43) }, workerEnv),
         call('/v1/boot-test-jobs/some-job/bundle', { token: 'x'.repeat(43) }, workerEnv),
-        call('/v1/boot-test-jobs/some-job/result', { method: 'POST', body: '{}' }, workerEnv)
+        call('/v1/boot-test-jobs/some-job/result', { method: 'POST', body: '{}' }, workerEnv),
+        call('/reviewer/review-versions/some-version/boot-test-replay', { method: 'POST' }, workerEnv)
       ]);
-      expect(responses.map((response) => response.status)).toEqual([404, 404, 404, 404, 404]);
+      expect(responses.map((response) => response.status)).toEqual([404, 404, 404, 404, 404, 404]);
       expect(fetchSpy).not.toHaveBeenCalled();
       vi.unstubAllGlobals();
     }
@@ -406,4 +411,206 @@ describe('Designer Extension boot test API', () => {
     );
     expect(result.failures).toEqual(['blank_panel', 'bundled_file_missing']);
   });
+
+  test('lists each run with the role that ran it', async () => {
+    const { reviewId } = await createReview('actor-listing');
+    const { jobId } = await startJob(reviewId);
+    const listed = await call(`/v1/reviews/${reviewId}/boot-tests`, { token: 'test-token' });
+    expect(await listed.json()).toMatchObject({ bootTests: [{ id: jobId, actorRole: 'developer' }] });
+    const row = await env.DB.prepare('SELECT actor_role, requested_by_user_id FROM boot_test_jobs WHERE id = ?')
+      .bind(jobId)
+      .first();
+    expect(row).toEqual({ actor_role: 'developer', requested_by_user_id: 'local-webflow-user' });
+  });
+
+  test('compares a replay with the developer run by status and failure set', () => {
+    const run = (status: 'passed' | 'failed' | 'error', failures: BootTestEvidence['bootTest']['failures'] = []) => ({
+      status,
+      failures,
+      cspViolations: [],
+      missingFiles: [],
+      uncaughtErrors: [],
+      externalHostsRequested: [],
+      renderedTextLength: 0,
+      renderedElementCount: 0
+    });
+    expect(compareBootTestRuns(run('passed'), run('passed'))).toBe('reproduced_pass');
+    expect(
+      compareBootTestRuns(
+        run('failed', ['blank_panel', 'bundled_file_missing']),
+        run('failed', ['bundled_file_missing', 'blank_panel'])
+      )
+    ).toBe('reproduced_failure');
+    expect(compareBootTestRuns(run('failed', ['blank_panel']), run('failed', ['bundled_file_missing']))).toBe(
+      'mixed_evidence'
+    );
+    expect(compareBootTestRuns(run('passed'), run('failed', ['blank_panel']))).toBe('mixed_evidence');
+    expect(compareBootTestRuns(run('passed'), run('error'))).toBe('infrastructure_incomplete');
+    expect(compareBootTestRuns(run('passed'), null)).toBe('not_compared');
+    expect(compareBootTestRuns(null, run('passed'))).toBe('not_compared');
+  });
 });
+
+async function createRuntimePackage(reviewId: string): Promise<string> {
+  const response = await call(`/v1/reviews/${reviewId}/runtime-test-packages`, {
+    method: 'POST',
+    token: 'test-token',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      targetUrl: 'http://127.0.0.1:4173/runtime-fixture',
+      sandboxInstallationId: 'local-webflow-site',
+      sandboxOwnershipConfirmed: true,
+      license: {
+        mode: 'installation_allowlist',
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString()
+      },
+      runtimeArtifacts: [
+        {
+          url: 'http://127.0.0.1:4173/runtime-v1.js',
+          sha256: 'a'.repeat(64),
+          integrity: 'sha256-qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqo='
+        }
+      ],
+      negativeProxyProbe: {
+        method: 'GET',
+        urlTemplate: 'http://127.0.0.1:4173/proxy?url={canaryUrl}'
+      },
+      lifecycle: { readySelector: '[data-runtime-ready]' }
+    })
+  });
+  expect(response.status).toBe(201);
+  return (await response.json<{ testPackage: { id: string } }>()).testPackage.id;
+}
+
+// The existing reviewer path: a reviewer identity creates a one-time handoff
+// for an exact version and package, and the explicit POST mints the
+// HttpOnly session cookie.
+async function reviewerSession(reviewId: string, versionId: string): Promise<string> {
+  const testPackageId = await createRuntimePackage(reviewId);
+  const handoff = await call(`/v1/reviews/${reviewId}/reviewer-handoffs`, {
+    method: 'POST',
+    token: 'reviewer-test-token',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ reviewVersionId: versionId, runtimeTestPackageId: testPackageId })
+  });
+  expect(handoff.status).toBe(201);
+  const code = new URL((await handoff.json<{ handoff: { url: string } }>()).handoff.url).searchParams.get('code')!;
+  const form = new FormData();
+  form.set('code', code);
+  const connected = await worker.fetch(
+    new Request('https://preflight.test/reviewer/connect', { method: 'POST', redirect: 'manual', body: form }),
+    enabledEnv()
+  );
+  expect(connected.status).toBe(303);
+  return connected.headers.get('set-cookie')!.split(';')[0]!;
+}
+
+async function reviewerCall(path: string, cookie: string | null, init: RequestInit = {}, token?: string): Promise<Response> {
+  const headers = new Headers(init.headers);
+  headers.set('origin', 'https://preflight.test');
+  if (cookie) headers.set('cookie', cookie);
+  if (token) headers.set('authorization', `Bearer ${token}`);
+  return worker.fetch(
+    new Request(`https://preflight.test${path}`, { ...init, headers, redirect: 'manual' }),
+    enabledEnv()
+  );
+}
+
+describe('reviewer boot test replay', () => {
+  test('lets only a reviewer workspace session replay the exact version, and shows both results', async () => {
+    const { reviewId, versionId } = await createReview('reviewer-replay');
+    const other = await createReview('reviewer-replay-other');
+    const cookie = await reviewerSession(reviewId, versionId);
+    const replayPath = `/reviewer/review-versions/${versionId}/boot-test-replay`;
+
+    // The developer finishes a passing run first.
+    const developer = await startJob(reviewId);
+    const developerContract = await fetchContract(developer.jobId, developer.capability);
+    expect((await postResult(developer.jobId, developer.capability, evidence(developerContract))).status).toBe(200);
+
+    // No session, a developer bearer, a reviewer bearer without a workspace
+    // session, and a session for a different version are all refused.
+    const spy = stubE2B();
+    expect((await reviewerCall(replayPath, null, { method: 'POST' })).status).toBe(401);
+    expect((await reviewerCall(replayPath, null, { method: 'POST' }, 'test-token')).status).toBe(403);
+    expect((await reviewerCall(replayPath, null, { method: 'POST' }, 'reviewer-test-token')).status).toBe(403);
+    expect(
+      (await reviewerCall(`/reviewer/review-versions/${other.versionId}/boot-test-replay`, cookie, { method: 'POST' })).status
+    ).toBe(403);
+    expect(spy.createBodies).toHaveLength(0);
+
+    const before = await (await reviewerCall('/reviewer', cookie)).text();
+    expect(before).toContain('Designer Extension boot test');
+    expect(before).toContain('Developer run');
+    expect(before).toContain('Not compared: one of the two runs has no result yet');
+    expect(before).toContain(`/reviewer/review-versions/${versionId}/boot-test-replay`);
+
+    // A running developer job does not block the reviewer's replay.
+    const developerAgain = await startJob(reviewId);
+    const replayStub = stubE2B();
+    const replay = await reviewerCall(replayPath, cookie, { method: 'POST' });
+    expect(replay.status).toBe(303);
+    expect(replay.headers.get('location')).toMatch(/^\/reviewer\?bootTestStarted=/);
+    const replayJobId = decodeURIComponent(replay.headers.get('location')!.split('=')[1]!);
+    expect(replayJobId).not.toBe(developerAgain.jobId);
+    expect(replayStub.runBodies[0]).toMatchObject({ observationJobId: replayJobId, jobKind: 'boot_test' });
+    const stored = await env.DB.prepare(
+      'SELECT actor_role, requested_by_user_id, review_version_id FROM boot_test_jobs WHERE id = ?'
+    )
+      .bind(replayJobId)
+      .first();
+    expect(stored).toEqual({
+      actor_role: 'reviewer',
+      requested_by_user_id: 'local-webflow-reviewer',
+      review_version_id: versionId
+    });
+    const event = await env.DB.prepare(
+      `SELECT actor_user_id FROM review_events WHERE event_type = 'boot_test_replay_requested' AND payload_json LIKE ?`
+    )
+      .bind(`%${replayJobId}%`)
+      .first();
+    expect(event).toEqual({ actor_user_id: 'local-webflow-reviewer' });
+
+    // A second replay while the first runs returns a notice, not a new job.
+    const duplicate = await reviewerCall(replayPath, cookie, { method: 'POST' });
+    expect(decodeURIComponent(duplicate.headers.get('location')!)).toContain('already running');
+
+    // The sandbox reports a blank panel. The Worker validates it the same way.
+    const replayCapability = String(replayStub.runBodies[0]!.capability);
+    const replayContract = await fetchContract(replayJobId, replayCapability);
+    expect(replayContract.reviewVersionId).toBe(versionId);
+    expect((await postResult(replayJobId, replayCapability, { ...evidence(replayContract), nonce: 'forged' })).status).toBe(400);
+    const blank = evidence(replayContract, {
+      status: 'failed',
+      failures: ['blank_panel'],
+      renderedTextLength: 0,
+      renderedElementCount: 0
+    });
+    expect((await postResult(replayJobId, replayCapability, blank)).status).toBe(200);
+
+    const after = await (await reviewerCall('/reviewer', cookie)).text();
+    expect(after).toContain('Reviewer replay');
+    expect(after).toContain('Failures: blank_panel');
+    expect(after).toContain('Differs: the status or the failures do not match');
+    expect(after).toContain('A newer run is in progress');
+
+    // The receipt keeps the developer's result; the replay never rewrites it.
+    await expect(bootTestSummaryForVersion(versionId, enabledEnv())).resolves.toEqual({ status: 'passed' });
+  });
+
+  test('hides the boot test from the reviewer workspace while the switch is off', async () => {
+    const { reviewId, versionId } = await createReview('reviewer-switch-off');
+    const cookie = await reviewerSession(reviewId, versionId);
+    const off = { ...(env as unknown as Env) };
+    delete off.BOOT_TEST_ENABLED;
+    const page = await worker.fetch(
+      new Request('https://preflight.test/reviewer', { headers: { cookie } }),
+      off
+    );
+    expect(page.status).toBe(200);
+    const html = await page.text();
+    expect(html).toContain('Run independent replay');
+    expect(html).not.toContain('Designer Extension boot test');
+  });
+});
+
