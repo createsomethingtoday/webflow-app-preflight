@@ -375,6 +375,18 @@ ORDER BY created_at ASC;
 
 One job can be `approved` or `running` per review version and actor role, so a running developer test never blocks a reviewer replay. The scheduled task expires stale jobs and retries sandbox termination.
 
+### Sandbox launch limits
+
+Boot tests and runtime observation runs share three limits. Each answers `429` with `sandbox_limit_reached` and starts no sandbox.
+
+- `SANDBOX_DAILY_LIMIT_PER_USER` (default `30`): jobs one developer started in the last 24 hours, both kinds together. Reviewer replays are exempt. Observation jobs count against the runtime test package owner.
+- `SANDBOX_ACTIVE_LIMIT_PER_USER` (default `3`): launched jobs of one developer that have not finished or expired. Without it one developer could fill the shared pool. Reviewer replays are exempt.
+- `SANDBOX_ACTIVE_LIMIT` (default `20`): launched jobs that have not finished or expired, across all users. It applies to reviewer replays too.
+
+Each variable takes a positive whole number. Any other value uses the default.
+
+A boot test result with an unreadable host, path, or message is still stored. The bad label shows as `[unreadable]`, and the stored result has `labelsReplaced` with the count.
+
 ## Run the same test from the creator CLI
 
 The creator CLI (`wf-app-validate runtime`) can prepare and run the same Runtime Test Package without the Designer. The server still creates the sandbox and the evidence.

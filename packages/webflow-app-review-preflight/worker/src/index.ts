@@ -58,6 +58,7 @@ import {
   latestWebflowAuthorizationReadiness,
   recordWebflowAuthorizationReadiness
 } from './webflow-authorization';
+import { sandboxLimitResponse, SandboxLimitError } from './sandbox-limits';
 import {
   connectReviewerWorkspace,
   recheckReviewerInstallUrl,
@@ -275,6 +276,7 @@ async function handle(request: Request, env: Env): Promise<Response> {
         reviewer
       );
     } catch (error) {
+      if (error instanceof SandboxLimitError) return sandboxLimitResponse(error.hit, origin);
       if (error instanceof RuntimeObservationDispatchError) {
         return json(
           { error: 'runtime_observation_dispatch_unavailable', message: error.message },
@@ -719,6 +721,7 @@ async function handle(request: Request, env: Env): Promise<Response> {
         origin
       );
     }
+    if (error instanceof SandboxLimitError) return sandboxLimitResponse(error.hit, origin);
     if (error instanceof RuntimeObservationDispatchError) {
       return json(
         { error: 'runtime_observation_dispatch_unavailable', message: error.message },
