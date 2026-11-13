@@ -174,6 +174,18 @@ Success (`200`) returns reconciliation metadata only, with no findings, evidence
 - `clientIdBound` is `true` when a client ID is bound to the receipt after this call. `clientIdConflict` is `true` when the receipt is bound to a different client ID than the one in this request; a request without a valid `clientId` always reports `false`.
 - A receipt is a reference, not an approval; the reviewer replay remains the verification.
 
+## Designer Extension boot test
+
+Static rules do not run the bundle. The boot test does: it catches a panel that opens blank, a bundled script that the Content-Security-Policy blocks, and a file that `index.html` references but the ZIP does not contain. It is advisory evidence, off by default behind `BOOT_TEST_ENABLED`, and it never changes `readiness`, a static finding, or a runtime security status.
+
+1. The review owner calls `POST /v1/reviews/:reviewId/boot-tests` for the latest version. The Worker allows one active job per review version, writes a contract with a random nonce, a 15-minute expiry, and the extension host policy, and stores only the SHA-256 of a one-time capability.
+2. The Worker starts a fresh E2B sandbox with the same launcher as a runtime observation and sends `jobKind: "boot_test"` to the template's `/run` route. The sandbox receives no account credential or token beyond the job capability.
+3. The runner reads the contract (`GET /v1/boot-test-jobs/:id`) and downloads that version's exact bundle (`GET /v1/boot-test-jobs/:id/bundle`). Both routes accept only the job capability while the job runs. The runner checks the bundle SHA-256 against the contract.
+4. The runner serves the bundle from a static server on `127.0.0.1` with the policy on every response, stubs `window.webflow`, and opens `index.html` in headless Chromium. The browser can reach only that server: a route handler aborts every other origin (other loopback ports included), WebSockets close before they connect, and the browser's proxy is a local socket that drops every connection.
+5. The runner uploads one JSON result (`POST /v1/boot-test-jobs/:id/result`). The Worker checks every binding, field, cap, and label, rejects internally inconsistent or secret-shaped results, stores the result as `webflow_observed`, consumes the job, and terminates the sandbox.
+
+`status` is `failed` only for `bundled_script_blocked_by_csp`, `bundled_file_missing`, or `blank_panel` (no visible text and no rendered element after the settle time). Blocked external requests and uncaught errors are informational. `error` means the test itself could not run. `GET /v1/reviews/:reviewId/boot-tests` lists results; `bootTestSummaryForVersion` in `worker/src/boot-tests.ts` returns the latest status for one version.
+
 ## Security boundaries
 
 - Zip uploads are limited to 10 MB, 50 MB uncompressed, and 2,000 files, and must pass deterministic archive processing before D1 writes.

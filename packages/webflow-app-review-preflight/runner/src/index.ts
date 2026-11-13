@@ -520,7 +520,7 @@ async function screenshot(page: Page): Promise<Uint8Array> {
 
 // Reads a response body while enforcing a byte cap, so a hostile server cannot
 // exhaust runner memory with an unbounded (or Content-Length-lying) body.
-async function readCapped(response: Response, maxBytes: number): Promise<Uint8Array> {
+export async function readCapped(response: Response, maxBytes: number): Promise<Uint8Array> {
   const declared = Number(response.headers.get('content-length') ?? '');
   if (Number.isFinite(declared) && declared > maxBytes) {
     throw new Error('Response exceeds the byte cap.');

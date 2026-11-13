@@ -10,6 +10,10 @@ The template's build recipe pins the Node base-image digest and the Playwright p
 - **Pinned recipe inputs:** the base-image digest and the requested `playwright@<version>`.
 - **Captured, not reproducible:** the browser and OS layers. There is no lockfile, so the transitive npm tree floats; `npx playwright install --with-deps chromium` runs `apt` against moving Debian repos and downloads an unchecksummed browser from the Playwright CDN. The build receipt records the **resolved** facts (Chromium revision, resolved `playwright-core` version, and a SHA-256 of `dpkg -l`) under `resolved`, so two builds can be compared after the fact — but they are not guaranteed to reproduce byte-for-byte.
 
+### Job kinds
+
+The `/run` body is exactly `{ observationJobId, apiBaseUrl, capability }` for a runtime observation. A Designer Extension boot test adds `jobKind: "boot_test"`, and the service starts the same baked runner with `--kind boot-test`. Any other key or value is rejected with `400`. A template built before this change rejects boot test launches, so rebuild it before you turn on `BOOT_TEST_ENABLED`.
+
 ### Launch authentication
 
 The service enforces an in-sandbox backstop when the Worker injects a per-sandbox launch secret as the `APP_REVIEW_RUNTIME_LAUNCH_SECRET` environment variable at sandbox create time. When set, `POST /run` must present it in the `x-webflow-runtime-launch-secret` header (constant-time compared); requests without it get `401`. When the variable is absent, no in-sandbox authentication is enforced and E2B's per-sandbox token is the only control.

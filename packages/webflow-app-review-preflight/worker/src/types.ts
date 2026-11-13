@@ -21,6 +21,10 @@ export interface Env {
   GOVERNANCE_APPROVER_TOKEN?: string;
   REVIEWER_USER_IDS?: string;
   INSTALL_URL_CHECK_TOKEN?: string;
+  /** `true` turns on the Designer Extension boot test routes; anything else leaves them 404. */
+  BOOT_TEST_ENABLED?: string;
+  /** Optional replacement for the captured extension host Content-Security-Policy. */
+  BOOT_TEST_CSP?: string;
 }
 
 export interface AuthenticatedUser {

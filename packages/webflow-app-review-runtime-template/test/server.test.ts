@@ -138,6 +138,22 @@ describe('immutable runtime template interface', () => {
   });
 });
 
+describe('boot test launch', () => {
+  it('accepts only the boot_test job kind beside the runtime observation shape', async () => {
+    const runtime = launcher();
+    const handle = createRuntimeTemplateHandler({ expectedApiOrigin: EXPECTED_API_ORIGIN, runtime });
+    const unknown = await handle(request({ ...input, jobKind: 'shell' }));
+    expect(unknown.status).toBe(400);
+    const extra = await handle(request({ ...input, jobKind: 'boot_test', target: 'x' }));
+    expect(extra.status).toBe(400);
+    expect(runtime.launch).not.toHaveBeenCalled();
+
+    const accepted = await handle(request({ ...input, jobKind: 'boot_test' }));
+    expect(accepted.status).toBe(202);
+    expect(runtime.launch).toHaveBeenCalledWith({ ...input, jobKind: 'boot_test' });
+  });
+});
+
 // Exercise the deployed coordinator origin against the actual baked policy.
 describe('production coordinator migration', () => {
   it('accepts the Webflow coordinator and rejects the retired origin', async () => {

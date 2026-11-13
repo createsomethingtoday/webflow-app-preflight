@@ -340,6 +340,30 @@ Do not start another run while a job is `approved`, `running`, or `uploading`. I
 
 The scheduled Worker task expires stale jobs and retries sandbox termination. Never construct or upload evidence by hand.
 
+### Designer Extension boot test (off by default)
+
+The boot test opens the bundle's `index.html` in a fresh sandbox browser under the extension host's Content-Security-Policy and reports `passed`, `failed`, or `error`. The result is advisory: it never changes readiness, a finding, or a runtime security status.
+
+To turn it on:
+
+1. Apply migration `0015_boot_test_jobs.sql`.
+2. Rebuild the E2B template so its `/run` route accepts `jobKind: "boot_test"`, and set the new immutable reference as `E2B_RUNTIME_TEMPLATE_ID`.
+3. Set the Worker variable `BOOT_TEST_ENABLED` to `true`. With any other value, every boot test route answers `404`.
+
+The default policy is the header the extension host sent on 2026-11-13 (`DESIGNER_EXTENSION_HOST_CSP` in `src/boot-test.ts`). To change it without a runner rebuild, set `BOOT_TEST_CSP` to one printable ASCII header value. Each new job carries the policy in its contract.
+
+Check a version's boot tests in D1:
+
+```sql
+SELECT id, status, result_status, evidence_trust, approved_at, completed_at,
+       expires_at, sandbox_id, sandbox_termination_status
+FROM boot_test_jobs
+WHERE review_version_id = '<review-version-id>'
+ORDER BY created_at ASC;
+```
+
+One job can be `approved` or `running` per review version. The scheduled task expires stale jobs and retries sandbox termination.
+
 ## Validation receipt
 
 Copy this block after the three-run loop:

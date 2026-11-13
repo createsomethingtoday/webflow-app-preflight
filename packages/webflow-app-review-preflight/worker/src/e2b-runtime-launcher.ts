@@ -30,6 +30,8 @@ export interface E2BRuntimeLaunchInput {
   observationJobId: string;
   apiBaseUrl: string;
   capability: string;
+  /** Set only for a Designer Extension boot test; the template runs that runner mode. */
+  jobKind?: 'boot_test';
 }
 
 // In-sandbox launch authentication contract (webflow-app-review-runtime-template):
@@ -98,7 +100,10 @@ export async function launchRuntimeObservationInE2B(
         network: { allowPublicTraffic: false },
         envVars: { [LAUNCH_SECRET_ENV]: launchSecret },
         metadata: {
-          lane: 'app_review_runtime_observation',
+          lane:
+            input.jobKind === 'boot_test'
+              ? 'app_review_boot_test'
+              : 'app_review_runtime_observation',
           observation_job_id: input.observationJobId,
           coordinator: 'webflow-app-review-preflight'
         }

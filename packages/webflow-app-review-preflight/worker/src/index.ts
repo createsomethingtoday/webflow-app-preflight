@@ -43,6 +43,7 @@ import {
   verifySubmissionReceipt
 } from './submission-receipts';
 import type { Env } from './types';
+import { handleBootTestRequest, reconcileBootTestJobs } from './boot-tests';
 import { getCompanionRun } from './companion-runs';
 import {
   CompanionPairingInputError,
@@ -520,6 +521,9 @@ async function handle(request: Request, env: Env): Promise<Response> {
     }
   }
 
+  const bootTestResponse = await handleBootTestRequest(request, env, origin);
+  if (bootTestResponse) return bootTestResponse;
+
   const isCompanionRequest = /^\/v1\/companion-runs\//.test(url.pathname);
   const user = isCompanionRequest
     ? await authenticateCompanion(request, env)
@@ -760,7 +764,10 @@ export default {
     ctx.waitUntil(
       Promise.all([
         reconcileRuntimeObservationJobs(env),
-        recordWebflowAuthorizationReadiness(env)
+        recordWebflowAuthorizationReadiness(env),
+        reconcileBootTestJobs(env).catch((error: unknown) => {
+          console.error('Boot test reconcile failed', error);
+        })
       ]).then(([, authorization]) => {
         if (authorization.state !== 'ready') {
           console.error('Webflow authorization readiness check failed', {
