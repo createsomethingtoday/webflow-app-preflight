@@ -271,7 +271,7 @@ export const defaultRuleset: Ruleset = {
           // `storage-set-token` (its `key|secret` terms), so they are not
           // repeated here and one call yields one finding.
           pattern:
-            '(?:localStorage|sessionStorage)\\.setItem\\s*\\(\\s*(?:[\'"`][^\'"`]*(?:password|passwd)[^\'"`]*[\'"`]|(?![\'"`])[\\w$.]*(?:api_?key|license_?key|secret|password|passwd)[\\w$.]*\\s*,)',
+            '(?:localStorage|sessionStorage)\\.setItem\\s*\\(\\s*(?:[\'"`][^\'"`]{0,200}(?:password|passwd)[^\'"`]{0,200}[\'"`]|(?![\'"`])[\\w$.]{0,200}(?:api_?key|license_?key|secret|password|passwd)[\\w$.]{0,200}\\s*,)',
           flags: 'gi',
           fileGlobs: ['**/*.{js,ts,jsx,tsx,mjs,cjs}'],
           triggerTokens: ['setItem'],
@@ -353,7 +353,7 @@ export const defaultRuleset: Ruleset = {
         {
           id: 'script-tag-literal',
           type: 'regex',
-          pattern: '<script[^>]+src=[\'"]https?:\\/\\/',
+          pattern: '<script[^>]{1,2000}src=[\'"]https?:\\/\\/',
           flags: 'i',
           fileGlobs: ['**/*.{js,ts,jsx,tsx,html,mjs,cjs}'],
           triggerTokens: ['<script'],
@@ -524,7 +524,7 @@ export const defaultRuleset: Ruleset = {
         {
           id: 'iframe-http-src',
           type: 'regex',
-          pattern: '<iframe[^>]+src=[\'"](http|\\/\\/)',
+          pattern: '<iframe[^>]{1,2000}src=[\'"](http|\\/\\/)',
           flags: 'i',
           fileGlobs: ['**/*.{html,js,ts,jsx,tsx}'],
           triggerTokens: ['<iframe'],
@@ -700,7 +700,7 @@ export const defaultRuleset: Ruleset = {
           // literal (a variable) is not matched: it cannot be read here.
           // <a target="_blank"> is not matched; browsers imply noopener there.
           pattern:
-            '\\b(?:window|globalThis|self)\\.open\\s*\\(\\s*(?:[^(),\'"`]|\'[^\']*\'|"[^"]*"|`[^`]*`|\\([^()]*\\))+?\\s*,\\s*[\'"`]_blank[\'"`]\\s*(?:\\)|,\\s*([\'"`])(?:(?!noopener|noreferrer)[^\'"`])*\\1\\s*\\))',
+            '\\b(?:window|globalThis|self)\\.open\\s*\\((?:[^(),\'"`]|\'[^\']*\'|"[^"]*"|`[^`]*`|\\([^()]*\\))+?,\\s*[\'"`]_blank[\'"`]\\s*(?:\\)|,\\s*([\'"`])(?:(?!noopener|noreferrer)[^\'"`])*\\1\\s*\\))',
           flags: 'gi',
           fileGlobs: ['**/*.{js,ts,jsx,tsx,mjs,cjs}'],
           triggerTokens: ['window.open'],
@@ -832,7 +832,7 @@ export const defaultRuleset: Ruleset = {
           // debug_*, mimic, bypass), the same read through a variable (minified
           // bundles rename it, so the variable is tied back to its
           // URLSearchParams within 400 characters), or location.search.includes.
-          pattern: '(?:new\\s+URLSearchParams\\s*\\((?:[^()]|\\([^()]*\\))*\\)|[\\w$]*[pP]arams)\\s*\\.(?:get|has)\\s*\\(\\s*[\'"`](?:debug|[a-z0-9-]*_debug|debug_[a-z0-9_-]*|mimic|bypass)[\'"`]\\s*\\)|(?<![\\w$.])(?<v>[\\w$]+)\\s*=\\s*new\\s+URLSearchParams\\s*\\((?:[^()]|\\([^()]*\\))*\\)[\\s\\S]{0,400}?(?<![\\w$.])\\k<v>\\s*\\.(?:get|has)\\s*\\(\\s*[\'"`](?:debug|[a-z0-9-]*_debug|debug_[a-z0-9_-]*|mimic|bypass)[\'"`]\\s*\\)|\\blocation\\.search\\.(?:includes|indexOf)\\s*\\(\\s*[\'"`][?&]?(?:debug|[a-z0-9-]*_debug|debug_[a-z0-9_-]*|mimic|bypass)(?:=|[\'"`])',
+          pattern: '(?:new\\s+URLSearchParams\\s*\\((?:[^()]|\\([^()]*\\))*\\)|(?<![\\w$])[\\w$]*[pP]arams)\\s*\\.(?:get|has)\\s*\\(\\s*[\'"`](?:debug|[a-z0-9-]*_debug|debug_[a-z0-9_-]*|mimic|bypass)[\'"`]\\s*\\)|(?<![\\w$.])(?<v>[\\w$]+)\\s*=\\s*new\\s+URLSearchParams\\s*\\((?:[^()]|\\([^()]*\\))*\\)[\\s\\S]{0,400}?(?<![\\w$.])\\k<v>\\s*\\.(?:get|has)\\s*\\(\\s*[\'"`](?:debug|[a-z0-9-]*_debug|debug_[a-z0-9_-]*|mimic|bypass)[\'"`]\\s*\\)|\\blocation\\.search\\.(?:includes|indexOf)\\s*\\(\\s*[\'"`][?&]?(?:debug|[a-z0-9-]*_debug|debug_[a-z0-9_-]*|mimic|bypass)(?:=|[\'"`])',
           flags: 'gi',
           fileGlobs: ['**/*.{js,ts,jsx,tsx,mjs,cjs}'],
           triggerTokens: ['URLSearchParams', 'location.search'],

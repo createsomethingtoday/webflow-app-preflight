@@ -276,3 +276,47 @@ describe('ruleset 1.9.0 reviewer-practice patterns', () => {
     });
   });
 });
+
+// Backtracking guard. A regex cannot be stopped once it starts, and the scan
+// runs each matcher over whole files in the Worker and in the sandbox runner.
+// So every regex matcher must stay close to linear on text that a developer,
+// or a bundler, can produce. Each shape below made a 1.9.0 matcher take
+// seconds before its pattern was bounded.
+describe('regex matchers do not backtrack badly', () => {
+  const LIMIT_MS = 300;
+  const shapes: Array<[string, (token: string) => string]> = [
+    ['a long identifier run', (token) => `${token} x="${'a'.repeat(120_000)}";`],
+    ['an identifier run after a constructor', (token) => `new ${token}(location.search);var x="${'a'.repeat(120_000)}";`],
+    ['a long run of spaces', (token) => `${token}${' '.repeat(120_000)}`],
+    ['an open call and spaces', (token) => `${token}(${' '.repeat(3_000)}`],
+    ['an unclosed string of one repeated word', (token) => `localStorage.${token}('${'password'.repeat(15_000)}`],
+    ['an unquoted run of one repeated word', (token) => `localStorage.${token}(${'secret'.repeat(20_000)}`],
+    ['the token repeated', (token) => `${token}(`.repeat(20_000)]
+  ];
+  const cases = defaultRuleset.rules.flatMap((rule) =>
+    rule.matchers
+      .filter((matcher) => matcher.type === 'regex' && matcher.pattern)
+      .map((matcher) => [matcher.id, matcher] as const)
+  );
+
+  it.each(cases)('%s', (_id, matcher) => {
+    // The same flags the scan loop compiles with.
+    let flags = matcher.flags ?? '';
+    if (!flags.includes('g')) flags += 'g';
+    const tokens = matcher.triggerTokens?.length ? matcher.triggerTokens : ['x'];
+    for (const token of tokens) {
+      for (const [label, build] of shapes) {
+        const regex = new RegExp(matcher.pattern as string, flags);
+        const text = build(token);
+        const started = performance.now();
+        let match: RegExpExecArray | null;
+        let count = 0;
+        while ((match = regex.exec(text)) !== null && count < 5000) {
+          count += 1;
+          if (match[0] === '') regex.lastIndex += 1;
+        }
+        expect(performance.now() - started, `${matcher.id} on ${label} (${token})`).toBeLessThan(LIMIT_MS);
+      }
+    }
+  });
+});
