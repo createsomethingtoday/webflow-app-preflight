@@ -1,8 +1,14 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, test, vi } from 'vitest';
-import { App, runtimeIssues, runtimeSecuritySummary } from './App';
+import { App, bootTestFindings, runtimeAdvisories, runtimeIssues, runtimeSecuritySummary } from './App';
 import { PreflightAuthenticationError } from './api';
-import type { InstallUrlCheck, PreflightApi, StoredReview, SubmissionReceipt } from './types';
+import type {
+  BootTestSummary,
+  InstallUrlCheck,
+  PreflightApi,
+  StoredReview,
+  SubmissionReceipt
+} from './types';
 
 afterEach(() => {
   cleanup();
@@ -25,7 +31,9 @@ const api: PreflightApi = {
   listRuntimeTestPackages: async () => [],
   createRuntimeTestPackage: async () => Promise.reject(new Error('not used')),
   requestRuntimeObservationRun: async () => Promise.reject(new Error('not used')),
-  createReviewerHandoff: async () => Promise.reject(new Error('not used'))
+  createReviewerHandoff: async () => Promise.reject(new Error('not used')),
+  listBootTests: async () => [],
+  requestBootTest: async () => Promise.reject(new Error('not used'))
 };
 
 function sampleSubmissionReceipt(): SubmissionReceipt {
@@ -1362,6 +1370,83 @@ describe('runtimeIssues proxy finding', () => {
   });
 });
 
+describe('runtimeAdvisories', () => {
+  const view = (extra: Record<string, unknown>) => extra as never;
+
+  test('lists unpinned runtime URLs and runtime CSP violations as advisory notes', () => {
+    const advisories = runtimeAdvisories(
+      view({
+        mutableRuntimeUrls: ['https://cdn.example.com/runtime.js'],
+        observation: {
+          evidence: {
+            cspReplay: {
+              status: 'violations',
+              runtimeReadyObserved: true,
+              violations: [
+                {
+                  directive: 'script-src-elem',
+                  blocked: 'inline',
+                  source: 'cdn.example.com/runtime.js',
+                  fromRuntime: true
+                },
+                { directive: 'style-src-elem', blocked: 'inline', source: 'document', fromRuntime: false }
+              ]
+            }
+          }
+        }
+      })
+    );
+    expect(advisories.map((item) => item.title)).toEqual([
+      'Runtime URL can change after review',
+      'Runtime breaks under a strict Content Security Policy'
+    ]);
+    expect(advisories[0]?.detail).toContain('Publish each release at a new versioned URL.');
+    expect(advisories[1]?.lines).toEqual(['script-src-elem: inline from cdn.example.com/runtime.js']);
+  });
+
+  test('lists the static scan as rule-level counts', () => {
+    const advisories = runtimeAdvisories(
+      view({
+        observation: {
+          evidence: {
+            runtimeStaticScan: {
+              status: 'scanned',
+              filesScanned: 1,
+              findings: [
+                { ruleId: 'SEC-NO-DCE', name: 'Dynamic Code Execution', severity: 'BLOCKER', count: 2 }
+              ]
+            }
+          }
+        }
+      })
+    );
+    expect(advisories).toHaveLength(1);
+    expect(advisories[0]?.lines).toEqual(['Dynamic Code Execution (BLOCKER) x2']);
+    expect(
+      runtimeAdvisories(
+        view({
+          observation: {
+            evidence: { runtimeStaticScan: { status: 'scanned', filesScanned: 1, findings: [] } }
+          }
+        })
+      )
+    ).toEqual([]);
+  });
+
+  test('stays quiet when nothing was found or the replay did not run', () => {
+    expect(runtimeAdvisories(view({ mutableRuntimeUrls: [] }))).toEqual([]);
+    expect(
+      runtimeAdvisories(
+        view({
+          observation: {
+            evidence: { cspReplay: { status: 'not_run', runtimeReadyObserved: false, violations: [] } }
+          }
+        })
+      )
+    ).toEqual([]);
+  });
+});
+
 describe('runtimeSecuritySummary', () => {
   test('a passed status reports runtime security passed', () => {
     expect(runtimeSecuritySummary('passed', 0)).toEqual({
@@ -1506,3 +1591,211 @@ describe('install URL check', () => {
     expect(screen.queryByText('Check the link users click to install')).toBeNull();
   });
 });
+
+describe('Designer Extension boot test', () => {
+  function fixtureReview(): StoredReview {
+    const review = consentProReview();
+    review.id = 'review-fixture-extension';
+    review.name = 'Fixture extension run';
+    review.latestVersion.result.reviewId = review.id;
+    review.latestVersion.result.artifactScope.appName = 'Fixture extension';
+    review.latestVersion.result.runtime.references = ['https://cdn.example.test/runtime-v1.js'];
+    return review;
+  }
+
+  function bootTestRun(
+    overrides: Partial<BootTestSummary> = {},
+    result: Partial<NonNullable<BootTestSummary['bootTest']>> | null = {}
+  ): BootTestSummary {
+    return {
+      id: 'boot-test-1',
+      reviewVersionId: 'version-1',
+      actorRole: 'developer',
+      status: 'complete',
+      trust: 'webflow_observed',
+      advisory: true,
+      approvedAt: '2026-11-13T10:00:00.000Z',
+      expiresAt: '2026-11-13T10:15:00.000Z',
+      completedAt: '2026-11-13T10:01:00.000Z',
+      bootTest:
+        result === null
+          ? null
+          : {
+              status: 'passed',
+              failures: [],
+              cspViolations: [],
+              missingFiles: [],
+              uncaughtErrors: [],
+              externalHostsRequested: [],
+              renderedTextLength: 15,
+              renderedElementCount: 4,
+              ...result
+            },
+      ...overrides
+    };
+  }
+
+  function bootTestApi(
+    review: StoredReview,
+    overrides: Partial<PreflightApi> = {},
+    enabled = true
+  ): PreflightApi {
+    return {
+      ...api,
+      getIdentity: async () => ({
+        id: 'local-webflow-user',
+        siteId: 'local-webflow-site',
+        companionRole: 'developer',
+        ...(enabled ? { features: { bootTest: true } } : {})
+      }),
+      listReviews: async () => [
+        {
+          id: review.id,
+          name: review.name,
+          updatedAt: review.updatedAt,
+          latestSequence: 1,
+          readiness: review.latestVersion.result.summary.readiness,
+          appName: 'Fixture extension',
+          coverage: review.latestVersion.result.coverage
+        }
+      ],
+      getReview: async () => review,
+      ...overrides
+    };
+  }
+
+  async function openReview(): Promise<void> {
+    fireEvent.click(await screen.findByRole('button', { name: /Fixture extension run/ }));
+    await screen.findByRole('heading', { name: 'Fixture extension' });
+  }
+
+  test('stays hidden when the Worker does not serve the boot test', async () => {
+    const listBootTests = vi.fn(async () => []);
+    render(<App api={bootTestApi(fixtureReview(), { listBootTests }, false)} />);
+    await openReview();
+    expect(screen.queryByText('Check that the extension opens')).toBeNull();
+    expect(listBootTests).not.toHaveBeenCalled();
+  });
+
+  test('stays hidden for a hosted-runtime review even when the feature is on', async () => {
+    const review = fixtureReview();
+    review.latestVersion.result.artifact.kind = 'runtime_manifest';
+    const listBootTests = vi.fn(async () => []);
+    render(<App api={bootTestApi(review, { listBootTests })} />);
+    await openReview();
+    expect(screen.queryByText('Check that the extension opens')).toBeNull();
+    expect(listBootTests).not.toHaveBeenCalled();
+  });
+
+  test('runs a boot test, shows it running, then shows the passed result as advisory', async () => {
+    const review = fixtureReview();
+    let runs: BootTestSummary[] = [];
+    const requestBootTest = vi.fn(async () => {
+      runs = [bootTestRun({ status: 'running', completedAt: null }, null)];
+      return runs[0]!;
+    });
+    const listBootTests = vi.fn(async () => runs);
+    render(<App api={bootTestApi(review, { listBootTests, requestBootTest })} />);
+    await openReview();
+
+    expect(await screen.findByText('Check that the extension opens')).toBeVisible();
+    expect(screen.getByText(/does not change readiness/)).toBeVisible();
+    expect(screen.getByText('Ready to test')).toBeVisible();
+    fireEvent.click(screen.getByRole('button', { name: 'Run boot test' }));
+
+    expect(await screen.findByText('Boot test running')).toBeVisible();
+    expect(requestBootTest).toHaveBeenCalledWith(review.id);
+    expect(screen.queryByRole('button', { name: /Run boot test/ })).toBeNull();
+    expect(screen.getByLabelText('Boot test: Running')).toBeVisible();
+
+    runs = [bootTestRun()];
+    fireEvent.click(within(screen.getByRole('region', { name: 'Check that the extension opens' })).getByRole('button', { name: 'Refresh results' }));
+    expect(await screen.findByText('The extension opened')).toBeVisible();
+    expect(screen.getByLabelText('Boot test: Passed')).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Run boot test again' })).toBeEnabled();
+  });
+
+  test('explains each failure with the blocked and missing files and a next step', async () => {
+    const failed = bootTestRun({}, {
+      status: 'failed',
+      failures: ['blank_panel', 'bundled_script_blocked_by_csp', 'bundled_file_missing'],
+      cspViolations: [
+        { directive: 'script-src-elem', blocked: 'assets/app.js', source: 'document' },
+        { directive: 'script-src-elem', blocked: 'inline', source: 'document' }
+      ],
+      missingFiles: ['assets/missing.css'],
+      uncaughtErrors: ['Failed to fetch'],
+      externalHostsRequested: ['api.example.test'],
+      renderedTextLength: 0,
+      renderedElementCount: 0
+    });
+    render(<App api={bootTestApi(fixtureReview(), { listBootTests: async () => [failed] })} />);
+    await openReview();
+
+    expect(await screen.findByText('The extension may open as a blank panel')).toBeVisible();
+    expect(screen.getByLabelText('Boot test: Failed')).toBeVisible();
+    expect(screen.getByText('The panel was blank')).toBeVisible();
+    expect(screen.getByText('A security policy blocked your script')).toBeVisible();
+    expect(screen.getByText('A file is missing from the bundle')).toBeVisible();
+    expect(
+      within(screen.getByLabelText('Files: A security policy blocked your script')).getByText('assets/app.js')
+    ).toBeVisible();
+    expect(
+      within(screen.getByLabelText('Files: A file is missing from the bundle')).getByText('assets/missing.css')
+    ).toBeVisible();
+    expect(screen.getAllByText('Next step')).toHaveLength(3);
+
+    // Informational lists stay collapsed and secondary.
+    const details = screen.getByText('More details (for information)').closest('details')!;
+    expect(details).not.toHaveAttribute('open');
+    expect(within(details).getByText('api.example.test')).toBeInTheDocument();
+    expect(within(details).getByText(/not a failure/)).toBeInTheDocument();
+  });
+
+  test('says when the test itself could not run', async () => {
+    const errored = bootTestRun({}, { status: 'error', renderedTextLength: 0, renderedElementCount: 0 });
+    render(<App api={bootTestApi(fixtureReview(), { listBootTests: async () => [errored] })} />);
+    await openReview();
+    expect(await screen.findByText('The boot test could not run')).toBeVisible();
+    expect(screen.getByText(/not your bundle/)).toBeVisible();
+    expect(screen.getByLabelText('Boot test: Could not run')).toBeVisible();
+  });
+
+  test('shows the developer run, not a newer reviewer replay, and reports a start error in the card', async () => {
+    const developer = bootTestRun();
+    const replay = bootTestRun(
+      { id: 'boot-test-replay', actorRole: 'reviewer' },
+      { status: 'failed', failures: ['blank_panel'], renderedTextLength: 0, renderedElementCount: 0 }
+    );
+    const requestBootTest = vi.fn(async () => {
+      throw new Error('The boot test runner could not create a secure sandbox.');
+    });
+    render(
+      <App api={bootTestApi(fixtureReview(), { listBootTests: async () => [replay, developer], requestBootTest })} />
+    );
+    await openReview();
+    expect(await screen.findByText('The extension opened')).toBeVisible();
+    fireEvent.click(screen.getByRole('button', { name: 'Run boot test again' }));
+    const card = screen.getByRole('region', { name: 'Check that the extension opens' });
+    expect(await within(card).findByRole('alert')).toHaveTextContent('could not create a secure sandbox');
+  });
+
+  test('lists blocked script files but not inline or eval reports', () => {
+    const findings = bootTestFindings({
+      status: 'failed',
+      failures: ['bundled_script_blocked_by_csp'],
+      cspViolations: [
+        { directive: 'script-src-elem', blocked: 'assets/app.js', source: 'document' },
+        { directive: 'script-src', blocked: 'eval', source: 'assets/app.js' },
+        { directive: 'img-src', blocked: 'images.example.test', source: 'document' }
+      ],
+      missingFiles: [],
+      uncaughtErrors: [],
+      externalHostsRequested: [],
+      renderedTextLength: 10,
+      renderedElementCount: 2
+    });
+    expect(findings).toEqual([expect.objectContaining({ files: ['assets/app.js'] })]);
+  });
+});
+

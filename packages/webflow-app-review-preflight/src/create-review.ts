@@ -74,7 +74,11 @@ const NEXT_MOVES: Record<string, string> = {
   'SEC-NO-TOKEN-IN-URL':
     'Move the credential out of the URL: send it in an Authorization header or a protected request body, and change any GET route that carries it to POST.',
   'PROD-NO-DEBUG-RESIDUE':
-    'Remove the debug routes and bypass flags from the production build, rebuild the exact artifact you will ship, and rescan.',
+    'Remove the debug routes, bypass flags, and URL debug switches (?debug=, ?mimic=) from the production build, rebuild the exact artifact you will ship, and rescan.',
+  'NET-GLOBAL-AUTH-DEFAULT':
+    'Stop setting Authorization as a default on a shared HTTP client. Pass the header per request, only on calls to the host that issued the token.',
+  'UX-NO-POPUPS':
+    'Open new windows only from a user action, and pass "noopener,noreferrer" as the window.open features argument.',
   'UX-NO-MUTATION-ON-LOAD':
     'Tie site-mutating Designer API calls to a deliberate user action (a button, not extension mount). If they already are, say so in your review notes so the reviewer can verify quickly.',
   'API-ELEMENT-TYPE-DISCRIMINATOR':
@@ -509,7 +513,7 @@ export function sourceMapExposureGuidance(summary: SourceMapSummary): ReviewGuid
     title: 'Source maps are shipped inside the public bundle',
     explanation: `This bundle ships ${exposedCount} source map${exposedCount === 1 ? '' : 's'} in the public artifact. Source maps expose readable source to anyone who loads the extension. The Marketplace submission form takes source maps as a separate private upload; they must not be part of the bundle that ships to customers.`,
     nextMove:
-      'Remove the .map files (and any inline data: maps) from the public bundle, rebuild, and upload the maps as the private source-map artifact next to this bundle and on the submission form.',
+      'Move the .map files (and any inline data: maps) out of the production bundle ZIP and into the private review ZIP: rebuild without them, then upload the maps as the private source-map artifact next to this bundle and on the submission form.',
     severity: 'HIGH',
     confidence: 'HIGH',
     evidence

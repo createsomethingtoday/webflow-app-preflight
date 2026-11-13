@@ -43,6 +43,7 @@ import {
   verifySubmissionReceipt
 } from './submission-receipts';
 import type { Env } from './types';
+import { bootTestsEnabled, handleBootTestRequest, reconcileBootTestJobs } from './boot-tests';
 import { getCompanionRun } from './companion-runs';
 import {
   CompanionPairingInputError,
@@ -180,14 +181,20 @@ async function handle(request: Request, env: Env): Promise<Response> {
   // reconciliation metadata only — never findings or artifact contents.
   if (url.pathname === '/v1/submission-receipts/verify' && request.method === 'POST') {
     let code: unknown;
+    let clientId: unknown;
+    let bind: unknown;
     try {
       const text = await request.text();
       if (!text || text.length > 4 * 1024) throw new Error();
-      code = (JSON.parse(text) as { code?: unknown }).code;
+      ({ code, clientId, bind } = JSON.parse(text) as {
+        code?: unknown;
+        clientId?: unknown;
+        bind?: unknown;
+      });
     } catch {
       return json({ valid: false, error: 'invalid_request' }, 400, origin);
     }
-    const receipt = await verifySubmissionReceipt(env, code);
+    const receipt = await verifySubmissionReceipt(env, code, { clientId, bind });
     return receipt
       ? json({ valid: true, receipt }, 200, origin)
       : json({ valid: false }, 404, origin);
@@ -514,6 +521,9 @@ async function handle(request: Request, env: Env): Promise<Response> {
     }
   }
 
+  const bootTestResponse = await handleBootTestRequest(request, env, origin);
+  if (bootTestResponse) return bootTestResponse;
+
   const isCompanionRequest = /^\/v1\/companion-runs\//.test(url.pathname);
   const user = isCompanionRequest
     ? await authenticateCompanion(request, env)
@@ -527,7 +537,9 @@ async function handle(request: Request, env: Env): Promise<Response> {
           id: user.id,
           siteId: user.siteId,
           companionRole: companionRoleForUser(user, env)
-        }
+        },
+        // Lets the Designer Extension show only the features this Worker serves.
+        features: { bootTest: bootTestsEnabled(env) }
       },
       200,
       origin
@@ -754,7 +766,10 @@ export default {
     ctx.waitUntil(
       Promise.all([
         reconcileRuntimeObservationJobs(env),
-        recordWebflowAuthorizationReadiness(env)
+        recordWebflowAuthorizationReadiness(env),
+        reconcileBootTestJobs(env).catch((error: unknown) => {
+          console.error('Boot test reconcile failed', error);
+        })
       ]).then(([, authorization]) => {
         if (authorization.state !== 'ready') {
           console.error('Webflow authorization readiness check failed', {

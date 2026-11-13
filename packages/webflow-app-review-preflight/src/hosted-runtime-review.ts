@@ -2,6 +2,7 @@ import {
   defaultConfig,
   defaultRuleset
 } from '@create-something/bundle-scanner-core';
+import { mutableRuntimeUrls } from './runtime-references';
 import type {
   BundleReview,
   CreateHostedRuntimeReviewInput
@@ -118,7 +119,8 @@ export async function createHostedRuntimeReviewArtifact(
       runtime: {
         references: normalized.runtimeUrls,
         status: 'discovered_unverified',
-        manualVerificationRequired: true
+        manualVerificationRequired: true,
+        mutableRuntimeUrls: mutableRuntimeUrls(normalized.runtimeUrls)
       },
       // Nothing was evaluated: this review records declared URLs only. It
       // must not read as `ready` — a hosted runtime that was never scanned

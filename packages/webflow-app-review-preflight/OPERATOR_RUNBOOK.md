@@ -196,6 +196,7 @@ A reviewer uses a separate identity and a server-owned workspace.
 7. Select **Run independent replay**.
 8. Select **Refresh status** until the replay finishes.
 9. Record the reviewer observation job ID and result.
+10. If the **Designer Extension boot test** card is present, select **Run independent boot test replay**. Select **Refresh status** until it finishes. Record whether the replay reproduced the developer run or differs.
 
 The reviewer replay must use the same package ID, review-version ID, and bundle SHA-256. It creates a third job and does not replace either developer run.
 
@@ -223,6 +224,14 @@ The app checks each fact separately:
 A blocked result is useful evidence. It means the browser ran, but the app did not meet one or more runtime rules.
 
 Open **Runtime file results** to find the exact file that failed. Each row reports **Loaded**, **Hash matched**, and whether a **source map** was reachable for the served bytes. A page-loaded file reports **SRI matched**; a child file reports whether its pinned parent was verified. A file with no reachable source map blocks on manual review even when its bytes match, because pinned bytes are not readable bytes. The runtime-file count tells you how many declared files were checked; the evidence-artifact count includes screenshots and sanitized logs, so it is usually larger.
+
+### Advisory notes
+
+Three advisory notes can appear beside the security result. They never change **Runtime security passed** or **blocked**, the blockers, or readiness.
+
+- **Runtime URL can change after review.** A declared runtime URL has no semantic version and no content hash of at least eight hex or base36 characters (a bare `/v1/`, `@latest` and `?v=3` do not count). The served bytes can change after review. Publish each release at a new versioned URL.
+- **Strict Content Security Policy replay.** After the normal run, the runner loads the page again with a strict policy (no `'unsafe-inline'`, no `'unsafe-eval'`; only the page origin, the declared runtime origins and Webflow's asset hosts) and records the violations. The result is `clean`, `violations` (at least one violation comes from the runtime itself), or `not_run` (time-out or navigation error). The replay has its own limits: 30 seconds, 100 budgeted requests, and 50 recorded entries. The Worker accepts the replay only in its exact shape and treats anything else as `not_run`.
+- **Runtime code matches review rules.** The runner scans the served runtime bytes with the default bundle ruleset (minus Designer-panel-only rules and `NET-EXTERNAL-EGRESS`) and reports rule-level counts only. The status is `scanned` or `not_run`. The Worker never holds the runtime bytes, so the scan runs in the runner; the Worker accepts the exact count shape and treats anything else as `not_run`.
 
 ### Proxy canary
 
@@ -340,6 +349,32 @@ Do not start another run while a job is `approved`, `running`, or `uploading`. I
 
 The scheduled Worker task expires stale jobs and retries sandbox termination. Never construct or upload evidence by hand.
 
+### Designer Extension boot test (off by default)
+
+The boot test opens the bundle's `index.html` in a fresh sandbox browser under the extension host's Content-Security-Policy and reports `passed`, `failed`, or `error`. The result is advisory: it never changes readiness, a finding, or a runtime security status.
+
+Developers select **Run boot test** in the Designer Extension. Reviewers select **Run independent boot test replay** in the reviewer workspace, which then shows both results and whether the replay reproduced the developer run. The submission receipt reports only the latest completed developer run.
+
+To turn it on:
+
+1. Apply migration `0015_boot_test_jobs.sql`.
+2. Rebuild the E2B template so its `/run` route accepts `jobKind: "boot_test"`, and set the new immutable reference as `E2B_RUNTIME_TEMPLATE_ID`.
+3. Set the Worker variable `BOOT_TEST_ENABLED` to `true`. With any other value, every boot test route answers `404`.
+
+The default policy is the header the extension host sent on 2026-11-13 (`DESIGNER_EXTENSION_HOST_CSP` in `src/boot-test.ts`). To change it without a runner rebuild, set `BOOT_TEST_CSP` to one printable ASCII header value. Each new job carries the policy in its contract.
+
+Check a version's boot tests in D1:
+
+```sql
+SELECT id, actor_role, requested_by_user_id, status, result_status, evidence_trust,
+       approved_at, completed_at, expires_at, sandbox_id, sandbox_termination_status
+FROM boot_test_jobs
+WHERE review_version_id = '<review-version-id>'
+ORDER BY created_at ASC;
+```
+
+One job can be `approved` or `running` per review version and actor role, so a running developer test never blocks a reviewer replay. The scheduled task expires stale jobs and retries sandbox termination.
+
 ## Validation receipt
 
 Copy this block after the three-run loop:
@@ -363,6 +398,10 @@ official_decision: null
 operator:
 notes:
 ```
+
+### Receipt client binding
+
+The submission form can bind a receipt to the app's client ID by sending `clientId` (64 hex characters) with `bind: true` to `POST /v1/submission-receipts/verify`. The first valid bind sticks. A later request with a different client ID gets `clientIdConflict: true`, and the binding does not change. The bound client ID is never returned. To release a wrong binding, an operator clears `bound_client_id` for that receipt in D1. The full contract is in the package README.
 
 ## Performance content lint
 

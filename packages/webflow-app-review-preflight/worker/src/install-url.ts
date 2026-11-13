@@ -4,13 +4,18 @@
  * Tier 1 (`checkInstallUrlString`) runs deterministic rules over the string
  * the developer submitted. Tier 2 (`probeInstallUrl`) follows the URL once,
  * unauthenticated, and reads where the redirect chain ends. Rule IDs (IU-1 to
- * IU-9) match the install URL validation spec so the submission form, the
+ * IU-11) match the install URL validation spec so the submission form, the
  * extension, and the reviewer workspace report the same codes.
  *
  * The probe fetches developer-supplied URLs from Webflow infrastructure, so
  * every hop is checked before it is requested: https only, no private or
  * local hosts, no tunnels. The response body is never returned to the caller;
- * only status, final host, and a verdict.
+ * only status, final host, a verdict, and a few fixed labels derived from it.
+ *
+ * Rules that need the probe: IU-7 (hand-off scopes and state presence), IU-10
+ * (the hand-off `state` is identical across two independent requests), and
+ * IU-11 (the landing page asks the user to type a site URL, site ID, or API
+ * token instead of starting OAuth). IU-10 and IU-11 only warn.
  */
 import { isPrivateOrLocalHostname } from './net';
 
@@ -391,6 +396,8 @@ export interface ProbeResult {
   finalUrl: string | null;
   finalStatus: number | null;
   authorize: AuthorizeHandoff | null;
+  /** Fixed labels (never page text) for IU-11; only set on no_oauth_handoff. */
+  manualEntrySignals?: string[];
   durationMs: number;
 }
 
@@ -440,12 +447,76 @@ function redirectTarget(body: string, base: URL): URL | null {
   }
 }
 
+const MANUAL_SITE_URL = 'input asks for a site URL or domain';
+const MANUAL_SITE_ID = 'input asks for a Webflow site ID';
+const MANUAL_API_TOKEN = 'input asks for an API token or key';
+const NON_TEXT_INPUT_TYPES = new Set(['hidden', 'submit', 'button', 'reset', 'image', 'checkbox', 'radio', 'file', 'range', 'color']);
+const SITE_ID_PATTERN = /site[\s_-]?id\b/;
+const API_TOKEN_PATTERN = /(api|access|auth|bearer|personal|secret)[\s_-]?(token|key)|\btoken\b/;
+const SITE_URL_PATTERN = /(site|website|webflow|store|shop)[\s_-]*(url|domain|address|link)|\b(sub)?domain\b/;
+
+function attributeValue(tag: string, name: string): string {
+  const match = tag.match(new RegExp(`[\\s"']${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s>]+))`, 'i'));
+  return (match?.[1] ?? match?.[2] ?? match?.[3] ?? '').slice(0, 200);
+}
+
+function stripTags(html: string): string {
+  return html.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 200);
+}
+
+/**
+ * IU-11: scan form controls for a request to type a site URL, site ID, or API
+ * token. Matches on name, id, placeholder, aria-label, and the label text.
+ * Returns fixed labels only; no page text leaves this function. Plain login
+ * fields (email, password) and search boxes never match.
+ */
+export function detectManualEntrySignals(html: string): string[] {
+  const labels: { start: number; end: number; forId: string; text: string }[] = [];
+  for (const match of html.matchAll(/<label\b([^>]*)>([\s\S]*?)<\/label>/gi)) {
+    labels.push({
+      start: match.index ?? 0,
+      end: (match.index ?? 0) + match[0].length,
+      forId: attributeValue(` ${match[1] ?? ''}`, 'for'),
+      text: stripTags(match[2] ?? '')
+    });
+  }
+  const signals = new Set<string>();
+  let inspected = 0;
+  for (const match of html.matchAll(/<(input|textarea)\b[^>]*>/gi)) {
+    if (inspected >= 50) break;
+    inspected += 1;
+    const tag = match[0];
+    const index = match.index ?? 0;
+    const type = (attributeValue(tag, 'type') || 'text').toLowerCase();
+    if (NON_TEXT_INPUT_TYPES.has(type) || type === 'search') continue;
+    const id = attributeValue(tag, 'id');
+    const labelText = labels
+      .filter((label) => (id && label.forId === id) || (index > label.start && index < label.end))
+      .map((label) => label.text)
+      .join(' ');
+    const descriptor = [attributeValue(tag, 'name'), id, attributeValue(tag, 'placeholder'), attributeValue(tag, 'aria-label'), labelText]
+      .join(' ')
+      .toLowerCase();
+    if (/\b(search|query)\b/.test(descriptor) && type !== 'url') continue;
+    if (SITE_ID_PATTERN.test(descriptor)) signals.add(MANUAL_SITE_ID);
+    if (API_TOKEN_PATTERN.test(descriptor)) signals.add(MANUAL_API_TOKEN);
+    if (type !== 'email' && type !== 'password' && !/e-?mail/.test(descriptor) && SITE_URL_PATTERN.test(descriptor)) {
+      signals.add(MANUAL_SITE_URL);
+    }
+  }
+  return [...signals];
+}
+
 /**
  * Tier 2: follow the install URL once, unauthenticated, and classify where it
  * ends. Stops at webflow.com/oauth/authorize without requesting it; Webflow
  * would only bounce an anonymous request to login.
  */
 export async function probeInstallUrl(installUrl: string, options: ProbeOptions = {}): Promise<ProbeResult> {
+  return runProbe(installUrl, options, { state: null });
+}
+
+async function runProbe(installUrl: string, options: ProbeOptions, sink: { state: string | null }): Promise<ProbeResult> {
   const fetchImpl = options.fetch ?? fetch;
   const maxRedirects = options.maxRedirects ?? 8;
   const totalTimeoutMs = options.totalTimeoutMs ?? 10_000;
@@ -469,6 +540,7 @@ export async function probeInstallUrl(installUrl: string, options: ProbeOptions 
   for (let hop = 0; hop <= maxRedirects; hop += 1) {
     const authorize = parseAuthorizeHandoff(current);
     if (authorize) {
+      sink.state = current.searchParams.get('state');
       hops.push({ url: current.toString(), status: null });
       if (options.clientId && authorize.clientId && authorize.clientId !== options.clientId) {
         return finish(
@@ -661,13 +733,15 @@ export async function probeInstallUrl(installUrl: string, options: ProbeOptions 
         startedAt
       );
     }
+    const manualEntrySignals = detectManualEntrySignals(body);
     return finish(
       {
         verdict: 'warn',
         code: 'no_oauth_handoff',
         reason: 'install URL ends on a page with no Webflow OAuth hand-off; reviewer confirms it leads there',
         finalUrl: key,
-        finalStatus: status
+        finalStatus: status,
+        ...(manualEntrySignals.length > 0 ? { manualEntrySignals } : {})
       },
       hops,
       startedAt
@@ -685,6 +759,47 @@ export async function probeInstallUrl(installUrl: string, options: ProbeOptions 
     hops,
     startedAt
   );
+}
+
+/** IU-10 skips the second probe when the first one used more than this share of the time budget. */
+export const STATE_REPROBE_BUDGET_SHARE = 0.5;
+
+/**
+ * Runs the probe, then, when it reached the Webflow hand-off through at least
+ * one request and carries a non-empty `state`, runs it again as an
+ * independent request (same per-hop guards, no cookies kept). Identical
+ * non-empty state on both runs is reported as IU-10. A second probe that
+ * fails or ends elsewhere adds nothing. Bound: at most one extra probe, only
+ * when the first took no more than half of `totalTimeoutMs` (default 10 s), so
+ * the worst case is 1.5x the single-probe budget.
+ */
+export async function probeInstallUrlWithStateCheck(
+  installUrl: string,
+  options: ProbeOptions = {}
+): Promise<{ probe: ProbeResult; findings: InstallUrlFinding[] }> {
+  const sink = { state: null as string | null };
+  const probe = await runProbe(installUrl, options, sink);
+  const findings: InstallUrlFinding[] = [];
+  const totalTimeoutMs = options.totalTimeoutMs ?? 10_000;
+  const requested = probe.hops.some((hop) => hop.status !== null);
+  if (
+    probe.code === 'reaches_authorize' &&
+    sink.state &&
+    requested &&
+    probe.durationMs <= totalTimeoutMs * STATE_REPROBE_BUDGET_SHARE
+  ) {
+    const second = { state: null as string | null };
+    const again = await runProbe(installUrl, options, second);
+    if (again.code === 'reaches_authorize' && second.state && second.state === sink.state) {
+      findings.push({
+        rule: 'IU-10',
+        severity: 'warn',
+        message:
+          'The install endpoint sent the same state value on two separate requests. Generate a new random state for each install and check it on the callback.'
+      });
+    }
+  }
+  return { probe, findings };
 }
 
 export interface InstallUrlCheck extends InstallUrlStringCheck {
@@ -707,11 +822,18 @@ export async function checkInstallUrl(
     stringCheck.verdict !== 'block';
   if (!shouldProbe) return { ...stringCheck, probe: null };
 
-  const probe = await probeInstallUrl(stringCheck.installUrl!, {
+  const { probe, findings: probeFindings } = await probeInstallUrlWithStateCheck(stringCheck.installUrl!, {
     ...options,
     clientId: asString(input.clientId)?.trim() || null
   });
-  const findings = [...stringCheck.findings];
+  const findings = [...stringCheck.findings, ...probeFindings];
+  if (probe.manualEntrySignals && probe.manualEntrySignals.length > 0) {
+    findings.push({
+      rule: 'IU-11',
+      severity: 'warn',
+      message: `The install URL ends on a page that asks the user to type details before Webflow OAuth (${probe.manualEntrySignals.join('; ')}). The install URL should start Webflow OAuth directly.`
+    });
+  }
   if (probe.authorize && !stringCheck.authorize) {
     // The developer endpoint handed off to authorize: compare those scopes.
     findings.push(

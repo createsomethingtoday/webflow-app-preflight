@@ -531,6 +531,24 @@ describe('createHostedRuntimeReviewArtifact', () => {
     expect(artifact.review.officialDecision).toBeNull();
   });
 
+  test('lists mutable runtime URLs as advisory data without changing the verdict', async () => {
+    const mutable = 'https://cdn.example.com/runtime.js';
+    const pinned = 'https://cdn.example.com/v1.2.3/runtime.js';
+    const withMutable = await createHostedRuntimeReviewArtifact({
+      appName: 'Website Speedy',
+      runtimeUrls: [mutable, pinned]
+    });
+    const allPinned = await createHostedRuntimeReviewArtifact({
+      appName: 'Website Speedy',
+      runtimeUrls: [pinned, 'https://cdn.example.com/v1.2.4/runtime.js']
+    });
+    expect(withMutable.review.runtime.mutableRuntimeUrls).toEqual([mutable]);
+    expect(allPinned.review.runtime.mutableRuntimeUrls).toEqual([]);
+    expect(withMutable.review.summary).toEqual(allPinned.review.summary);
+    expect(withMutable.review.guidance).toEqual(allPinned.review.guidance);
+    expect(withMutable.review.runtime.status).toBe(allPinned.review.runtime.status);
+  });
+
   test('never reports an unscanned hosted runtime as ready', async () => {
     const { review } = await createHostedRuntimeReviewArtifact({
       appName: 'Website Speedy',
@@ -695,7 +713,7 @@ describe('Marketplace Guidelines alignment (developers.webflow.com, read 2026-09
       'dist/index.js': [
         'const API = "https://api.example-app.com";',
         'async function load() { const r = await fetch(API + "/v1/items"); return r.json(); }',
-        'button.addEventListener("click", () => { window.open("https://api.example-app.com/oauth/start", "_blank"); });',
+        'button.addEventListener("click", () => { window.open("https://api.example-app.com/oauth/start", "_blank", "noopener,noreferrer"); });',
         'function exportPng(canvas) { return canvas.toBlob((blob) => blob); }',
         'window.addEventListener("message", (event) => {',
         '  if (event.origin !== "https://api.example-app.com") return;',
@@ -1142,7 +1160,7 @@ describe('review correctness: severity, buckets, and labels agree', () => {
   });
 });
 
-describe('docs-aligned gating (ruleset 1.7.0): severity is the doc level, confidence is the gate', () => {
+describe('docs-aligned gating (ruleset 1.9.0): severity is the doc level, confidence is the gate', () => {
   async function bundleWith(files: Record<string, string>): Promise<ArrayBuffer> {
     const zip = new JSZip();
     zip.file('webflow.json', JSON.stringify({ name: 'Aligned App', apiVersion: '2', publicDir: 'dist' }));
@@ -1184,6 +1202,7 @@ describe('docs-aligned gating (ruleset 1.7.0): severity is the doc level, confid
       .sort();
     expect(neverGates).toEqual([
       'IFRAME-EXTERNAL-SRC',
+      'NET-GLOBAL-AUTH-DEFAULT',
       'PROD-NO-DEBUG-RESIDUE',
       'PROD-STAGING-HOST',
       'SEC-NO-SENSITIVE-TOKENS-IN-STORAGE',
@@ -1206,7 +1225,7 @@ describe('docs-aligned gating (ruleset 1.7.0): severity is the doc level, confid
   test('a MUST matched at low confidence is a suggestion and leaves readiness alone', async () => {
     const result = await review({
       'dist/index.js': [
-        'button.onclick = () => window.open("https://docs.example.com", "_blank");',
+        'button.onclick = () => window.open("https://docs.example.com", "_blank", "noopener");',
         'const obs = new MutationObserver(() => {});',
         'const claims = JSON.parse(atob(parts[1]));',
         'async function apply() { await webflow.createStyle("hero"); }'
@@ -1289,7 +1308,7 @@ describe('docs-aligned gating (ruleset 1.7.0): severity is the doc level, confid
     expect(find(popupOnLoad, 'UX-NO-POPUPS')?.evidence[0]?.snippet).toBeDefined();
     expect(popupOnLoad.summary.readiness).toBe('changes_required');
 
-    const popupOnClick = await review({ 'dist/index.js': 'btn.addEventListener("click", () => window.open("https://docs.example.com", "_blank"));' });
+    const popupOnClick = await review({ 'dist/index.js': 'btn.addEventListener("click", () => window.open("https://docs.example.com", "_blank", "noopener"));' });
     expect(find(popupOnClick, 'UX-NO-POPUPS')?.label).toBe('Suggested update');
     expect(popupOnClick.summary.readiness).toBe('ready');
 
@@ -1307,6 +1326,44 @@ describe('docs-aligned gating (ruleset 1.7.0): severity is the doc level, confid
       'dist/index.js': ['window.addEventListener("message", function (event) {', ...Array.from({ length: 8 }, (_, i) => `  const v${i} = ${i};`), '  if (event.origin !== ALLOWED) return;', '  apply(event.data);', '});'].join('\n')
     });
     expect(find(checksLater, 'SEC-MESSAGE-ORIGIN')?.label).toBe('Suggested update');
+  });
+
+  test('reviewer-practice patterns (1.9.0) ask for a reviewer and never reach changes_required', async () => {
+    const cases: Array<[string, string, Record<string, string>]> = [
+      ['UX-NO-POPUPS', 'window.open without noopener', { 'dist/index.js': 'btn.addEventListener("click", () => window.open("https://docs.example.com", "_blank"));' }],
+      ['UX-NO-POPUPS', 'window.open without noopener, minified', { 'dist/app.js': 'b.onclick=()=>{window.open(e.url,"_blank")};' }],
+      ['SEC-NO-SENSITIVE-TOKENS-IN-STORAGE', 'password in web storage', { 'dist/index.js': 'localStorage.setItem("password", pw);' }],
+      ['SEC-NO-SENSITIVE-TOKENS-IN-STORAGE', 'api key in web storage', { 'dist/index.js': 'localStorage.setItem("apiKey", k);' }],
+      ['NET-GLOBAL-AUTH-DEFAULT', 'global Authorization default', { 'dist/index.js': "axios.defaults.headers.common['Authorization'] = `Bearer ${t}`;" }],
+      ['PROD-NO-DEBUG-RESIDUE', 'debug switch from the URL', { 'dist/index.js': "const d = new URLSearchParams(location.search).get('debug');" }],
+      ['PROD-NO-DEBUG-RESIDUE', 'debug switch, minified', { 'dist/app.js': 'var t=new URLSearchParams(location.search),n=t.get("xyz_debug");n&&r()' }],
+      ['SEC-UNTRUSTED-REDIRECT', 'target="_top" in markup', { 'dist/index.html': '<a href="https://x.example.com" target="_top">Go</a>' }],
+      ['SEC-UNTRUSTED-REDIRECT', 'formTarget assignment', { 'dist/index.js': 'btn.formTarget = "_parent";' }]
+    ];
+    for (const [ruleId, label, files] of cases) {
+      const result = await review(files);
+      expect(find(result, ruleId)?.label, label).toBe('Manual review');
+      expect(result.summary.securityBlockers, label).toBe(0);
+      expect(result.summary.requiredUpdates, label).toBe(0);
+      expect(result.summary.readiness, label).toBe('needs_review');
+    }
+  });
+
+  test('reviewer-practice patterns stay quiet on the safe forms', async () => {
+    const result = await review({
+      'dist/index.js': [
+        'btn.addEventListener("click", () => window.open("https://docs.example.com", "_blank", "noopener,noreferrer"));',
+        'localStorage.setItem("theme", "dark");',
+        'axios.get(url, { headers: { Authorization: `Bearer ${t}` } });',
+        'const page = new URLSearchParams(location.search).get("page");'
+      ].join('\n'),
+      'dist/index.html': '<a href="https://docs.example.com" target="_blank" rel="noopener">Docs</a>'
+    });
+    for (const id of ['NET-GLOBAL-AUTH-DEFAULT', 'PROD-NO-DEBUG-RESIDUE', 'SEC-NO-SENSITIVE-TOKENS-IN-STORAGE', 'SEC-UNTRUSTED-REDIRECT']) {
+      expect(find(result, id), id).toBeUndefined();
+    }
+    expect(find(result, 'UX-NO-POPUPS')?.label).toBe('Suggested update');
+    expect(result.summary.readiness).toBe('ready');
   });
 
   test('an external iframe asks for a reviewer because auth-flow iframes are allowed', async () => {

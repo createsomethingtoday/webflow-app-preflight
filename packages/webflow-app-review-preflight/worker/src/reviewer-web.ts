@@ -1,4 +1,10 @@
+import type {
+  BootTestReplayComparison,
+  BootTestSummary,
+  RuntimeTestPackageView
+} from '@create-something/webflow-app-review-preflight';
 import type { AuthenticatedUser, Env } from './types';
+import { reviewerBootTestView, type ReviewerBootTestView } from './boot-tests';
 import { redeemCompanionPairing } from './companion-pairings';
 import { getReview, listReviews } from './reviews';
 import {
@@ -156,6 +162,26 @@ async function observationHistory(testPackageId: string, env: Env): Promise<Obse
   return rows.results;
 }
 
+function advisoryHtml(testPackage: RuntimeTestPackageView): string {
+  const mutable = testPackage.mutableRuntimeUrls ?? [];
+  const replay = testPackage.observation?.evidence?.cspReplay;
+  const own = replay?.violations.filter((violation) => violation.fromRuntime) ?? [];
+  const replayText = !replay
+    ? 'no replay recorded'
+    : replay.status === 'not_run'
+      ? 'not run'
+      : replay.status === 'clean'
+        ? `clean (ready signal ${replay.runtimeReadyObserved ? 'seen' : 'not seen'})`
+        : `${own.length} runtime violation${own.length === 1 ? '' : 's'} (ready signal ${replay.runtimeReadyObserved ? 'seen' : 'not seen'})`;
+  const scan = testPackage.observation?.evidence?.runtimeStaticScan;
+  const scanText = !scan || scan.status === 'not_run'
+    ? 'not run'
+    : `${scan.filesScanned} file${scan.filesScanned === 1 ? '' : 's'} scanned, ${scan.findings.length ? `${scan.findings.reduce((total, finding) => total + finding.count, 0)} matches` : 'no matches'}`;
+  return `<div class="receipt"><span class="muted">Advisory: unpinned runtime URLs</span><span class="mono">${mutable.length ? mutable.map((url) => escapeHtml(url)).join('<br>') : 'none'}</span></div>
+        <div class="receipt"><span class="muted">Advisory: strict-CSP replay</span><span class="mono">${escapeHtml(replayText)}${own.map((violation) => `<br>${escapeHtml(violation.directive)}: ${escapeHtml(violation.blocked)} from ${escapeHtml(violation.source)}`).join('')}</span></div>
+        <div class="receipt"><span class="muted">Advisory: static scan of runtime files</span><span class="mono">${escapeHtml(scanText)}${(scan?.findings ?? []).map((finding) => `<br>${escapeHtml(finding.ruleId)} (${escapeHtml(finding.severity)}) x${finding.count}`).join('')}</span></div>`;
+}
+
 export async function reviewerWorkspace(
   request: Request,
   env: Env,
@@ -165,11 +191,12 @@ export async function reviewerWorkspace(
   if (!session || session.actorRole !== 'reviewer') {
     return html(shell('<main><div class="card"><h1>Reviewer sign-in required</h1><p>Open this workspace from App Review Preflight in Webflow Designer.</p></div></main>'), 401);
   }
-  const [review, reviews, testPackages, history] = await Promise.all([
+  const [review, reviews, testPackages, history, bootTests] = await Promise.all([
     getReview(session.reviewId, env, user, { includeAll: true }),
     listReviews(env, user, { includeAll: true }),
     listRuntimeTestPackages(session.reviewId, env, user, { includeAll: true }),
-    observationHistory(session.runtimeTestPackageId, env)
+    observationHistory(session.runtimeTestPackageId, env),
+    reviewerBootTestView(session.reviewVersionId, env)
   ]);
   const testPackage = testPackages?.find((item) => item.id === session.runtimeTestPackageId);
   if (!review || !testPackage) {
@@ -203,6 +230,14 @@ export async function reviewerWorkspace(
     : '<p class="muted">No trusted runtime observations have run for this exact package yet.</p>';
 
   const started = new URL(request.url).searchParams.get('started');
+  const bootTestHtml = bootTests
+    ? renderBootTests(
+        session.reviewVersionId,
+        bootTests,
+        new URL(request.url).searchParams.get('bootTestStarted'),
+        new URL(request.url).searchParams.get('bootTest')
+      )
+    : '';
   const installUrlNotice = new URL(request.url).searchParams.get('installUrl');
   const installUrlHtml = renderInstallUrlCheck(review.id, review.installUrlCheck ?? null);
   const queueHtml = reviews.map((item) => `<li><strong>${escapeHtml(item.name)}</strong><div class="muted">Revision ${item.latestSequence} · ${escapeHtml(item.updatedAt)}</div></li>`).join('');
@@ -219,6 +254,7 @@ export async function reviewerWorkspace(
         <div class="receipt"><span class="muted">Bundle SHA-256</span><span class="mono">${escapeHtml(testPackage.bundleSha256)}</span></div>
         <div class="receipt"><span class="muted">Published target</span><span class="mono">${escapeHtml(testPackage.target.url)}</span></div>
         <div class="receipt"><span class="muted">Pinned runtimes</span><span class="mono">${testPackage.runtimeArtifacts.map((artifact) => escapeHtml(artifact.url)).join('<br>')}</span></div>
+        ${advisoryHtml(testPackage)}
         <form method="post" action="/reviewer/runtime-test-packages/${encodeURIComponent(testPackage.id)}/replay">
           <button type="submit">Run independent replay</button>
           <a class="button" href="/reviewer">Refresh status</a>
@@ -227,6 +263,7 @@ export async function reviewerWorkspace(
       </section>
       <aside class="card"><h2>Submission queue</h2><ul class="queue">${queueHtml}</ul></aside>
       <section class="card" style="grid-column:1/-1"><h2>Install URL</h2>${installUrlNotice ? `<div class="notice">${escapeHtml(installUrlNotice)}</div>` : ''}${installUrlHtml}</section>
+      ${bootTestHtml}
       <section class="card" style="grid-column:1/-1"><h2>Previous observations</h2>${historyHtml}</section>
     </div>
   </main>`));
@@ -249,6 +286,73 @@ export async function replayReviewerRuntimePackage(
       'cache-control': 'no-store'
     }
   });
+}
+
+const BOOT_TEST_COMPARISON: Record<BootTestReplayComparison, { label: string; pill: string }> = {
+  reproduced_pass: { label: 'Reproduced: both runs passed', pill: '' },
+  reproduced_failure: { label: 'Reproduced: both runs reported the same failures', pill: 'blocked' },
+  mixed_evidence: { label: 'Differs: the status or the failures do not match', pill: 'warn' },
+  infrastructure_incomplete: { label: 'Inconclusive: at least one run could not run', pill: 'info' },
+  not_compared: { label: 'Not compared: one of the two runs has no result yet', pill: 'info' }
+};
+
+function bootTestRunHtml(label: string, run: BootTestSummary | null, inProgress: boolean): string {
+  if (!run) {
+    return `<div class="receipt"><span class="muted">${escapeHtml(label)}</span><span class="muted">No run yet</span></div>`;
+  }
+  const pending =
+    inProgress && run.bootTest ? 'A newer run is in progress. Refresh this page to see it.' : '';
+  const result = run.bootTest;
+  const status = result
+    ? result.status === 'error'
+      ? 'could not run'
+      : result.status
+    : run.status;
+  const pill = result?.status === 'failed' ? 'blocked' : result?.status === 'passed' ? '' : 'info';
+  const blockedFiles = (result?.cspViolations ?? [])
+    .filter(
+      (violation) =>
+        /^(?:script-src|worker-src)/.test(violation.directive) &&
+        !['inline', 'eval', 'trusted-types'].includes(violation.blocked)
+    )
+    .map((violation) => violation.blocked);
+  const details = result
+    ? [
+        result.failures.length ? `Failures: ${result.failures.join(', ')}` : 'Failures: none',
+        blockedFiles.length ? `Blocked scripts: ${blockedFiles.join(', ')}` : '',
+        result.missingFiles.length ? `Missing files: ${result.missingFiles.join(', ')}` : '',
+        result.externalHostsRequested.length
+          ? `Blocked external hosts (informational): ${result.externalHostsRequested.join(', ')}`
+          : '',
+        `Rendered text ${result.renderedTextLength} characters, ${result.renderedElementCount} elements`
+      ].filter(Boolean)
+    : ['Awaiting the Worker-validated result'];
+  if (pending) details.push(pending);
+  return `<div class="receipt">
+          <div><strong>${escapeHtml(label)}</strong><div class="muted mono">${escapeHtml(run.id)}</div>${details.map((line) => `<div class="muted">${escapeHtml(line)}</div>`).join('')}</div>
+          <div><span class="pill ${pill}">${escapeHtml(status)}</span><div class="muted">${escapeHtml(run.completedAt ?? run.approvedAt)}</div></div>
+        </div>`;
+}
+
+function renderBootTests(
+  reviewVersionId: string,
+  view: ReviewerBootTestView,
+  started: string | null,
+  notice: string | null
+): string {
+  const comparison = BOOT_TEST_COMPARISON[view.comparison];
+  return `<section class="card" style="grid-column:1/-1">
+        <h2>Designer Extension boot test</h2>
+        <p class="muted">Advisory evidence. A fresh sandbox browser opens the bundle's index.html under the extension host policy. It never changes readiness, a finding, or the runtime result.</p>
+        ${started ? `<div class="notice">Replay ${escapeHtml(started)} was accepted. Refresh this page to see the Worker-derived result.</div>` : ''}
+        ${notice ? `<div class="notice">${escapeHtml(notice)}</div>` : ''}
+        <div class="receipt"><span class="muted">Replay comparison</span><span class="pill ${comparison.pill}">${escapeHtml(comparison.label)}</span></div>
+        ${bootTestRunHtml('Developer run', view.developer, view.developerInProgress)}
+        ${bootTestRunHtml('Reviewer replay', view.reviewer, view.reviewerInProgress)}
+        <form method="post" action="/reviewer/review-versions/${encodeURIComponent(reviewVersionId)}/boot-test-replay">
+          <div class="actions"><button type="submit">Run independent boot test replay</button><a class="button" href="/reviewer">Refresh status</a></div>
+        </form>
+      </section>`;
 }
 
 function verdictPill(verdict: string): string {

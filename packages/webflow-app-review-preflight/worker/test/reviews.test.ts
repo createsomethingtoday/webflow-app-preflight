@@ -610,7 +610,8 @@ describe('review API', () => {
         id: 'local-webflow-user',
         siteId: 'local-webflow-site',
         companionRole: 'developer'
-      }
+      },
+      features: { bootTest: false }
     });
 
     const reviewer = await exports.default.fetch(
@@ -627,7 +628,8 @@ describe('review API', () => {
         id: 'local-webflow-reviewer',
         siteId: 'local-webflow-review-site',
         companionRole: 'reviewer'
-      }
+      },
+      features: { bootTest: false }
     });
   });
 
@@ -1216,15 +1218,23 @@ describe('review API', () => {
     expect(verified.receipt.readiness).toBe('changes_required');
     expect(Object.keys(verified.receipt).sort()).toEqual([
       'appName',
+      'bootTest',
       'bundleSha256',
+      'clientIdBound',
+      'clientIdConflict',
       'createdAt',
       'installUrl',
       'readiness',
       'reviewId',
+      'runtimeAdvisory',
       'runtimeSecurityStatus',
       'sourceMapArtifactSha256',
-      'sourceMapStatus'
+      'sourceMapStatus',
+      'sourceMapsInBundle'
     ]);
+    // No runtime observation and no boot test ran for this version.
+    expect(verified.receipt.bootTest).toBe('not_run');
+    expect(verified.receipt.runtimeAdvisory).toMatchObject({ cspReplay: 'not_run', staticFindingCount: 0 });
   });
 
   test('stamps a preflight run with a submission receipt the form can trace', async () => {
@@ -1363,6 +1373,163 @@ describe('review API', () => {
     }>();
     expect(reissued.submissionReceipt.code).toMatch(/^wfpre_[a-f0-9]{32}$/);
     expect(reissued.submissionReceipt.code).not.toBe(created.submissionReceipt.code);
+  });
+
+  describe('submission receipt client binding and bundle source maps', () => {
+    const CLIENT_A = 'a'.repeat(64);
+    const CLIENT_B = 'b'.repeat(64);
+
+    async function issueReceipt(options: { bundledMap?: boolean } = {}) {
+      const zip = new JSZip();
+      zip.file(
+        'webflow.json',
+        JSON.stringify({ name: 'Bound App', apiVersion: '2', publicDir: 'dist' })
+      );
+      zip.file('dist/main.js', 'export const ok=true;//# sourceMappingURL=main.js.map');
+      if (options.bundledMap) {
+        zip.file(
+          'dist/main.js.map',
+          JSON.stringify({ version: 3, file: 'main.js', sources: ['../src/main.ts'], mappings: '' })
+        );
+      }
+      const form = new FormData();
+      form.set(
+        'bundle',
+        new File([await zip.generateAsync({ type: 'uint8array' })], 'bound.zip', {
+          type: 'application/zip'
+        })
+      );
+      const response = await exports.default.fetch(
+        new Request('https://preflight.test/v1/reviews', {
+          method: 'POST',
+          headers: { authorization: 'Bearer test-token', origin: 'http://localhost:1337' },
+          body: form
+        })
+      );
+      expect(response.status).toBe(201);
+      const created = await response.json<{
+        review: { latestVersion: { result: { summary: { readiness: string } } } };
+        submissionReceipt: { code: string };
+      }>();
+      return {
+        code: created.submissionReceipt.code,
+        readiness: created.review.latestVersion.result.summary.readiness
+      };
+    }
+
+    async function verify(body: Record<string, unknown>) {
+      const response = await exports.default.fetch(
+        new Request('https://preflight.test/v1/submission-receipts/verify', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(body)
+        })
+      );
+      expect(response.status).toBe(200);
+      return (
+        await response.json<{
+          receipt: Record<string, unknown> & {
+            clientIdBound: boolean;
+            clientIdConflict: boolean;
+            sourceMapsInBundle: boolean;
+            readiness: string;
+          };
+        }>()
+      ).receipt;
+    }
+
+    async function boundIds(code: string): Promise<Array<string | null>> {
+      const hash = await sha256Hex(code);
+      const { results } = await env.DB.prepare(
+        'SELECT bound_client_id FROM submission_receipts WHERE code_sha256 = ?'
+      )
+        .bind(hash)
+        .all<{ bound_client_id: string | null }>();
+      return results.map((row) => row.bound_client_id);
+    }
+
+    test('binds on first use and never echoes the client ID', async () => {
+      const { code } = await issueReceipt();
+      const first = await verify({ code, clientId: CLIENT_A.toUpperCase(), bind: true });
+      expect(first).toMatchObject({ clientIdBound: true, clientIdConflict: false });
+      expect(JSON.stringify(first)).not.toContain(CLIENT_A);
+      expect(await boundIds(code)).toEqual([CLIENT_A]);
+
+      const same = await verify({ code, clientId: CLIENT_A, bind: true });
+      expect(same).toMatchObject({ clientIdBound: true, clientIdConflict: false });
+    });
+
+    test('a different client ID conflicts and leaves the binding unchanged', async () => {
+      const { code } = await issueReceipt();
+      await verify({ code, clientId: CLIENT_A, bind: true });
+      const other = await verify({ code, clientId: CLIENT_B, bind: true });
+      expect(other).toMatchObject({ clientIdBound: true, clientIdConflict: true });
+      expect(await boundIds(code)).toEqual([CLIENT_A]);
+
+      // A request without a client ID reports no conflict.
+      const anonymous = await verify({ code });
+      expect(anonymous).toMatchObject({ clientIdBound: true, clientIdConflict: false });
+    });
+
+    test('does not bind unless bind is exactly true, or when the client ID is malformed', async () => {
+      const { code } = await issueReceipt();
+      for (const body of [
+        { code, clientId: CLIENT_A },
+        { code, clientId: CLIENT_A, bind: 'true' },
+        { code, clientId: 'not-hex', bind: true },
+        { code, clientId: CLIENT_A.slice(1), bind: true },
+        { code, clientId: 42, bind: true },
+        { code, bind: true }
+      ]) {
+        expect(await verify(body)).toMatchObject({ clientIdBound: false, clientIdConflict: false });
+      }
+      expect(await boundIds(code)).toEqual([null]);
+    });
+
+    test('concurrent bind attempts leave exactly one client ID bound', async () => {
+      const { code } = await issueReceipt();
+      const results = await Promise.all([
+        verify({ code, clientId: CLIENT_A, bind: true }),
+        verify({ code, clientId: CLIENT_B, bind: true })
+      ]);
+      const bound = await boundIds(code);
+      expect(bound).toHaveLength(1);
+      expect([CLIENT_A, CLIENT_B]).toContain(bound[0]);
+      // Exactly one request won; the other sees a conflict.
+      expect(results.filter((receipt) => receipt.clientIdConflict)).toHaveLength(1);
+      expect(results.every((receipt) => receipt.clientIdBound)).toBe(true);
+    });
+
+    test('reports source maps inside the production bundle without changing readiness', async () => {
+      const clean = await issueReceipt();
+      const mapped = await issueReceipt({ bundledMap: true });
+      const cleanReceipt = await verify({ code: clean.code });
+      const mappedReceipt = await verify({ code: mapped.code });
+      expect(cleanReceipt.sourceMapsInBundle).toBe(false);
+      expect(mappedReceipt.sourceMapsInBundle).toBe(true);
+      // The flag is a read of the stored review; readiness is whatever the
+      // review computed at creation.
+      expect(cleanReceipt.readiness).toBe(clean.readiness);
+      expect(mappedReceipt.readiness).toBe(mapped.readiness);
+    });
+
+    test('reviews stored without exposed-map data read as false', async () => {
+      const { code } = await issueReceipt({ bundledMap: true });
+      const hash = await sha256Hex(code);
+      const row = await env.DB.prepare(
+        `SELECT v.id, v.review_json FROM review_versions v
+           JOIN submission_receipts sr ON sr.review_version_id = v.id
+          WHERE sr.code_sha256 = ?`
+      )
+        .bind(hash)
+        .first<{ id: string; review_json: string }>();
+      const stored = JSON.parse(row!.review_json);
+      delete stored.sourceMapSummary;
+      await env.DB.prepare('UPDATE review_versions SET review_json = ? WHERE id = ?')
+        .bind(JSON.stringify(stored), row!.id)
+        .run();
+      expect((await verify({ code })).sourceMapsInBundle).toBe(false);
+    });
   });
 
   test('rejects a source-map upload that is not a .zip archive', async () => {

@@ -16,6 +16,12 @@ if (!templateReceiptPath || !outputPath) {
   throw new Error('--template-receipt and --receipt are required.');
 }
 if (!process.env.E2B_API_KEY) throw new Error('E2B_API_KEY is required.');
+// `--kind boot-test` probes the launch of a Designer Extension boot test. A
+// template built before the boot test existed rejects that launch.
+const kind = valueAfter('--kind') ?? 'runtime-observation';
+if (!['runtime-observation', 'boot-test'].includes(kind)) {
+  throw new Error('--kind must be runtime-observation or boot-test.');
+}
 
 const templateReceipt = JSON.parse(await readFile(templateReceiptPath, 'utf8'));
 const templateRef = templateReceipt.immutableTemplateRef;
@@ -48,7 +54,8 @@ const mf = new Miniflare({
     E2B_API_KEY: process.env.E2B_API_KEY,
     E2B_RUNTIME_TEMPLATE_ID: templateRef,
     PROBE_OBSERVATION_JOB_ID: observationJobId,
-    PROBE_CAPABILITY: capability
+    PROBE_CAPABILITY: capability,
+    ...(kind === 'boot-test' ? { PROBE_JOB_KIND: 'boot_test' } : {})
   }
 });
 
@@ -101,6 +108,7 @@ try {
     immutableTemplateRef: templateRef,
     templateId: templateReceipt.templateId,
     buildId: templateReceipt.buildId,
+    jobKind: kind,
     observationJobId,
     sandboxId,
     launchAccepted,

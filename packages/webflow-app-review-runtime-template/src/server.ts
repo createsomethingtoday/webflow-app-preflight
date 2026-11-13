@@ -13,6 +13,8 @@ export interface RuntimeTemplateInput {
   observationJobId: string;
   apiBaseUrl: string;
   capability: string;
+  /** Absent for a runtime observation; `boot_test` runs the Designer Extension boot test. */
+  jobKind?: 'boot_test';
 }
 
 export interface RuntimeProcessLauncher {
@@ -47,8 +49,13 @@ function isExactInput(
   expectedApiOrigin: string
 ): value is RuntimeTemplateInput {
   if (!isRecord(value)) return false;
-  const keys = Object.keys(value).sort();
-  if (keys.join(',') !== 'apiBaseUrl,capability,observationJobId') return false;
+  const keys = Object.keys(value).sort().join(',');
+  if (
+    keys !== 'apiBaseUrl,capability,observationJobId' &&
+    !(keys === 'apiBaseUrl,capability,jobKind,observationJobId' && value.jobKind === 'boot_test')
+  ) {
+    return false;
+  }
   if (
     typeof value.observationJobId !== 'string' ||
     !OBSERVATION_JOB_ID.test(value.observationJobId) ||
@@ -134,7 +141,14 @@ export const bakedRuntimeProcessLauncher: RuntimeProcessLauncher = {
     const output = openSync('/tmp/app-review-runtime.log', 'a', 0o600);
     const child = spawn(
       process.execPath,
-      ['/app/runner.mjs', '--api-base', input.apiBaseUrl, '--job', input.observationJobId],
+      [
+        '/app/runner.mjs',
+        '--api-base',
+        input.apiBaseUrl,
+        '--job',
+        input.observationJobId,
+        ...(input.jobKind === 'boot_test' ? ['--kind', 'boot-test'] : [])
+      ],
       {
         cwd: '/app',
         detached: true,

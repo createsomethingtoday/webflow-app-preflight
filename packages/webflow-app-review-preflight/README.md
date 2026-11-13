@@ -135,6 +135,74 @@ webflow-app-review-runtime --api-base "$apiBaseUrl" --job "$observationJobId"
 
 `E2B_API_KEY` is a production secret; the immutable build reference is reviewed configuration. If either is absent, mutable, unreachable, or the template rejects the job, the Worker marks that job failed and returns only a safe launch-stage error. A partially created sandbox is deleted immediately, with its 15-minute TTL as the final cleanup boundary. The service never presents a failed launch as Webflow-observed evidence. A result remains evidence only and cannot approve, reject, or update governance policy.
 
+## Submission receipt verify contract
+
+`POST /v1/submission-receipts/verify` is unauthenticated: the receipt code (`wfpre_` plus 32 hex characters) is the secret. Request body:
+
+```json
+{ "code": "wfpre_...", "clientId": "<64 hex characters>", "bind": true }
+```
+
+- `clientId` and `bind` are optional. `clientId` is honoured only as a 64-character hex string (any case, stored lowercase); anything else is treated as absent.
+- When `bind` is exactly `true`, a valid `clientId` is present, and the receipt has no bound client ID, the call binds it with one conditional `UPDATE` and re-reads the row, so concurrent first calls leave exactly one winner. A bound client ID is never changed or returned.
+- Unknown, malformed, or dangling codes return `404 {"valid":false}`; a malformed body returns `400`.
+
+Success (`200`) returns reconciliation metadata only, with no findings, evidence, artifact bytes, or bound client ID:
+
+```json
+{
+  "valid": true,
+  "receipt": {
+    "reviewId": "...",
+    "appName": "Name from webflow.json, or null",
+    "bundleSha256": "...",
+    "sourceMapArtifactSha256": null,
+    "readiness": "ready | needs_review | changes_required",
+    "sourceMapStatus": "matched",
+    "runtimeSecurityStatus": "passed | blocked | none",
+    "installUrl": null,
+    "createdAt": "...",
+    "sourceMapsInBundle": false,
+    "clientIdBound": true,
+    "clientIdConflict": false,
+    "runtimeAdvisory": { "observationRan": false, "cspReplay": "not_run", "staticFindingCount": 0, "mutableRuntimeUrlCount": 0 },
+    "bootTest": "not_run"
+  }
+}
+```
+
+- `appName` is the `name` field of the bundle manifest (`webflow.json`), so it is the name the manifest carries. It is `null` when the manifest is missing, unparseable, or has no string `name`.
+- `sourceMapsInBundle` is `true` when the production bundle ZIP itself contains `.map` files (read from the stored review's `sourceMapSummary.exposedSourceMapFiles`; reviews stored without it read as `false`). The review guidance tells the developer to move the maps into the private review ZIP. The flag is informational and never changes `readiness`.
+- `clientIdBound` is `true` when a client ID is bound to the receipt after this call. `clientIdConflict` is `true` when the receipt is bound to a different client ID than the one in this request; a request without a valid `clientId` always reports `false`.
+- `runtimeAdvisory` summarizes the advisory published-site checks for this version: whether an observation ran, the strict-CSP replay status (`clean`, `violations`, `not_run`), the total of static-scan matches, and the count of declared runtime URLs with no version or content hash. It is `null` only when the summary could not be read. `bootTest` is the status of the latest Designer Extension boot test (`passed`, `failed`, `error`, `not_run`). Both are advisory and never change `readiness`.
+- A receipt is a reference, not an approval; the reviewer replay remains the verification.
+
+## Designer Extension boot test
+
+Static rules do not run the bundle. The boot test does: it catches a panel that opens blank, a bundled script that the Content-Security-Policy blocks, and a file that `index.html` references but the ZIP does not contain. It is advisory evidence, off by default behind `BOOT_TEST_ENABLED`, and it never changes `readiness`, a static finding, or a runtime security status.
+
+1. In the Designer Extension, the review owner selects **Run boot test** on a bundle review (`POST /v1/reviews/:reviewId/boot-tests`, latest version). The Worker writes a contract with a random nonce, a 15-minute expiry, and the extension host policy, and stores only the SHA-256 of a one-time capability. One job can be active per review version and actor role.
+2. The Worker starts a fresh E2B sandbox with the same launcher as a runtime observation and sends `jobKind: "boot_test"` to the template's `/run` route. The sandbox receives no account credential or token beyond the job capability.
+3. The runner reads the contract (`GET /v1/boot-test-jobs/:id`) and downloads that version's exact bundle (`GET /v1/boot-test-jobs/:id/bundle`). Both routes accept only the job capability while the job runs. The runner checks the bundle SHA-256 against the contract.
+4. The runner serves the bundle from a static server on `127.0.0.1` with the policy on every response, stubs `window.webflow`, and opens `index.html` in headless Chromium. The browser can reach only that server: a route handler aborts every other origin (other loopback ports included), WebSockets close before they connect, and the browser's proxy is a local socket that drops every connection.
+5. The runner uploads one JSON result (`POST /v1/boot-test-jobs/:id/result`). The Worker checks every binding, field, cap, and label, rejects internally inconsistent or secret-shaped results, stores the result as `webflow_observed`, consumes the job, and terminates the sandbox.
+
+`status` is `failed` only for `bundled_script_blocked_by_csp`, `bundled_file_missing`, or `blank_panel` (no visible text and no rendered element after the settle time). Blocked external requests and uncaught errors are informational. `error` means the test itself could not run.
+
+The extension learns that the Worker serves the boot test from `features.bootTest` on `GET /v1/me`. While the switch is off, or on an older Worker, the card stays hidden. The card shows the developer's latest run for the version on screen: passed, failed (each failure with the blocked or missing files and a next step), or could not run. Informational lists stay collapsed.
+
+### Reviewer boot test replay
+
+The reviewer workspace uses the existing reviewer authorization unchanged: a reviewer identity creates a one-time handoff from the Designer Extension (**Create reviewer workspace**), and the explicit POST on `/reviewer/connect` mints an HttpOnly session bound to one review version and Runtime Test Package. With the switch on, the workspace adds a **Designer Extension boot test** card:
+
+- the developer's latest completed run and the reviewer's latest completed replay of the session's review version, with a note when a newer run is in progress
+- **Run independent boot test replay**, which posts to `/reviewer/review-versions/:reviewVersionId/boot-test-replay`. The Worker accepts only a reviewer session whose review version matches the path. A Designer identity, a developer, or a session for another version gets `401` or `403`.
+- a replay comparison, in the runtime replay vocabulary: `reproduced_pass` (both passed), `reproduced_failure` (both failed with the same failure set), `mixed_evidence` (status or failure set differs), `infrastructure_incomplete` (a run could not run), or `not_compared` (one side has no result yet)
+
+Each job records `actor_role` (`developer` or `reviewer`) and the requesting user. The replay runs the same immutable version and bundle SHA-256 and goes through the same result validation. It never overwrites the developer's run.
+
+`bootTestSummaryForVersion` in `worker/src/boot-tests.ts` feeds the submission receipt. It reports the latest completed **developer** run for the version, or `not_run`. Reviewer replays never change it, so the receipt shows what the developer saw at submit time.
+
 ## Security boundaries
 
 - Zip uploads are limited to 10 MB, 50 MB uncompressed, and 2,000 files, and must pass deterministic archive processing before D1 writes.

@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { runBootTest } from './boot-test.js';
 import { runRuntimeObservation } from './index.js';
 
 function option(name: string): string | null {
@@ -8,14 +9,30 @@ function option(name: string): string | null {
 
 const apiBaseUrl = option('--api-base');
 const observationJobId = option('--job');
+const kind = option('--kind') ?? 'runtime-observation';
 const outputDir = option('--output') ?? undefined;
 const capability = process.env.RUNTIME_OBSERVATION_CAPABILITY;
 
-if (!apiBaseUrl || !observationJobId || !capability) {
+if (
+  !apiBaseUrl ||
+  !observationJobId ||
+  !capability ||
+  !['runtime-observation', 'boot-test'].includes(kind)
+) {
   console.error(
-    'Usage: RUNTIME_OBSERVATION_CAPABILITY=<job-scoped value> webflow-app-review-runtime --api-base <url> --job <id>'
+    'Usage: RUNTIME_OBSERVATION_CAPABILITY=<job-scoped value> webflow-app-review-runtime --api-base <url> --job <id> [--kind runtime-observation|boot-test]'
   );
   process.exitCode = 2;
+} else if (kind === 'boot-test') {
+  try {
+    const result = await runBootTest({ apiBaseUrl, bootTestJobId: observationJobId, capability });
+    console.log(
+      `Designer Extension boot test complete: ${result.evidence.bootTest.status}. The result is advisory.`
+    );
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : 'Boot test failed.');
+    process.exitCode = 1;
+  }
 } else {
   try {
     const result = await runRuntimeObservation({

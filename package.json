@@ -8,7 +8,7 @@
   "scripts": {
     "build": "pnpm build:packages && pnpm --filter @create-something/webflow-app-review-runtime-runner build && pnpm --filter @create-something/webflow-app-review-preflight-extension build && pnpm --filter @create-something/webflow-app-review-preflight-worker build && pnpm --filter @create-something/webflow-app-review-runtime-template build",
     "build:packages": "pnpm --filter @create-something/bundle-scanner-core build && pnpm --filter @create-something/webflow-app-review-preflight build",
-    "build:e2b": "pnpm --filter @create-something/webflow-app-review-runtime-template build:e2b",
+    "build:e2b": "pnpm build:packages && pnpm --filter @create-something/webflow-app-review-runtime-template build:e2b",
     "bundle:extension": "pnpm --filter @create-something/webflow-app-review-preflight-extension bundle",
     "check": "pnpm build:packages && pnpm --filter @create-something/bundle-scanner-core typecheck && pnpm --filter @create-something/webflow-app-review-preflight check && pnpm --filter @create-something/webflow-app-review-runtime-runner check && pnpm --filter @create-something/webflow-app-review-preflight-extension check && pnpm --filter @create-something/webflow-app-review-preflight-worker check && pnpm --filter @create-something/webflow-app-review-runtime-template check",
     "dev:extension": "pnpm --filter @create-something/webflow-app-review-preflight-extension serve",

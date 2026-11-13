@@ -26,6 +26,7 @@
     "playwright": "^1.61.1"
   },
   "devDependencies": {
+    "@create-something/bundle-scanner-core": "workspace:*",
     "@types/node": "^24.0.0",
     "tsup": "^8.0.0",
     "typescript": "^5.9.3",

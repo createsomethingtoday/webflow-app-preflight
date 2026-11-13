@@ -3,6 +3,7 @@ import { afterEach, describe, expect, test, vi } from 'vitest';
 import {
   checkInstallUrl,
   checkInstallUrlString,
+  detectManualEntrySignals,
   probeInstallUrl
 } from '../src/install-url';
 
@@ -281,6 +282,123 @@ describe('checkInstallUrl', () => {
   });
 });
 
+const AUTH = `https://webflow.com/oauth/authorize?response_type=code&client_id=${CLIENT_ID}`;
+const START = 'https://app.example-vendor.test/install';
+const bigPage = (inner: string) => `<html><body><p>${'Connect your account to continue. '.repeat(10)}</p>${inner}</body></html>`;
+
+describe('IU-10: state does not change between requests', () => {
+  const run = (fetchImpl: typeof fetch, extra = {}) =>
+    checkInstallUrl({ installUrl: START, clientId: CLIENT_ID, ...DATA_CLIENT }, { fetch: fetchImpl, retryDelayMs: 0, ...extra });
+
+  test('warns when two independent probes carry the same state', async () => {
+    const fetchImpl = fakeFetch({ '/install': redirect(`${AUTH}&state=fixed-value`) });
+    const result = await run(fetchImpl);
+    expect(fetchImpl.calls).toEqual([START, START]);
+    expect(result.findings).toContainEqual(expect.objectContaining({ rule: 'IU-10', severity: 'warn' }));
+    expect(result.verdict).toBe('warn');
+  });
+
+  test('adds nothing when state differs', async () => {
+    let n = 0;
+    const fetchImpl = fakeFetch({ '/install': () => redirect(`${AUTH}&state=s${(n += 1)}`)() });
+    const result = await run(fetchImpl);
+    expect(fetchImpl.calls).toHaveLength(2);
+    expect(rules(result)).not.toContain('IU-10');
+  });
+
+  test('adds nothing when the second probe fails or ends elsewhere', async () => {
+    let n = 0;
+    const failing = fakeFetch({
+      '/install': () => {
+        n += 1;
+        if (n === 1) return redirect(`${AUTH}&state=same`)();
+        throw new TypeError('fetch failed');
+      }
+    });
+    expect(rules(await run(failing))).not.toContain('IU-10');
+
+    let m = 0;
+    const elsewhere = fakeFetch({
+      '/install': () => ((m += 1) === 1 ? redirect(`${AUTH}&state=same`)() : html(bigPage(''))())
+    });
+    expect(rules(await run(elsewhere))).not.toContain('IU-10');
+  });
+
+  test('keeps the SSRF guards on the second probe', async () => {
+    let n = 0;
+    const fetchImpl = fakeFetch({
+      '/install': () => ((n += 1) === 1 ? redirect(`${AUTH}&state=same`)() : redirect('https://169.254.169.254/x')())
+    });
+    const result = await run(fetchImpl);
+    expect(fetchImpl.calls.every((call) => !call.includes('169.254'))).toBe(true);
+    expect(rules(result)).not.toContain('IU-10');
+  });
+
+  test('skips the second probe when the first used more than half the time budget', async () => {
+    const slow = fakeFetch({
+      '/install': async () => {
+        await new Promise((resolve) => setTimeout(resolve, 40));
+        return redirect(`${AUTH}&state=same`)();
+      }
+    });
+    const result = await run(slow, { totalTimeoutMs: 60 });
+    expect(slow.calls).toHaveLength(1);
+    expect(rules(result)).not.toContain('IU-10');
+  });
+
+  test('does not probe again without state or when the install URL is the authorize link itself', async () => {
+    const noState = fakeFetch({ '/install': redirect(AUTH) });
+    await run(noState);
+    expect(noState.calls).toHaveLength(1);
+    const direct = fakeFetch({});
+    await checkInstallUrl({ installUrl: `${AUTH}&state=x`, clientId: CLIENT_ID, ...DATA_CLIENT }, { fetch: direct });
+    expect(direct.calls).toHaveLength(0);
+  });
+});
+
+describe('IU-11: manual site or token entry before OAuth', () => {
+  const run = (body: string) =>
+    checkInstallUrl(
+      { installUrl: START, clientId: CLIENT_ID, ...DATA_CLIENT },
+      { fetch: fakeFetch({ '/install': html(body) }), retryDelayMs: 0 }
+    );
+
+  test('warns with a short label when an input asks for a site URL, site ID, or token', async () => {
+    const url = await run(bigPage('<form><label for="s">Your website URL</label><input id="s" name="x" type="text"></form>'));
+    const finding = url.findings.find((item) => item.rule === 'IU-11');
+    expect(finding?.severity).toBe('warn');
+    expect(finding?.message).toContain('input asks for a site URL or domain');
+    expect(url.verdict).toBe('warn');
+
+    const id = await run(bigPage('<input name="webflow_site_id" placeholder="Paste id">'));
+    expect(id.findings.find((item) => item.rule === 'IU-11')?.message).toContain('input asks for a Webflow site ID');
+
+    const token = await run(bigPage('<label>Webflow API token <input type="password" name="t"></label>'));
+    expect(token.findings.find((item) => item.rule === 'IU-11')?.message).toContain('input asks for an API token or key');
+  });
+
+  test('does not warn on a login-only form or a search box', async () => {
+    const login = await run(bigPage('<form><input type="email" name="email" placeholder="Email"><input type="password" name="password"></form>'));
+    expect(rules(login)).not.toContain('IU-11');
+    const search = await run(bigPage('<input type="search" name="q" placeholder="Search docs for a site"><input name="query" aria-label="Search">'));
+    expect(rules(search)).not.toContain('IU-11');
+  });
+
+  test('does not warn when the page links to Webflow OAuth', async () => {
+    const result = await run(bigPage(`<input name="site_url"><a href="${AUTH}">Connect</a>`));
+    expect(result.probe?.code).toBe('links_to_authorize');
+    expect(rules(result)).not.toContain('IU-11');
+  });
+
+  test('never returns or stores the response body', async () => {
+    const secret = 'PAGE-BODY-MARKER-12345';
+    const result = await run(bigPage(`<label>Website URL ${secret}</label><input name="site_url" placeholder="${secret}">`));
+    expect(rules(result)).toContain('IU-11');
+    expect(JSON.stringify(result)).not.toContain(secret);
+    expect(detectManualEntrySignals('<input name="site_url">')).toEqual(['input asks for a site URL or domain']);
+  });
+});
+
 describe('POST /v1/install-url/check', () => {
   const endpoint = 'https://preflight.test/v1/install-url/check';
 
@@ -310,14 +428,16 @@ describe('POST /v1/install-url/check', () => {
   });
 
   test('accepts a signed-in developer and runs the probe', async () => {
+    let minted = 0;
     vi.stubGlobal(
       'fetch',
       vi.fn(async (input: RequestInfo | URL) => {
         const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
         if (url === 'https://app.acme.dev/install') {
+          minted += 1;
           return new Response(null, {
             status: 302,
-            headers: { location: `https://webflow.com/oauth/authorize?response_type=code&client_id=${CLIENT_ID}&state=x` }
+            headers: { location: `https://webflow.com/oauth/authorize?response_type=code&client_id=${CLIENT_ID}&state=x${minted}` }
           });
         }
         return new Response('unexpected', { status: 599 });

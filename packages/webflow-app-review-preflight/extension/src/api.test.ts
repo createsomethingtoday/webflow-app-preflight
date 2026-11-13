@@ -85,4 +85,36 @@ describe('Preflight API', () => {
       PreflightAuthenticationError
     );
   });
+
+  test('reads the boot test feature flag from the identity response', async () => {
+    (globalThis as typeof globalThis & { webflow?: { getIdToken: () => Promise<string> } }).webflow = {
+      getIdToken: async () => 'designer-id-token'
+    };
+    const user = { id: 'local-webflow-user', siteId: 'local-webflow-site', companionRole: 'developer' };
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json({ user, features: { bootTest: true } })));
+    await expect(createPreflightApi().getIdentity()).resolves.toEqual({ ...user, features: { bootTest: true } });
+
+    // An older Worker sends no flag: the feature reads as off.
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json({ user })));
+    await expect(createPreflightApi().getIdentity()).resolves.toEqual({ ...user, features: {} });
+  });
+
+  test('lists and starts boot tests on the review routes', async () => {
+    (globalThis as typeof globalThis & { webflow?: { getIdToken: () => Promise<string> } }).webflow = {
+      getIdToken: async () => 'designer-id-token'
+    };
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) =>
+      init?.method === 'POST'
+        ? Response.json({ bootTest: { id: 'boot-test-1' } }, { status: 201 })
+        : Response.json({ bootTests: [{ id: 'boot-test-1' }] })
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    await expect(createPreflightApi().listBootTests('review-1')).resolves.toEqual([{ id: 'boot-test-1' }]);
+    await expect(createPreflightApi().requestBootTest('review-1')).resolves.toEqual({ id: 'boot-test-1' });
+    expect(fetchMock.mock.calls.map(([url, init]) => [String(url).replace(/^.*(\/v1)/, '$1'), init?.method ?? 'GET'])).toEqual([
+      ['/v1/reviews/review-1/boot-tests', 'GET'],
+      ['/v1/reviews/review-1/boot-tests', 'POST']
+    ]);
+  });
 });
+

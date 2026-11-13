@@ -6,6 +6,8 @@ Data Client and hosted apps do not need a placeholder zip. Choose **Test product
 
 One Runtime Test Package represents one execution scenario. The form starts with one runtime file and can add up to eight files that must execute together. Each file keeps its own immutable URL and SHA-256; the form derives the matching SRI and the server verifies both encodings. Completed observations report loaded, hash-matched, and SRI-matched status for every file. Region, plan, build, or release variants that do not execute together use separate packages.
 
+When the Worker reports `features.bootTest` on `/v1/me`, a bundle review also shows **Check that the extension opens**. **Run boot test** asks Webflow to open the bundle's `index.html` in a fresh browser under the Designer's security policy. The card reports passed, failed, or could not run. A failure lists each problem in plain words with the blocked or missing files and a next step. The result is advisory and does not change readiness. Hosted-runtime reviews and Workers with the switch off show no card.
+
 ```bash
 pnpm build
 pnpm test

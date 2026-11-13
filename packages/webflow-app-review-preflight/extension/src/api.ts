@@ -1,4 +1,5 @@
 import type {
+  BootTestSummary,
   PreflightApi,
   RevisionResult,
   RuntimeTestPackageInput,
@@ -99,8 +100,11 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 export function createPreflightApi(): PreflightApi {
   return {
     async getIdentity(): Promise<PreflightIdentity> {
-      const body = await request<{ user: PreflightIdentity }>("/v1/me");
-      return body.user;
+      const body = await request<{
+        user: PreflightIdentity;
+        features?: PreflightIdentity["features"];
+      }>("/v1/me");
+      return { ...body.user, features: body.features ?? {} };
     },
     async listReviews(): Promise<ReviewSummary[]> {
       const body = await request<{ reviews: ReviewSummary[] }>("/v1/reviews");
@@ -211,6 +215,19 @@ export function createPreflightApi(): PreflightApi {
         },
       );
       return body.handoff;
+    },
+    async listBootTests(reviewId: string): Promise<BootTestSummary[]> {
+      const body = await request<{ bootTests: BootTestSummary[] }>(
+        `/v1/reviews/${reviewId}/boot-tests`,
+      );
+      return body.bootTests;
+    },
+    async requestBootTest(reviewId: string): Promise<BootTestSummary> {
+      const body = await request<{ bootTest: BootTestSummary }>(
+        `/v1/reviews/${reviewId}/boot-tests`,
+        { method: "POST" },
+      );
+      return body.bootTest;
     },
   };
 }

@@ -1,12 +1,20 @@
 import { createHash } from 'node:crypto';
 import { lookup } from 'node:dns/promises';
 import { mkdir, writeFile } from 'node:fs/promises';
+import {
+  defaultConfig,
+  defaultRuleset,
+  runScan,
+  type FileEntry
+} from '@create-something/bundle-scanner-core';
 import type { RuntimeObservationJobContract } from '@create-something/webflow-app-review-preflight';
 import {
   chromium,
   type Browser,
+  type BrowserContext,
   type CDPSession,
   type Page,
+  type Request as PlaywrightRequest,
   type Response as PlaywrightResponse,
   type Route
 } from 'playwright';
@@ -32,6 +40,14 @@ export const PLATFORM_ASSET_HOSTS: ReadonlySet<string> = new Set([
 // of their own so an asset flood cannot push other evidence out of the log.
 const PLATFORM_ASSET_METHODS: ReadonlySet<string> = new Set(['GET', 'HEAD']);
 const MAX_PLATFORM_ASSET_REQUESTS = 2_000;
+// Strict-CSP replay limits. The replay is advisory, so it gets its own small
+// budgets instead of sharing (and possibly starving) the observation's.
+const CSP_REPLAY_TIMEOUT_MS = 30_000;
+const CSP_REPLAY_MAX_REQUESTS = 100;
+const CSP_REPLAY_MAX_PLATFORM_REQUESTS = 500;
+const CSP_REPLAY_MAX_VIOLATIONS = 50;
+const CSP_REPLAY_SETTLE_MS = 500;
+const CSP_REPLAY_BINDING = '__wfCspReplayReport';
 
 /**
  * The scope within which an unpinned script counts as a pinned runtime's
@@ -55,6 +71,8 @@ export interface RuntimeRunnerInput {
   capability: string;
   browser?: Browser;
   outputDir?: string;
+  /** Lowers the strict-CSP replay time limit (never raises it above the default). */
+  cspReplayTimeoutMs?: number;
 }
 
 export interface RuntimeRunnerResult {
@@ -520,7 +538,7 @@ async function screenshot(page: Page): Promise<Uint8Array> {
 
 // Reads a response body while enforcing a byte cap, so a hostile server cannot
 // exhaust runner memory with an unbounded (or Content-Length-lying) body.
-async function readCapped(response: Response, maxBytes: number): Promise<Uint8Array> {
+export async function readCapped(response: Response, maxBytes: number): Promise<Uint8Array> {
   const declared = Number(response.headers.get('content-length') ?? '');
   if (Number.isFinite(declared) && declared > maxBytes) {
     throw new Error('Response exceeds the byte cap.');
@@ -584,12 +602,14 @@ async function observeRuntimeArtifact(
   allowedHosts: Set<string>,
   scripts: BrowserState['scripts'],
   executedDigestsByUrl: Map<string, Set<string>>,
-  trustedRuntimeInitiatedUrls: Set<string>
+  trustedRuntimeInitiatedUrls: Set<string>,
+  servedSources?: Map<string, string>
 ): Promise<RuntimeArtifactObservation> {
   const bytes = response
     ? new Uint8Array(await response.body())
     : await readCappedBody(pin.url, MAX_RUNTIME_ARTIFACT_BYTES);
   const source = new TextDecoder().decode(bytes);
+  servedSources?.set(pin.url, source);
   const match = source.match(/[#@]\s*sourceMappingURL=([^\s*]+)/);
   let sourceMap: RuntimeArtifactObservation['sourceMap'] = { available: false };
   if (match?.[1]) {
@@ -633,6 +653,484 @@ async function observeRuntimeArtifact(
   };
 }
 
+interface EgressGuardOptions {
+  context: BrowserContext;
+  allowedHosts: ReadonlySet<string>;
+  platformHosts: ReadonlySet<string>;
+  maxRequests: number;
+  maxPlatformRequests: number;
+  requestTimeoutMs: number;
+  record: (entry: Record<string, unknown>) => void;
+  /**
+   * Optionally rewrites the headers of a final response before it reaches the
+   * browser (used by the CSP replay to add a policy to the main document).
+   * Return null to leave the response untouched.
+   */
+  patchHeaders?: (
+    request: PlaywrightRequest,
+    headers: Record<string, string>
+  ) => Record<string, string> | null;
+}
+
+const MAX_REDIRECT_HOPS = 10;
+
+/**
+ * One decision for every request and every redirect hop: on the allowlist,
+ * and within its budget. Off-allowlist requests never consume the budget,
+ * otherwise adversarial noise could exhaust maxRequests and starve the
+ * pinned runtime request (a false "Declared runtime did not load" blocker).
+ * Platform asset hosts are read-only, never budgeted, and capped on their
+ * own so a site's CSS, images and webflow.js cannot starve the runtime
+ * request either.
+ *
+ * Chromium follows redirects before a route handler can see the hop, so a
+ * permitted host could bounce the browser to an off-allowlist one (loopback
+ * and metadata addresses included). Every admitted request is therefore
+ * fetched from the runner one hop at a time, each Location vetted exactly
+ * like a fresh request, and only the final response reaches the browser.
+ */
+function createEgressGuard(options: EgressGuardOptions): {
+  admit: (target: URL, method: string, resourceType: string, redirectedFrom?: string) => boolean;
+  fulfillWithinAllowlist: (route: Route, first: URL) => Promise<void>;
+} {
+  const { context, allowedHosts, platformHosts, record } = options;
+  let requestCount = 0;
+  let platformRequestCount = 0;
+  const admit = (
+    target: URL,
+    method: string,
+    resourceType: string,
+    redirectedFrom?: string
+  ): boolean => {
+    const host = target.hostname.toLowerCase();
+    let permitted = ['http:', 'https:'].includes(target.protocol) && allowedHosts.has(host);
+    if (permitted) {
+      permitted = platformHosts.has(host)
+        ? PLATFORM_ASSET_METHODS.has(method) &&
+          (platformRequestCount += 1) <= options.maxPlatformRequests
+        : (requestCount += 1) <= options.maxRequests;
+    }
+    record({
+      phase: 'request',
+      url: sanitizeUrl(target.toString()),
+      method,
+      resourceType,
+      blocked: !permitted,
+      ...(redirectedFrom ? { redirectedFrom } : {})
+    });
+    return permitted;
+  };
+  const fulfillWithinAllowlist = async (route: Route, first: URL): Promise<void> => {
+    const request = route.request();
+    try {
+      let response = await route.fetch({
+        maxRedirects: 0,
+        timeout: options.requestTimeoutMs
+      });
+      let current = first;
+      let method = request.method();
+      for (let hop = 0; hop <= MAX_REDIRECT_HOPS; hop += 1) {
+        const status = response.status();
+        const location = response.headers()['location'];
+        if (!(status >= 300 && status < 400 && location)) break;
+        if (hop === MAX_REDIRECT_HOPS) {
+          await route.abort('blockedbyclient');
+          return;
+        }
+        let next: URL;
+        try {
+          next = new URL(location, current);
+        } catch {
+          await route.abort('blockedbyclient');
+          return;
+        }
+        // 307/308 keep the method and body; every other redirect becomes GET.
+        const keepMethod = status === 307 || status === 308;
+        method = keepMethod ? method : 'GET';
+        if (!admit(next, method, request.resourceType(), sanitizeUrl(current.toString()))) {
+          await route.abort('blockedbyclient');
+          return;
+        }
+        response = await context.request.fetch(next.toString(), {
+          method,
+          maxRedirects: 0,
+          timeout: options.requestTimeoutMs,
+          ...(keepMethod && request.postDataBuffer() ? { data: request.postDataBuffer()! } : {})
+        });
+        current = next;
+      }
+      const patched = options.patchHeaders?.(request, response.headers());
+      await route.fulfill(patched ? { response, headers: patched } : { response });
+    } catch {
+      await route.abort('failed').catch(() => undefined);
+    }
+  };
+  return { admit, fulfillWithinAllowlist };
+}
+
+export interface CspReplayViolation {
+  directive: string;
+  /** 'inline', 'eval', a CSP keyword such as 'data', or a host only. */
+  blocked: string;
+  /** Host and path of the script that caused it, or 'document'. */
+  source: string;
+  /** The violation belongs to the app's runtime rather than the customer page. */
+  fromRuntime: boolean;
+}
+
+export interface CspReplayEvidence {
+  status: 'clean' | 'violations' | 'not_run';
+  runtimeReadyObserved: boolean;
+  violations: CspReplayViolation[];
+}
+
+const NOT_RUN_REPLAY: CspReplayEvidence = {
+  status: 'not_run',
+  runtimeReadyObserved: false,
+  violations: []
+};
+
+/**
+ * The strict policy the replay adds to the main document response: no
+ * 'unsafe-inline', no 'unsafe-eval'; only the document origin, the declared
+ * runtime artifact origins and the Webflow platform asset hosts.
+ */
+export function buildReplayCsp(
+  runtimeArtifactUrls: readonly string[],
+  platformHosts: ReadonlySet<string>
+): string {
+  const sources = [
+    "'self'",
+    ...new Set(runtimeArtifactUrls.map((value) => new URL(value).origin)),
+    ...[...platformHosts].map((host) => `https://${host}`)
+  ].join(' ');
+  return [
+    `default-src ${sources}`,
+    `img-src ${sources} data:`,
+    `font-src ${sources} data:`,
+    "object-src 'none'",
+    "base-uri 'self'"
+  ].join('; ');
+}
+
+interface ViolationContext {
+  documentUrl: string;
+  runtimeUrls: ReadonlySet<string>;
+  runtimeScopes: ReadonlySet<string>;
+  platformHosts: ReadonlySet<string>;
+}
+
+function boundedString(value: unknown, max: number): string {
+  return typeof value === 'string' ? value.slice(0, max) : '';
+}
+
+/**
+ * Reduces one raw `securitypolicyviolation` report to the stored shape. The
+ * report carries only a directive name, a blocked-resource kind or host, and
+ * the script location; no page content, line text or script sample survives.
+ */
+export function normalizeCspViolation(
+  raw: unknown,
+  context: ViolationContext
+): CspReplayViolation | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const record = raw as Record<string, unknown>;
+  const directive = boundedString(record.directive, 60);
+  const blockedUri = boundedString(record.blockedURI, 2048);
+  const sourceFile = boundedString(record.sourceFile, 2048);
+
+  let blocked = 'unknown';
+  if (blockedUri === 'inline' || blockedUri === 'eval') {
+    blocked = blockedUri;
+  } else if (URL.canParse(blockedUri)) {
+    blocked = new URL(blockedUri).host.toLowerCase() || 'unknown';
+  } else if (/^[a-z-]{1,24}$/.test(blockedUri)) {
+    blocked = blockedUri;
+  }
+
+  const documentKey = URL.canParse(context.documentUrl)
+    ? `${new URL(context.documentUrl).host}${new URL(context.documentUrl).pathname}`
+    : '';
+  let source = 'document';
+  let sourceIsRuntime = false;
+  if (sourceFile && URL.canParse(sourceFile)) {
+    const url = new URL(sourceFile);
+    const key = `${url.host.toLowerCase()}${url.pathname}`;
+    if (key !== documentKey) {
+      source = key.slice(0, 300);
+      sourceIsRuntime =
+        context.runtimeUrls.has(sourceFile) ||
+        context.runtimeScopes.has(runtimeScopeKey(url, context.platformHosts));
+    }
+  }
+  return {
+    directive: /^[a-z-]{1,60}$/.test(directive) ? directive : 'unknown',
+    blocked,
+    source,
+    fromRuntime: record.createdByRuntime === true || sourceIsRuntime
+  };
+}
+
+// Runs before any page script. It records which script and style elements a
+// declared runtime created (by call stack) and forwards every CSP violation
+// event to the runner. Nothing but three short strings and a flag leaves the
+// page.
+function installCspReplayProbe(args: { runtimeUrls: string[]; binding: string }): void {
+  const marker = Symbol.for('webflow.csp-replay.runtime-created');
+  const runtime = new Set(args.runtimeUrls);
+  const calledByRuntime = (): boolean => {
+    const stack = new Error().stack ?? '';
+    return stack.split('\n').some((line) => {
+      const match = /(https?:\/\/[^\s()]+?):\d+:\d+\)?\s*$/.exec(line);
+      return match !== null && runtime.has(match[1] as string);
+    });
+  };
+  const originalCreateElement = Document.prototype.createElement;
+  Document.prototype.createElement = function (
+    this: Document,
+    localName: string,
+    options?: ElementCreationOptions
+  ): HTMLElement {
+    const element = Reflect.apply(originalCreateElement, this, [
+      localName,
+      options
+    ]) as HTMLElement;
+    const name = String(localName).toLowerCase();
+    if (name === 'script' || name === 'style') {
+      Object.defineProperty(element, marker, { value: calledByRuntime() });
+    }
+    return element;
+  } as typeof Document.prototype.createElement;
+  document.addEventListener(
+    'securitypolicyviolation',
+    (event) => {
+      const target = event.target as unknown as Record<symbol, unknown> | null;
+      const send = (globalThis as unknown as Record<string, unknown>)[args.binding];
+      if (typeof send !== 'function') return;
+      try {
+        send({
+          directive: event.effectiveDirective || event.violatedDirective,
+          blockedURI: event.blockedURI,
+          sourceFile: event.sourceFile,
+          createdByRuntime: target?.[marker] === true
+        });
+      } catch {
+        // Reporting is best effort.
+      }
+    },
+    true
+  );
+}
+
+/**
+ * Loads the target page a second time in a fresh context with a strict CSP
+ * added to the main document response, and records the policy violations.
+ * Advisory only: any failure (timeout, navigation error) is `not_run` and
+ * never affects the observation that already finished.
+ */
+async function runCspReplay(
+  contract: RuntimeObservationJobContract,
+  browser: Browser,
+  hosts: { allowedHosts: ReadonlySet<string>; platformHosts: ReadonlySet<string> },
+  timeoutMs: number
+): Promise<CspReplayEvidence> {
+  const { allowedHosts, platformHosts } = hosts;
+  const runtimeUrls = new Set(contract.runtimeArtifacts.map((artifact) => artifact.url));
+  const violationContext: ViolationContext = {
+    documentUrl: contract.target.url,
+    runtimeUrls,
+    runtimeScopes: new Set(
+      contract.runtimeArtifacts.map((artifact) =>
+        runtimeScopeKey(new URL(artifact.url), platformHosts)
+      )
+    ),
+    platformHosts
+  };
+  const policy = buildReplayCsp(contract.runtimeArtifacts.map((artifact) => artifact.url), platformHosts);
+  const stepTimeoutMs = Math.max(1, Math.min(contract.controls.requestTimeoutMs, 10_000));
+  const found = new Map<string, CspReplayViolation>();
+  let context: BrowserContext | null = null;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    context = await browser.newContext({
+      viewport: { width: 1280, height: 720 },
+      serviceWorkers: 'block',
+      acceptDownloads: false,
+      userAgent: `Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${browser.version()} Safari/537.36`
+    });
+    const replayContext = context;
+    await replayContext.exposeBinding(CSP_REPLAY_BINDING, (_source, payload: unknown) => {
+      const violation = normalizeCspViolation(payload, violationContext);
+      if (!violation || found.size >= CSP_REPLAY_MAX_VIOLATIONS) return;
+      const key = JSON.stringify(violation);
+      if (!found.has(key)) found.set(key, violation);
+    });
+    await replayContext.addInitScript(installCspReplayProbe, {
+      runtimeUrls: [...runtimeUrls],
+      binding: CSP_REPLAY_BINDING
+    });
+    const { admit, fulfillWithinAllowlist } = createEgressGuard({
+      context: replayContext,
+      allowedHosts,
+      platformHosts,
+      maxRequests: Math.min(contract.controls.maxRequests, CSP_REPLAY_MAX_REQUESTS),
+      maxPlatformRequests: CSP_REPLAY_MAX_PLATFORM_REQUESTS,
+      requestTimeoutMs: stepTimeoutMs,
+      record: () => undefined,
+      patchHeaders: (request, headers) =>
+        request.resourceType() === 'document' && request.frame().parentFrame() === null
+          ? {
+              ...headers,
+              'content-security-policy': headers['content-security-policy']
+                ? `${headers['content-security-policy']}, ${policy}`
+                : policy
+            }
+          : null
+    });
+    await replayContext.route('**/*', async (route) => {
+      const request = route.request();
+      let url: URL;
+      try {
+        url = new URL(request.url());
+      } catch {
+        await route.abort('blockedbyclient');
+        return;
+      }
+      if (!['http:', 'https:'].includes(url.protocol)) {
+        await route.continue();
+        return;
+      }
+      if (!admit(url, request.method(), request.resourceType())) {
+        await route.abort('blockedbyclient');
+        return;
+      }
+      await fulfillWithinAllowlist(route, url);
+    });
+    const page = await replayContext.newPage();
+
+    const replay = async (): Promise<CspReplayEvidence> => {
+      await page.goto(contract.target.url, {
+        waitUntil: 'domcontentloaded',
+        timeout: stepTimeoutMs
+      });
+      let runtimeReadyObserved = false;
+      try {
+        await page.waitForSelector(contract.lifecycle.readySelector, {
+          state: 'attached',
+          timeout: stepTimeoutMs
+        });
+        runtimeReadyObserved = true;
+      } catch {
+        // Not observed under the strict policy; reported as such.
+      }
+      await page.waitForTimeout(CSP_REPLAY_SETTLE_MS);
+      const violations = [...found.values()].slice(0, CSP_REPLAY_MAX_VIOLATIONS);
+      return {
+        status: violations.some((violation) => violation.fromRuntime) ? 'violations' : 'clean',
+        runtimeReadyObserved,
+        violations
+      };
+    };
+    const pending = replay();
+    // If the time limit wins, closing the context rejects this promise.
+    pending.catch(() => undefined);
+    return await Promise.race<CspReplayEvidence>([
+      pending,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error('CSP replay timed out.')), timeoutMs);
+      })
+    ]);
+  } catch {
+    return { ...NOT_RUN_REPLAY };
+  } finally {
+    if (timer) clearTimeout(timer);
+    await context?.close().catch(() => undefined);
+  }
+}
+
+export interface RuntimeStaticScanFinding {
+  ruleId: string;
+  name: string;
+  severity: string;
+  count: number;
+}
+
+export interface RuntimeStaticScanEvidence {
+  status: 'scanned' | 'not_run';
+  filesScanned: number;
+  findings: RuntimeStaticScanFinding[];
+}
+
+/**
+ * Bundle rules that only make sense inside the Designer panel (its host
+ * iframe, canvas and Designer API) or that fire on every legitimate
+ * published-site script. Everything else in the default ruleset runs.
+ */
+export const STATIC_SCAN_EXCLUDED_RULES: Readonly<Record<string, string>> = {
+  'SEC-NO-HOST-DOM': 'Designer panel host-iframe access (parent.document, frameElement)',
+  'IFRAME-EXTERNAL-SRC': 'Designer panel iframe embedding policy',
+  'IFRAME-SANDBOX': 'Designer panel iframe embedding policy',
+  'IFRAME-MESSAGING': 'Designer panel iframe messaging policy',
+  'UX-NO-SILENT-MUTATIONS': 'Designer canvas MutationObserver policy',
+  'UX-NO-POPUPS': 'Designer panel popup policy',
+  'UX-NO-MUTATION-ON-LOAD': 'Designer API write calls on load',
+  'API-ELEMENT-TYPE-DISCRIMINATOR': 'Designer API element typing',
+  'UX-NO-KEYBOARD-SHORTCUTS': 'Designer panel keyboard shortcut policy',
+  'NET-EXTERNAL-EGRESS': 'Informational: every fetch/XHR, which a published runtime makes by design'
+};
+const STATIC_SCAN_MAX_FILE_CHARS = 2 * 1024 * 1024;
+const STATIC_SCAN_MAX_FINDINGS = 40;
+
+/**
+ * Advisory static scan of the served runtime bytes with the bundle ruleset.
+ * Rule-level counts only: no snippet, token, path, line or file content
+ * leaves this function. Any failure reads as `not_run`.
+ */
+export function scanRuntimeSources(sources: ReadonlyMap<string, string>): RuntimeStaticScanEvidence {
+  try {
+    const files: FileEntry[] = [...sources.values()]
+      .filter((content) => content.length > 0 && content.length <= STATIC_SCAN_MAX_FILE_CHARS)
+      .map((content, index) => ({
+        path: `runtime-file-${index + 1}.js`,
+        sizeBytes: content.length,
+        ext: '.js',
+        isTextCandidate: true,
+        content,
+        tags: [],
+        isIgnored: false
+      }));
+    if (files.length === 0) return { status: 'not_run', filesScanned: 0, findings: [] };
+    const ruleset = {
+      ...defaultRuleset,
+      rules: defaultRuleset.rules.filter((rule) => !(rule.ruleId in STATIC_SCAN_EXCLUDED_RULES))
+    };
+    const rules = new Map(ruleset.rules.map((rule) => [rule.ruleId, rule]));
+    const counts = new Map<string, RuntimeStaticScanFinding>();
+    for (const finding of runScan(files, ruleset, defaultConfig, () => undefined)) {
+      // A match inside a comment never executes.
+      if (finding.locationType === 'COMMENT' || finding.locationType === 'DOC') continue;
+      const rule = rules.get(finding.ruleId);
+      if (!rule) continue;
+      const severity = String(finding.severity ?? rule.severity);
+      const key = `${finding.ruleId}|${severity}`;
+      const entry = counts.get(key) ?? {
+        ruleId: finding.ruleId,
+        name: rule.name,
+        severity,
+        count: 0
+      };
+      entry.count += 1;
+      counts.set(key, entry);
+    }
+    const findings = [...counts.values()]
+      .sort((a, b) => b.count - a.count || a.ruleId.localeCompare(b.ruleId))
+      .slice(0, STATIC_SCAN_MAX_FINDINGS);
+    return { status: 'scanned', filesScanned: files.length, findings };
+  } catch {
+    return { status: 'not_run', filesScanned: 0, findings: [] };
+  }
+}
+
 interface CaptureResult {
   status: 'complete' | 'failed';
   manifest: Record<string, unknown>;
@@ -640,9 +1138,11 @@ interface CaptureResult {
   cleanupStatus: 'clean' | 'residue_detected' | 'not_tested';
   negativeProxyOutcome: 'blocked' | 'exposed' | 'error' | 'not_applicable';
   failureReason?: string;
+  /** The served runtime bytes (as text) the observation hashed; never serialized. */
+  servedSources?: Map<string, string>;
 }
 
-async function capture(
+async function captureObservation(
   contract: RuntimeObservationJobContract,
   browser: Browser
 ): Promise<CaptureResult> {
@@ -694,91 +1194,18 @@ async function capture(
     } as typeof Document.prototype.createElement;
   });
   let cdp: CDPSession | null = null;
+  const servedSources = new Map<string, string>();
   const requestBoundaryScripts = new Map<string, BrowserState['scripts'][number]>();
   const observedRuntimeArtifactRequests = new Set<string>();
-  let requestCount = 0;
-  let platformRequestCount = 0;
-  // One decision for every request and every redirect hop: on the allowlist,
-  // and within its budget. Off-allowlist requests never consume the budget,
-  // otherwise adversarial noise could exhaust maxRequests and starve the
-  // pinned runtime request (a false "Declared runtime did not load" blocker).
-  // Platform asset hosts are read-only, never budgeted, and capped on their
-  // own so a site's CSS, images and webflow.js cannot starve the runtime
-  // request either.
-  const admit = (
-    target: URL,
-    method: string,
-    resourceType: string,
-    redirectedFrom?: string
-  ): boolean => {
-    const host = target.hostname.toLowerCase();
-    let permitted = ['http:', 'https:'].includes(target.protocol) && allowedHosts.has(host);
-    if (permitted) {
-      permitted = platformHosts.has(host)
-        ? PLATFORM_ASSET_METHODS.has(method) &&
-          (platformRequestCount += 1) <= MAX_PLATFORM_ASSET_REQUESTS
-        : (requestCount += 1) <= contract.controls.maxRequests;
-    }
-    recordNetwork({
-      phase: 'request',
-      url: sanitizeUrl(target.toString()),
-      method,
-      resourceType,
-      blocked: !permitted,
-      ...(redirectedFrom ? { redirectedFrom } : {})
-    });
-    return permitted;
-  };
-  // Chromium follows redirects before a route handler can see the hop, so a
-  // permitted host could bounce the browser to an off-allowlist one (loopback
-  // and metadata addresses included). Every admitted request is therefore
-  // fetched from the runner one hop at a time, each Location vetted exactly
-  // like a fresh request, and only the final response reaches the browser.
-  const MAX_REDIRECT_HOPS = 10;
-  const fulfillWithinAllowlist = async (route: Route, first: URL): Promise<void> => {
-    const request = route.request();
-    try {
-      let response = await route.fetch({
-        maxRedirects: 0,
-        timeout: contract.controls.requestTimeoutMs
-      });
-      let current = first;
-      let method = request.method();
-      for (let hop = 0; hop <= MAX_REDIRECT_HOPS; hop += 1) {
-        const status = response.status();
-        const location = response.headers()['location'];
-        if (!(status >= 300 && status < 400 && location)) break;
-        if (hop === MAX_REDIRECT_HOPS) {
-          await route.abort('blockedbyclient');
-          return;
-        }
-        let next: URL;
-        try {
-          next = new URL(location, current);
-        } catch {
-          await route.abort('blockedbyclient');
-          return;
-        }
-        // 307/308 keep the method and body; every other redirect becomes GET.
-        const keepMethod = status === 307 || status === 308;
-        method = keepMethod ? method : 'GET';
-        if (!admit(next, method, request.resourceType(), sanitizeUrl(current.toString()))) {
-          await route.abort('blockedbyclient');
-          return;
-        }
-        response = await context.request.fetch(next.toString(), {
-          method,
-          maxRedirects: 0,
-          timeout: contract.controls.requestTimeoutMs,
-          ...(keepMethod && request.postDataBuffer() ? { data: request.postDataBuffer()! } : {})
-        });
-        current = next;
-      }
-      await route.fulfill({ response });
-    } catch {
-      await route.abort('failed').catch(() => undefined);
-    }
-  };
+  const { admit, fulfillWithinAllowlist } = createEgressGuard({
+    context,
+    allowedHosts,
+    platformHosts,
+    maxRequests: contract.controls.maxRequests,
+    maxPlatformRequests: MAX_PLATFORM_ASSET_REQUESTS,
+    requestTimeoutMs: contract.controls.requestTimeoutMs,
+    record: recordNetwork
+  });
   await context.route('**/*', async (route) => {
     const request = route.request();
     let url: URL;
@@ -1006,7 +1433,8 @@ async function capture(
           partnerHosts,
           [...requestBoundaryScripts.values()],
           trustedExecution.executedDigestsByUrl,
-          trustedExecution.trustedRuntimeInitiatedUrls
+          trustedExecution.trustedRuntimeInitiatedUrls,
+          servedSources
         )
       )
     );
@@ -1114,7 +1542,14 @@ async function capture(
         sha256: artifact.sha256
       }))
     };
-    return { status: 'complete', manifest, artifacts, cleanupStatus, negativeProxyOutcome };
+    return {
+      status: 'complete',
+      manifest,
+      artifacts,
+      cleanupStatus,
+      negativeProxyOutcome,
+      servedSources
+    };
   };
 
   let budgetTimer: ReturnType<typeof setTimeout> | undefined;
@@ -1178,6 +1613,31 @@ async function capture(
     if (budgetTimer) clearTimeout(budgetTimer);
     await context.close();
   }
+}
+
+async function capture(
+  contract: RuntimeObservationJobContract,
+  browser: Browser,
+  replayTimeoutMs: number
+): Promise<CaptureResult> {
+  const result = await captureObservation(contract, browser);
+  if (result.status !== 'complete') return result;
+  // Advisory static scan of the bytes the observation just hashed. It only
+  // adds `runtimeStaticScan`; no security field reads it.
+  result.manifest.runtimeStaticScan = scanRuntimeSources(result.servedSources ?? new Map());
+  delete result.servedSources;
+  // Advisory replay under a strict CSP, after the observation is final. It has
+  // its own time limit and request budget and can only add `cspReplay`; it
+  // never changes any field the Worker's security evaluation reads.
+  const platformHosts = new Set(contract.controls.platformAssetHosts ?? []);
+  const allowedHosts = new Set([...contract.controls.allowedHosts, ...platformHosts]);
+  result.manifest.cspReplay = await runCspReplay(
+    contract,
+    browser,
+    { allowedHosts, platformHosts },
+    replayTimeoutMs
+  );
+  return result;
 }
 
 async function fetchJob(
@@ -1256,7 +1716,11 @@ export async function runRuntimeObservation(
   try {
     // capture() owns the total-runtime budget internally so that a timeout still
     // yields a partial-evidence 'failed' result rather than an orphaned run.
-    const result = await capture(contract, browser);
+    const result = await capture(
+      contract,
+      browser,
+      Math.min(input.cspReplayTimeoutMs ?? CSP_REPLAY_TIMEOUT_MS, CSP_REPLAY_TIMEOUT_MS)
+    );
     if (input.outputDir) {
       await mkdir(input.outputDir, { recursive: true });
       result.manifest.observationJobId = input.observationJobId;
