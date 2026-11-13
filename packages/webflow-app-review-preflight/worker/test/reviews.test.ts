@@ -5602,6 +5602,7 @@ describe("creator CLI runtime packages", () => {
       WEBFLOW_APP_ACCESS_TOKEN: "app-token",
       PREFLIGHT_OAUTH_BEARER_ENABLED: "true",
       PREFLIGHT_OAUTH_CLIENT_IDS: "cli-app",
+      PREFLIGHT_OAUTH_ALLOWED_USER_IDS: "cli-user",
     }) as Env;
 
   // Webflow as the creator CLI sees it: the bearer is not a Designer ID token,
@@ -5627,6 +5628,8 @@ describe("creator CLI runtime packages", () => {
           return Response.json({
             application: { id: "cli-app" },
             authorization: {
+              // Webflow issued the token one minute ago.
+              createdOn: new Date(Date.now() - 60_000).toISOString(),
               authorizedTo: { workspaceIds: ["ws-1"], siteIds: [] },
             },
           });

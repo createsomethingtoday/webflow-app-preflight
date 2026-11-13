@@ -391,10 +391,13 @@ A boot test result with an unreadable host, path, or message is still stored. Th
 
 The creator CLI (`wf-app-validate runtime`) can prepare and run the same Runtime Test Package without the Designer. The server still creates the sandbox and the evidence.
 
-The CLI path is off until an operator sets both switches on the Worker:
+The CLI path is off until an operator sets all three values on the Worker:
 
 - `PREFLIGHT_OAUTH_BEARER_ENABLED` is `true`.
 - `PREFLIGHT_OAUTH_CLIENT_IDS` lists the OAuth application ID of the sign-in app. This is the `application.id` that `GET /v2/token/introspect` returns. It is not the 64-character client ID, and it is not the App ID on the App Summary page. Set it as a Worker secret.
+- `PREFLIGHT_OAUTH_ALLOWED_USER_IDS` lists the Webflow user IDs that can use the CLI path. With no value, no user can. Use a list of user IDs for a pilot. The single value `*` opens the path to every Webflow user; set it only after the Security and Enterprise AI Ops review.
+
+A CLI token works for 24 hours after Webflow issued it. Webflow access tokens do not expire, so the Worker reads the issue time (`authorization.createdOn` of `GET /v2/token/introspect`) and refuses an older token with 401. The developer signs in again. `PREFLIGHT_OAUTH_TOKEN_MAX_AGE_SECONDS` changes the limit; keep it equal to the limit of the submission form.
 
 One rule is different for the CLI:
 

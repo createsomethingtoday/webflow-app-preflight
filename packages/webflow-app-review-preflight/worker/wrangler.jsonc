@@ -9,7 +9,8 @@
     "ENVIRONMENT": "development",
     "ALLOWED_ORIGINS": "http://localhost:1337,http://localhost:5173",
     "PREFLIGHT_OAUTH_BEARER_ENABLED": "false",
-    "PREFLIGHT_OAUTH_CLIENT_IDS": ""
+    "PREFLIGHT_OAUTH_CLIENT_IDS": "",
+    "PREFLIGHT_OAUTH_ALLOWED_USER_IDS": ""
   },
   "d1_databases": [
     {

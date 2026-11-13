@@ -27,6 +27,13 @@
   //                               secret, never in `vars`: a var and a secret
   //                               with one name stop the deploy. Missing or
   //                               empty keeps the CLI path closed.
+  // The CLI path has one more gate, a plain var (not in this file; a deploy
+  // must carry it from the live settings):
+  //   - PREFLIGHT_OAUTH_ALLOWED_USER_IDS comma-separated Webflow user IDs
+  //                               that may use the CLI path. Missing or empty
+  //                               allows no user. The single value `*` allows
+  //                               every Webflow user; set it only after the
+  //                               Security and Enterprise AI Ops review.
   // NEVER bind PREFLIGHT_DEV_TOKEN or PREFLIGHT_REVIEWER_DEV_TOKEN here: the
   // Worker refuses to serve when they are present alongside non-localhost
   // ALLOWED_ORIGINS.
