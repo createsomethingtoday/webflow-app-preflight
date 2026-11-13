@@ -382,7 +382,7 @@ The creator CLI (`wf-app-validate runtime`) can prepare and run the same Runtime
 The CLI path is off until an operator sets both switches on the Worker:
 
 - `PREFLIGHT_OAUTH_BEARER_ENABLED` is `true`.
-- `PREFLIGHT_OAUTH_CLIENT_IDS` lists the application ID of the sign-in app.
+- `PREFLIGHT_OAUTH_CLIENT_IDS` lists the OAuth application ID of the sign-in app. This is the `application.id` that `GET /v2/token/introspect` returns. It is not the 64-character client ID, and it is not the App ID on the App Summary page. Set it as a Worker secret.
 
 One rule is different for the CLI:
 
