@@ -364,6 +364,10 @@ operator:
 notes:
 ```
 
+### Receipt client binding
+
+The submission form can bind a receipt to the app's client ID by sending `clientId` (64 hex characters) with `bind: true` to `POST /v1/submission-receipts/verify`. The first valid bind sticks. A later request with a different client ID gets `clientIdConflict: true`, and the binding does not change. The bound client ID is never returned. To release a wrong binding, an operator clears `bound_client_id` for that receipt in D1. The full contract is in the package README.
+
 ## Performance content lint
 
 ### Reader outcome

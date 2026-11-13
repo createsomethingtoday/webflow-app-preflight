@@ -135,6 +135,45 @@ webflow-app-review-runtime --api-base "$apiBaseUrl" --job "$observationJobId"
 
 `E2B_API_KEY` is a production secret; the immutable build reference is reviewed configuration. If either is absent, mutable, unreachable, or the template rejects the job, the Worker marks that job failed and returns only a safe launch-stage error. A partially created sandbox is deleted immediately, with its 15-minute TTL as the final cleanup boundary. The service never presents a failed launch as Webflow-observed evidence. A result remains evidence only and cannot approve, reject, or update governance policy.
 
+## Submission receipt verify contract
+
+`POST /v1/submission-receipts/verify` is unauthenticated: the receipt code (`wfpre_` plus 32 hex characters) is the secret. Request body:
+
+```json
+{ "code": "wfpre_...", "clientId": "<64 hex characters>", "bind": true }
+```
+
+- `clientId` and `bind` are optional. `clientId` is honoured only as a 64-character hex string (any case, stored lowercase); anything else is treated as absent.
+- When `bind` is exactly `true`, a valid `clientId` is present, and the receipt has no bound client ID, the call binds it with one conditional `UPDATE` and re-reads the row, so concurrent first calls leave exactly one winner. A bound client ID is never changed or returned.
+- Unknown, malformed, or dangling codes return `404 {"valid":false}`; a malformed body returns `400`.
+
+Success (`200`) returns reconciliation metadata only, with no findings, evidence, artifact bytes, or bound client ID:
+
+```json
+{
+  "valid": true,
+  "receipt": {
+    "reviewId": "...",
+    "appName": "Name from webflow.json, or null",
+    "bundleSha256": "...",
+    "sourceMapArtifactSha256": null,
+    "readiness": "ready | needs_review | changes_required",
+    "sourceMapStatus": "matched",
+    "runtimeSecurityStatus": "passed | blocked | none",
+    "installUrl": null,
+    "createdAt": "...",
+    "sourceMapsInBundle": false,
+    "clientIdBound": true,
+    "clientIdConflict": false
+  }
+}
+```
+
+- `appName` is the `name` field of the bundle manifest (`webflow.json`), so it is the name the manifest carries. It is `null` when the manifest is missing, unparseable, or has no string `name`.
+- `sourceMapsInBundle` is `true` when the production bundle ZIP itself contains `.map` files (read from the stored review's `sourceMapSummary.exposedSourceMapFiles`; reviews stored without it read as `false`). The review guidance tells the developer to move the maps into the private review ZIP. The flag is informational and never changes `readiness`.
+- `clientIdBound` is `true` when a client ID is bound to the receipt after this call. `clientIdConflict` is `true` when the receipt is bound to a different client ID than the one in this request; a request without a valid `clientId` always reports `false`.
+- A receipt is a reference, not an approval; the reviewer replay remains the verification.
+
 ## Security boundaries
 
 - Zip uploads are limited to 10 MB, 50 MB uncompressed, and 2,000 files, and must pass deterministic archive processing before D1 writes.

@@ -180,14 +180,20 @@ async function handle(request: Request, env: Env): Promise<Response> {
   // reconciliation metadata only — never findings or artifact contents.
   if (url.pathname === '/v1/submission-receipts/verify' && request.method === 'POST') {
     let code: unknown;
+    let clientId: unknown;
+    let bind: unknown;
     try {
       const text = await request.text();
       if (!text || text.length > 4 * 1024) throw new Error();
-      code = (JSON.parse(text) as { code?: unknown }).code;
+      ({ code, clientId, bind } = JSON.parse(text) as {
+        code?: unknown;
+        clientId?: unknown;
+        bind?: unknown;
+      });
     } catch {
       return json({ valid: false, error: 'invalid_request' }, 400, origin);
     }
-    const receipt = await verifySubmissionReceipt(env, code);
+    const receipt = await verifySubmissionReceipt(env, code, { clientId, bind });
     return receipt
       ? json({ valid: true, receipt }, 200, origin)
       : json({ valid: false }, 404, origin);

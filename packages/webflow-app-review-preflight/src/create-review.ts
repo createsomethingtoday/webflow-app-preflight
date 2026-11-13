@@ -513,7 +513,7 @@ export function sourceMapExposureGuidance(summary: SourceMapSummary): ReviewGuid
     title: 'Source maps are shipped inside the public bundle',
     explanation: `This bundle ships ${exposedCount} source map${exposedCount === 1 ? '' : 's'} in the public artifact. Source maps expose readable source to anyone who loads the extension. The Marketplace submission form takes source maps as a separate private upload; they must not be part of the bundle that ships to customers.`,
     nextMove:
-      'Remove the .map files (and any inline data: maps) from the public bundle, rebuild, and upload the maps as the private source-map artifact next to this bundle and on the submission form.',
+      'Move the .map files (and any inline data: maps) out of the production bundle ZIP and into the private review ZIP: rebuild without them, then upload the maps as the private source-map artifact next to this bundle and on the submission form.',
     severity: 'HIGH',
     confidence: 'HIGH',
     evidence

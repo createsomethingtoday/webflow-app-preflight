@@ -29,10 +29,32 @@ export interface SubmissionReceiptVerification {
   runtimeSecurityStatus: 'passed' | 'blocked' | 'none';
   installUrl: InstallUrlCheckSummary | null;
   createdAt: string;
+  /**
+   * Source `.map` files ship inside the production bundle ZIP (not the private
+   * review artifact). Guidance only: never changes `readiness`. Reviews stored
+   * before the scanner recorded exposed maps read as `false`.
+   */
+  sourceMapsInBundle: boolean;
+  /** A client ID is bound to this receipt after this call. */
+  clientIdBound: boolean;
+  /** The receipt is bound to a different client ID than the one in this request. */
+  clientIdConflict: boolean;
+}
+
+export interface SubmissionReceiptVerifyOptions {
+  /** Client ID from the request body; only a 64-character hex string is honoured. */
+  clientId?: unknown;
+  /** Bind `clientId` to the receipt when it has none yet. Only `true` binds. */
+  bind?: unknown;
 }
 
 const RECEIPT_PREFIX = 'wfpre_';
 const RECEIPT_PATTERN = /^wfpre_[a-f0-9]{32}$/;
+const CLIENT_ID_PATTERN = /^[a-f0-9]{64}$/i;
+
+function normalizeClientId(value: unknown): string | null {
+  return typeof value === 'string' && CLIENT_ID_PATTERN.test(value) ? value.toLowerCase() : null;
+}
 
 function toHex(bytes: ArrayBuffer | Uint8Array): string {
   const view = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
@@ -112,14 +134,15 @@ export async function reissueSubmissionReceipt(
  */
 export async function verifySubmissionReceipt(
   env: Env,
-  code: unknown
+  code: unknown,
+  options: SubmissionReceiptVerifyOptions = {}
 ): Promise<SubmissionReceiptVerification | null> {
   if (typeof code !== 'string') return null;
   const normalized = code.trim().toLowerCase();
   if (!RECEIPT_PATTERN.test(normalized)) return null;
 
   const row = await env.DB.prepare(
-    `SELECT sr.review_id, sr.review_version_id, sr.created_at,
+    `SELECT sr.id, sr.review_id, sr.review_version_id, sr.created_at, sr.bound_client_id,
             v.review_json, v.source_map_sha256
        FROM submission_receipts sr
        JOIN review_versions v ON v.id = sr.review_version_id
@@ -127,15 +150,36 @@ export async function verifySubmissionReceipt(
   )
     .bind(await sha256Hex(normalized))
     .first<{
+      id: string;
       review_id: string;
       review_version_id: string;
       created_at: string;
+      bound_client_id: string | null;
       review_json: string;
       source_map_sha256: string | null;
     }>();
   if (!row) return null;
 
   const result = JSON.parse(row.review_json) as BundleReview;
+
+  // Client ID binding. One conditional UPDATE decides a race (the loser
+  // matches zero rows), then the row is re-read so the answer reflects the
+  // winner. The bound value itself is never returned.
+  const clientId = normalizeClientId(options.clientId);
+  let boundClientId = row.bound_client_id;
+  if (options.bind === true && clientId && boundClientId === null) {
+    await env.DB.prepare(
+      `UPDATE submission_receipts SET bound_client_id = ? WHERE id = ? AND bound_client_id IS NULL`
+    )
+      .bind(clientId, row.id)
+      .run();
+    const reread = await env.DB.prepare(
+      `SELECT bound_client_id FROM submission_receipts WHERE id = ?`
+    )
+      .bind(row.id)
+      .first<{ bound_client_id: string | null }>();
+    boundClientId = reread?.bound_client_id ?? null;
+  }
 
   // Latest server-owned runtime evidence for this exact version, if any.
   // The security evaluation was computed server-side when the evidence was
@@ -177,6 +221,9 @@ export async function verifySubmissionReceipt(
     sourceMapStatus: result.sourceMapSummary?.status ?? 'not_applicable',
     runtimeSecurityStatus,
     installUrl: await installUrlCheckSummaryForVersion(row.review_version_id, env),
-    createdAt: row.created_at
+    createdAt: row.created_at,
+    sourceMapsInBundle: (result.sourceMapSummary?.exposedSourceMapFiles?.length ?? 0) > 0,
+    clientIdBound: boundClientId !== null,
+    clientIdConflict: boundClientId !== null && clientId !== null && boundClientId !== clientId
   };
 }
