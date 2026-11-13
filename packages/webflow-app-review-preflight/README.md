@@ -164,7 +164,9 @@ Success (`200`) returns reconciliation metadata only, with no findings, evidence
     "createdAt": "...",
     "sourceMapsInBundle": false,
     "clientIdBound": true,
-    "clientIdConflict": false
+    "clientIdConflict": false,
+    "runtimeAdvisory": { "observationRan": false, "cspReplay": "not_run", "staticFindingCount": 0, "mutableRuntimeUrlCount": 0 },
+    "bootTest": "not_run"
   }
 }
 ```
@@ -172,6 +174,7 @@ Success (`200`) returns reconciliation metadata only, with no findings, evidence
 - `appName` is the `name` field of the bundle manifest (`webflow.json`), so it is the name the manifest carries. It is `null` when the manifest is missing, unparseable, or has no string `name`.
 - `sourceMapsInBundle` is `true` when the production bundle ZIP itself contains `.map` files (read from the stored review's `sourceMapSummary.exposedSourceMapFiles`; reviews stored without it read as `false`). The review guidance tells the developer to move the maps into the private review ZIP. The flag is informational and never changes `readiness`.
 - `clientIdBound` is `true` when a client ID is bound to the receipt after this call. `clientIdConflict` is `true` when the receipt is bound to a different client ID than the one in this request; a request without a valid `clientId` always reports `false`.
+- `runtimeAdvisory` summarizes the advisory published-site checks for this version: whether an observation ran, the strict-CSP replay status (`clean`, `violations`, `not_run`), the total of static-scan matches, and the count of declared runtime URLs with no version or content hash. It is `null` only when the summary could not be read. `bootTest` is the status of the latest Designer Extension boot test (`passed`, `failed`, `error`, `not_run`). Both are advisory and never change `readiness`.
 - A receipt is a reference, not an approval; the reviewer replay remains the verification.
 
 ## Designer Extension boot test

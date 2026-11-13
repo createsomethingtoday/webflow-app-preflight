@@ -1,5 +1,7 @@
 import type { BundleReview } from '@create-something/webflow-app-review-preflight';
+import { bootTestSummaryForVersion } from './boot-tests';
 import { installUrlCheckSummaryForVersion, type InstallUrlCheckSummary } from './install-url-checks';
+import { runtimeAdvisoryForVersion, type RuntimeAdvisory } from './runtime-advisory';
 import type { AuthenticatedUser, Env } from './types';
 
 /**
@@ -39,6 +41,17 @@ export interface SubmissionReceiptVerification {
   clientIdBound: boolean;
   /** The receipt is bound to a different client ID than the one in this request. */
   clientIdConflict: boolean;
+  /**
+   * Advisory summary of the published-site runtime checks for this version
+   * (strict-CSP replay, static scan counts, mutable runtime URLs). Never a
+   * gate. `null` when the summary could not be read.
+   */
+  runtimeAdvisory: RuntimeAdvisory | null;
+  /**
+   * Advisory status of the latest Designer Extension boot test for this
+   * version. `not_run` when no test finished or the feature is off.
+   */
+  bootTest: 'passed' | 'failed' | 'error' | 'not_run';
 }
 
 export interface SubmissionReceiptVerifyOptions {
@@ -212,6 +225,21 @@ export async function verifySubmissionReceipt(
     }
   }
 
+  // Advisory summaries. A failure to read one must never fail receipt
+  // verification, so each read degrades on its own.
+  let runtimeAdvisory: RuntimeAdvisory | null = null;
+  try {
+    runtimeAdvisory = await runtimeAdvisoryForVersion(row.review_version_id, env);
+  } catch {
+    runtimeAdvisory = null;
+  }
+  let bootTest: SubmissionReceiptVerification['bootTest'] = 'not_run';
+  try {
+    bootTest = (await bootTestSummaryForVersion(row.review_version_id, env)).status;
+  } catch {
+    bootTest = 'not_run';
+  }
+
   return {
     reviewId: row.review_id,
     appName: result.artifactScope.appName,
@@ -224,6 +252,8 @@ export async function verifySubmissionReceipt(
     createdAt: row.created_at,
     sourceMapsInBundle: (result.sourceMapSummary?.exposedSourceMapFiles?.length ?? 0) > 0,
     clientIdBound: boundClientId !== null,
-    clientIdConflict: boundClientId !== null && clientId !== null && boundClientId !== clientId
+    clientIdConflict: boundClientId !== null && clientId !== null && boundClientId !== clientId,
+    runtimeAdvisory,
+    bootTest
   };
 }

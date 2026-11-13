@@ -1216,6 +1216,7 @@ describe('review API', () => {
     expect(verified.receipt.readiness).toBe('changes_required');
     expect(Object.keys(verified.receipt).sort()).toEqual([
       'appName',
+      'bootTest',
       'bundleSha256',
       'clientIdBound',
       'clientIdConflict',
@@ -1223,11 +1224,15 @@ describe('review API', () => {
       'installUrl',
       'readiness',
       'reviewId',
+      'runtimeAdvisory',
       'runtimeSecurityStatus',
       'sourceMapArtifactSha256',
       'sourceMapStatus',
       'sourceMapsInBundle'
     ]);
+    // No runtime observation and no boot test ran for this version.
+    expect(verified.receipt.bootTest).toBe('not_run');
+    expect(verified.receipt.runtimeAdvisory).toMatchObject({ cspReplay: 'not_run', staticFindingCount: 0 });
   });
 
   test('stamps a preflight run with a submission receipt the form can trace', async () => {
