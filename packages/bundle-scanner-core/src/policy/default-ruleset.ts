@@ -6,7 +6,7 @@ import type { Ruleset } from '../types';
  * This ruleset covers security, network, privacy, and UX concerns
  * for Webflow App bundles submitted to the Marketplace.
  *
- * Version: 1.7.0-docs-aligned-2026-10-07
+ * Version: 1.9.0-docs-aligned-2026-10-07
  *
  * Invariant (enforced by test): a rule is in the AUTO_REJECT bucket if and
  * only if its severity is BLOCKER. The developer-facing label is derived from
@@ -34,10 +34,16 @@ import type { Ruleset } from '../types';
  * variable; event.origin read anywhere in the handler; http:// literal
  * flowing into a request) and moves the finding to HIGH or LOW with a
  * recorded reason. Unparseable files keep the regex result.
+ *
+ * Reviewer-practice patterns (1.9.0): patterns reviewers raise that are not a
+ * published MUST on their own carry confidence MEDIUM on a MUST rule. That is
+ * a Manual review (readiness `needs_review`) and can never reach
+ * `changes_required`. They are deliberately absent from AST_RAISING_MATCHERS
+ * in scanner/ast-confirm.ts, so the syntax tree cannot raise them to HIGH.
  */
 export const defaultRuleset: Ruleset = {
   schemaVersion: 'wf-marketplace-scanner-ruleset@1.0.0',
-  rulesetVersion: '1.7.0-docs-aligned-2026-10-07',
+  rulesetVersion: '1.9.0-docs-aligned-2026-10-07',
   generatedAt: '2026-01-16T14:00:00Z',
   rules: [
     // ========================================================================
@@ -256,6 +262,23 @@ export const defaultRuleset: Ruleset = {
           confidence: 'MEDIUM'
         },
         {
+          id: 'storage-set-credential-name',
+          type: 'regex',
+          // Credential names the token matcher above does not cover: a quoted
+          // password key, or an identifier used as the key whose name says
+          // api key / license key / secret / password (STORAGE_API_KEY,
+          // licenseKey). Quoted api/license/secret keys already match
+          // `storage-set-token` (its `key|secret` terms), so they are not
+          // repeated here and one call yields one finding.
+          pattern:
+            '(?:localStorage|sessionStorage)\\.setItem\\s*\\(\\s*(?:[\'"`][^\'"`]*(?:password|passwd)[^\'"`]*[\'"`]|(?![\'"`])[\\w$.]*(?:api_?key|license_?key|secret|password|passwd)[\\w$.]*\\s*,)',
+          flags: 'gi',
+          fileGlobs: ['**/*.{js,ts,jsx,tsx,mjs,cjs}'],
+          triggerTokens: ['setItem'],
+          confidence: 'MEDIUM',
+          notes: 'Reviewer practice: credentials do not belong in web storage. Confirm the stored value is a credential.'
+        },
+        {
           id: 'jwt-literal',
           type: 'regex',
           pattern: '\\beyJ[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\b',
@@ -358,6 +381,33 @@ export const defaultRuleset: Ruleset = {
           fileGlobs: ['**/*.{js,ts,jsx,tsx,mjs,cjs}'],
           triggerTokens: ['top.location', 'parent.location'],
           confidence: 'HIGH'
+        },
+        {
+          id: 'top-target-markup',
+          type: 'regex',
+          // <a> or <form> carrying target="_top" / "_parent", in HTML, JSX, or
+          // a markup string (escaped quotes allowed), plus the compiled forms
+          // createElement("a", {target: "_top"}) and jsx("form", {...}).
+          pattern:
+            '<(?:form|a)\\b(?:[^<>{}]|\\{[^{}]*\\})*?\\btarget\\s*=\\s*\\\\?[\'"]?_(?:top|parent)\\b|\\b(?:createElement|jsxs?|jsxDEV)\\(\\s*[\'"](?:a|form)[\'"]\\s*,\\s*\\{[^{}]*\\btarget\\s*:\\s*[\'"]_(?:top|parent)[\'"]',
+          flags: 'gi',
+          fileGlobs: ['**/*.{js,ts,jsx,tsx,html,mjs,cjs}'],
+          triggerTokens: ['_top', '_parent'],
+          confidence: 'MEDIUM',
+          notes: 'Reviewer practice: markup that navigates the top frame. Confirm the destination and that a user action triggers it.'
+        },
+        {
+          id: 'top-target-assignment',
+          type: 'regex',
+          // el.target = "_top", el.formTarget = "_parent", { formTarget: "_top" },
+          // setAttribute("target" | "formtarget", "_top").
+          pattern:
+            '\\.(?:formTarget|target)\\s*=(?!=)\\s*[\'"`]_(?:top|parent)[\'"`]|\\bformTarget\\s*:\\s*[\'"`]_(?:top|parent)[\'"`]|setAttribute\\s*\\(\\s*[\'"`](?:form)?target[\'"`]\\s*,\\s*[\'"`]_(?:top|parent)[\'"`]',
+          flags: 'gi',
+          fileGlobs: ['**/*.{js,ts,jsx,tsx,mjs,cjs}'],
+          triggerTokens: ['_top', '_parent'],
+          confidence: 'MEDIUM',
+          notes: 'Reviewer practice: assignment that navigates the top frame. Confirm the destination and that a user action triggers it.'
         }
       ]
     },
@@ -425,6 +475,32 @@ export const defaultRuleset: Ruleset = {
             'http://localhost',
             'http://www.google.com'
           ]
+        }
+      ]
+    },
+
+    {
+      ruleId: 'NET-GLOBAL-AUTH-DEFAULT',
+      name: 'Global Authorization Default',
+      category: 'NETWORK',
+      reviewBucket: 'ACTION_REQUIRED',
+      severity: 'HIGH',
+      disposition: 'ACTION_REQUIRED',
+      description:
+        'An Authorization header set as a default on a shared HTTP client is sent to every host that client calls. Attach credentials per request, only to the endpoint that needs them.',
+      matchers: [
+        {
+          id: 'client-default-authorization',
+          type: 'regex',
+          // axios-style defaults: <client>.defaults.headers[.common|.get|...].Authorization = ...
+          // or ['Authorization'] = ... . Any client variable name matches, so a
+          // minified `e.defaults.headers.common.Authorization=` is found.
+          pattern: '\\.defaults\\.headers(?:\\.(?:common|get|post|put|patch|delete|head))?(?:\\.Authorization\\b|\\[\\s*[\'"`]Authorization[\'"`]\\s*\\])\\s*=(?!=)',
+          flags: 'gi',
+          fileGlobs: ['**/*.{js,ts,jsx,tsx,mjs,cjs}'],
+          triggerTokens: ['defaults.headers'],
+          confidence: 'MEDIUM',
+          notes: 'Reviewer practice: confirm the client only ever calls the host that issued the token.'
         }
       ]
     },
@@ -613,6 +689,23 @@ export const defaultRuleset: Ruleset = {
           triggerTokens: ['window.open'],
           confidence: 'LOW',
           notes: 'Allowed only for user-initiated docs/auth with _blank.'
+        },
+        {
+          id: 'window-open-no-opener',
+          type: 'regex',
+          // window.open(url, "_blank") or (url, "_blank", "<features>") where
+          // the features string is absent or names neither noopener nor
+          // noreferrer. The URL argument may hold strings and one level of
+          // call parentheses. A features argument that is not a string
+          // literal (a variable) is not matched: it cannot be read here.
+          // <a target="_blank"> is not matched; browsers imply noopener there.
+          pattern:
+            '\\b(?:window|globalThis|self)\\.open\\s*\\(\\s*(?:[^(),\'"`]|\'[^\']*\'|"[^"]*"|`[^`]*`|\\([^()]*\\))+?\\s*,\\s*[\'"`]_blank[\'"`]\\s*(?:\\)|,\\s*([\'"`])(?:(?!noopener|noreferrer)[^\'"`])*\\1\\s*\\))',
+          flags: 'gi',
+          fileGlobs: ['**/*.{js,ts,jsx,tsx,mjs,cjs}'],
+          triggerTokens: ['window.open'],
+          confidence: 'MEDIUM',
+          notes: 'Reviewer practice: a new window opened without noopener/noreferrer can navigate its opener. Add "noopener,noreferrer" to the features argument.'
         }
       ]
     },
@@ -730,6 +823,21 @@ export const defaultRuleset: Ruleset = {
           fileGlobs: ['**/*.{js,ts,jsx,tsx,mjs,cjs}'],
           triggerTokens: ['bypass', 'skip'],
           confidence: 'MEDIUM'
+        },
+        {
+          id: 'debug-query-switch',
+          type: 'regex',
+          // A debug or test switch read from the page URL: URLSearchParams or
+          // a *Params object .get/.has with a specific key (debug, *_debug,
+          // debug_*, mimic, bypass), the same read through a variable (minified
+          // bundles rename it, so the variable is tied back to its
+          // URLSearchParams within 400 characters), or location.search.includes.
+          pattern: '(?:new\\s+URLSearchParams\\s*\\((?:[^()]|\\([^()]*\\))*\\)|[\\w$]*[pP]arams)\\s*\\.(?:get|has)\\s*\\(\\s*[\'"`](?:debug|[a-z0-9-]*_debug|debug_[a-z0-9_-]*|mimic|bypass)[\'"`]\\s*\\)|(?<![\\w$.])(?<v>[\\w$]+)\\s*=\\s*new\\s+URLSearchParams\\s*\\((?:[^()]|\\([^()]*\\))*\\)[\\s\\S]{0,400}?(?<![\\w$.])\\k<v>\\s*\\.(?:get|has)\\s*\\(\\s*[\'"`](?:debug|[a-z0-9-]*_debug|debug_[a-z0-9_-]*|mimic|bypass)[\'"`]\\s*\\)|\\blocation\\.search\\.(?:includes|indexOf)\\s*\\(\\s*[\'"`][?&]?(?:debug|[a-z0-9-]*_debug|debug_[a-z0-9_-]*|mimic|bypass)(?:=|[\'"`])',
+          flags: 'gi',
+          fileGlobs: ['**/*.{js,ts,jsx,tsx,mjs,cjs}'],
+          triggerTokens: ['URLSearchParams', 'location.search'],
+          confidence: 'MEDIUM',
+          notes: 'Reviewer practice: a URL switch that changes behavior in production is a development shortcut. Remove it or gate it behind real authorization.'
         }
       ]
     },

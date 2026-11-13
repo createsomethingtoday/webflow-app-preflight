@@ -102,7 +102,7 @@ const customRuleset: Ruleset = {
 
 | Export           | Description                                      |
 | ---------------- | ------------------------------------------------ |
-| `defaultRuleset` | 18 rules covering security, network, privacy, UX |
+| `defaultRuleset` | 30 rules covering security, network, privacy, UX |
 | `defaultConfig`  | Standard scanner configuration                   |
 
 ### Utility Functions

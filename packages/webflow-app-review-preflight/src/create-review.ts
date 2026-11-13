@@ -74,7 +74,11 @@ const NEXT_MOVES: Record<string, string> = {
   'SEC-NO-TOKEN-IN-URL':
     'Move the credential out of the URL: send it in an Authorization header or a protected request body, and change any GET route that carries it to POST.',
   'PROD-NO-DEBUG-RESIDUE':
-    'Remove the debug routes and bypass flags from the production build, rebuild the exact artifact you will ship, and rescan.',
+    'Remove the debug routes, bypass flags, and URL debug switches (?debug=, ?mimic=) from the production build, rebuild the exact artifact you will ship, and rescan.',
+  'NET-GLOBAL-AUTH-DEFAULT':
+    'Stop setting Authorization as a default on a shared HTTP client. Pass the header per request, only on calls to the host that issued the token.',
+  'UX-NO-POPUPS':
+    'Open new windows only from a user action, and pass "noopener,noreferrer" as the window.open features argument.',
   'UX-NO-MUTATION-ON-LOAD':
     'Tie site-mutating Designer API calls to a deliberate user action (a button, not extension mount). If they already are, say so in your review notes so the reviewer can verify quickly.',
   'API-ELEMENT-TYPE-DISCRIMINATOR':
