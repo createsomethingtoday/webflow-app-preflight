@@ -5,7 +5,13 @@ export {
   HostedRuntimeReviewInputError
 } from './hosted-runtime-review';
 export type { HostedRuntimeReviewArtifact } from './hosted-runtime-review';
-export { discoverRuntimeReferences } from './runtime-references';
+export {
+  classifyRuntimeUrlMutability,
+  discoverRuntimeReferences,
+  MUTABLE_RUNTIME_URL_GUIDANCE,
+  mutableRuntimeUrls
+} from './runtime-references';
+export type { RuntimeUrlMutability } from './runtime-references';
 export { WEBFLOW_PLATFORM_ASSET_HOSTS } from './platform-hosts';
 export {
   BOOT_TEST_FAILURES,
@@ -41,10 +47,14 @@ export type {
   ReviewGuidance,
   ReviewGuidanceLabel,
   RuntimeArtifactPin,
+  RuntimeCspReplay,
+  RuntimeCspReplayViolation,
   RuntimeEvidenceTrust,
   RuntimeLifecycleContract,
   RuntimeObservationJobContract,
   RuntimeObservationSummary,
+  RuntimeStaticScan,
+  RuntimeStaticScanFinding,
   RuntimeTestPackage,
   RuntimeTestPackageInput,
   RuntimeTestPackageView

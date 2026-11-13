@@ -1,6 +1,6 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, test, vi } from 'vitest';
-import { App, runtimeIssues, runtimeSecuritySummary } from './App';
+import { App, runtimeAdvisories, runtimeIssues, runtimeSecuritySummary } from './App';
 import { PreflightAuthenticationError } from './api';
 import type { InstallUrlCheck, PreflightApi, StoredReview, SubmissionReceipt } from './types';
 
@@ -1359,6 +1359,83 @@ describe('runtimeIssues proxy finding', () => {
     expect(issues.map((issue) => issue.title)).toContain(
       'Proxy check did not match the declaration'
     );
+  });
+});
+
+describe('runtimeAdvisories', () => {
+  const view = (extra: Record<string, unknown>) => extra as never;
+
+  test('lists unpinned runtime URLs and runtime CSP violations as advisory notes', () => {
+    const advisories = runtimeAdvisories(
+      view({
+        mutableRuntimeUrls: ['https://cdn.example.com/runtime.js'],
+        observation: {
+          evidence: {
+            cspReplay: {
+              status: 'violations',
+              runtimeReadyObserved: true,
+              violations: [
+                {
+                  directive: 'script-src-elem',
+                  blocked: 'inline',
+                  source: 'cdn.example.com/runtime.js',
+                  fromRuntime: true
+                },
+                { directive: 'style-src-elem', blocked: 'inline', source: 'document', fromRuntime: false }
+              ]
+            }
+          }
+        }
+      })
+    );
+    expect(advisories.map((item) => item.title)).toEqual([
+      'Runtime URL can change after review',
+      'Runtime breaks under a strict Content Security Policy'
+    ]);
+    expect(advisories[0]?.detail).toContain('Publish each release at a new versioned URL.');
+    expect(advisories[1]?.lines).toEqual(['script-src-elem: inline from cdn.example.com/runtime.js']);
+  });
+
+  test('lists the static scan as rule-level counts', () => {
+    const advisories = runtimeAdvisories(
+      view({
+        observation: {
+          evidence: {
+            runtimeStaticScan: {
+              status: 'scanned',
+              filesScanned: 1,
+              findings: [
+                { ruleId: 'SEC-NO-DCE', name: 'Dynamic Code Execution', severity: 'BLOCKER', count: 2 }
+              ]
+            }
+          }
+        }
+      })
+    );
+    expect(advisories).toHaveLength(1);
+    expect(advisories[0]?.lines).toEqual(['Dynamic Code Execution (BLOCKER) x2']);
+    expect(
+      runtimeAdvisories(
+        view({
+          observation: {
+            evidence: { runtimeStaticScan: { status: 'scanned', filesScanned: 1, findings: [] } }
+          }
+        })
+      )
+    ).toEqual([]);
+  });
+
+  test('stays quiet when nothing was found or the replay did not run', () => {
+    expect(runtimeAdvisories(view({ mutableRuntimeUrls: [] }))).toEqual([]);
+    expect(
+      runtimeAdvisories(
+        view({
+          observation: {
+            evidence: { cspReplay: { status: 'not_run', runtimeReadyObserved: false, violations: [] } }
+          }
+        })
+      )
+    ).toEqual([]);
   });
 });
 

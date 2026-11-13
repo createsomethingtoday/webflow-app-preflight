@@ -182,6 +182,52 @@ export function runtimeIssues(testPackage: RuntimeTestPackageView): RuntimeIssue
   return issues;
 }
 
+const MUTABLE_RUNTIME_URL_GUIDANCE =
+  'This runtime URL has no version or content hash. The served bytes can change after review. Publish each release at a new versioned URL.';
+
+// Advisory notes about published-site scripts. They never change the security
+// result or the findings list above.
+export function runtimeAdvisories(testPackage: RuntimeTestPackageView): Array<{
+  title: string;
+  detail: string;
+  urls?: string[];
+  lines?: string[];
+}> {
+  const advisories: Array<{ title: string; detail: string; urls?: string[]; lines?: string[] }> = [];
+  const mutable = testPackage.mutableRuntimeUrls ?? [];
+  if (mutable.length > 0) {
+    advisories.push({
+      title: 'Runtime URL can change after review',
+      detail: MUTABLE_RUNTIME_URL_GUIDANCE,
+      urls: mutable
+    });
+  }
+  const replay = testPackage.observation?.evidence?.cspReplay;
+  if (replay?.status === 'violations') {
+    const own = replay.violations.filter((violation) => violation.fromRuntime);
+    advisories.push({
+      title: 'Runtime breaks under a strict Content Security Policy',
+      detail: `A second load with no unsafe-inline and no unsafe-eval blocked ${own.length} ${own.length === 1 ? 'action' : 'actions'} from your runtime${replay.runtimeReadyObserved ? '' : ', and the ready signal did not appear'}. Add a nonce to injected scripts and styles, or avoid inline code and eval.`,
+      lines: [...new Set(own.map((violation) => `${violation.directive}: ${violation.blocked} from ${violation.source}`))]
+    });
+  } else if (replay?.status === 'clean') {
+    advisories.push({
+      title: 'Strict Content Security Policy replay was clean',
+      detail: 'Your runtime loaded without inline or eval violations under a strict policy. Customer-page violations are not counted against it.'
+    });
+  }
+  const scan = testPackage.observation?.evidence?.runtimeStaticScan;
+  if (scan?.status === 'scanned' && scan.findings.length > 0) {
+    const total = scan.findings.reduce((sum, finding) => sum + finding.count, 0);
+    advisories.push({
+      title: 'Runtime code matches review rules',
+      detail: `A static scan of ${scan.filesScanned} served runtime ${scan.filesScanned === 1 ? 'file' : 'files'} found ${total} ${total === 1 ? 'match' : 'matches'} for patterns reviewers reject on published sites. Review each rule and remove or replace the pattern.`,
+      lines: scan.findings.map((finding) => `${finding.name} (${finding.severity}) x${finding.count}`)
+    });
+  }
+  return advisories;
+}
+
 interface RuntimeSecuritySummary {
   tone: 'pass' | 'neutral' | 'fail';
   title: string;
@@ -811,6 +857,30 @@ function RuntimeObservationCard({
               </small>
             </div>
           </div>
+          {runtimeAdvisories(latest).length > 0 ? (
+            <div className="observation-results" aria-label="Advisory notes">
+              {runtimeAdvisories(latest).map((advisory) => (
+                <div key={advisory.title} className="neutral">
+                  <strong>{advisory.title}</strong>
+                  <span>{advisory.detail}</span>
+                  {advisory.urls && advisory.urls.length > 0 ? (
+                    <ul className="runtime-issue-files">
+                      {advisory.urls.map((url) => (
+                        <li key={url}><code>{runtimeFileName(url) ?? url}</code></li>
+                      ))}
+                    </ul>
+                  ) : null}
+                  {advisory.lines && advisory.lines.length > 0 ? (
+                    <ul className="runtime-issue-files">
+                      {advisory.lines.map((line) => (
+                        <li key={line}><code>{line}</code></li>
+                      ))}
+                    </ul>
+                  ) : null}
+                </div>
+              ))}
+            </div>
+          ) : null}
           {latest.observation?.trust === 'webflow_observed' && latest.observation.evidence ? (
             <>
               <div className="checkpoint-row complete">

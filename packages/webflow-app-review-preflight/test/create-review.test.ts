@@ -531,6 +531,24 @@ describe('createHostedRuntimeReviewArtifact', () => {
     expect(artifact.review.officialDecision).toBeNull();
   });
 
+  test('lists mutable runtime URLs as advisory data without changing the verdict', async () => {
+    const mutable = 'https://cdn.example.com/runtime.js';
+    const pinned = 'https://cdn.example.com/v1.2.3/runtime.js';
+    const withMutable = await createHostedRuntimeReviewArtifact({
+      appName: 'Website Speedy',
+      runtimeUrls: [mutable, pinned]
+    });
+    const allPinned = await createHostedRuntimeReviewArtifact({
+      appName: 'Website Speedy',
+      runtimeUrls: [pinned, 'https://cdn.example.com/v1.2.4/runtime.js']
+    });
+    expect(withMutable.review.runtime.mutableRuntimeUrls).toEqual([mutable]);
+    expect(allPinned.review.runtime.mutableRuntimeUrls).toEqual([]);
+    expect(withMutable.review.summary).toEqual(allPinned.review.summary);
+    expect(withMutable.review.guidance).toEqual(allPinned.review.guidance);
+    expect(withMutable.review.runtime.status).toBe(allPinned.review.runtime.status);
+  });
+
   test('never reports an unscanned hosted runtime as ready', async () => {
     const { review } = await createHostedRuntimeReviewArtifact({
       appName: 'Website Speedy',

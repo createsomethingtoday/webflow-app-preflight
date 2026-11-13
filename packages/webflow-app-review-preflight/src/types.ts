@@ -119,6 +119,11 @@ export interface BundleReview {
     references: string[];
     status: 'not_discovered' | 'discovered_unverified';
     manualVerificationRequired: boolean;
+    /**
+     * Advisory (hosted-runtime reviews): declared runtime URLs with neither a
+     * version nor a content hash. Never affects readiness or blockers.
+     */
+    mutableRuntimeUrls?: string[];
   };
   summary: {
     /**
@@ -304,6 +309,40 @@ export interface RuntimeObservationJobContract {
   expiresAt: string;
 }
 
+export interface RuntimeCspReplayViolation {
+  directive: string;
+  /** 'inline', 'eval', a CSP keyword, or a host only. */
+  blocked: string;
+  /** Host and path of the script that caused it, or 'document'. */
+  source: string;
+  /** The violation belongs to the app's runtime, not the customer page. */
+  fromRuntime: boolean;
+}
+
+/** Advisory result of replaying the page under a strict Content Security Policy. */
+export interface RuntimeCspReplay {
+  status: 'clean' | 'violations' | 'not_run';
+  runtimeReadyObserved: boolean;
+  violations: RuntimeCspReplayViolation[];
+}
+
+export interface RuntimeStaticScanFinding {
+  ruleId: string;
+  name: string;
+  severity: string;
+  count: number;
+}
+
+/**
+ * Advisory static scan of the served runtime bytes with the bundle ruleset.
+ * Rule-level counts only; never code, paths, line text or file content.
+ */
+export interface RuntimeStaticScan {
+  status: 'scanned' | 'not_run';
+  filesScanned: number;
+  findings: RuntimeStaticScanFinding[];
+}
+
 export interface RuntimeObservationSummary {
   id: string;
   status: 'approved' | 'running' | 'uploading' | 'complete' | 'failed' | 'expired' | 'revoked';
@@ -354,12 +393,24 @@ export interface RuntimeObservationSummary {
       bytes: number;
       sha256: string;
     }>;
+    /**
+     * Advisory strict-CSP replay. Absent on evidence recorded before it
+     * existed. Never feeds `securityStatus`, predicates or blockers.
+     */
+    cspReplay?: RuntimeCspReplay;
+    /** Advisory static scan of the served runtime bytes. Absent on older evidence. */
+    runtimeStaticScan?: RuntimeStaticScan;
   } | null;
 }
 
 export type RuntimeTestPackageView = Omit<RuntimeTestPackage, 'status'> & {
   status: 'ready' | 'expired' | 'revoked';
   observation: RuntimeObservationSummary | null;
+  /**
+   * Advisory: declared runtime URLs with neither a version nor a content
+   * hash. The served bytes can change after review.
+   */
+  mutableRuntimeUrls?: string[];
 };
 
 export type CompanionActorRole = 'developer' | 'reviewer';

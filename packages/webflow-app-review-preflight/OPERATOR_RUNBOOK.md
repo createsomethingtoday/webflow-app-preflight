@@ -224,6 +224,14 @@ A blocked result is useful evidence. It means the browser ran, but the app did n
 
 Open **Runtime file results** to find the exact file that failed. Each row reports **Loaded**, **Hash matched**, and whether a **source map** was reachable for the served bytes. A page-loaded file reports **SRI matched**; a child file reports whether its pinned parent was verified. A file with no reachable source map blocks on manual review even when its bytes match, because pinned bytes are not readable bytes. The runtime-file count tells you how many declared files were checked; the evidence-artifact count includes screenshots and sanitized logs, so it is usually larger.
 
+### Advisory notes
+
+Three advisory notes can appear beside the security result. They never change **Runtime security passed** or **blocked**, the blockers, or readiness.
+
+- **Runtime URL can change after review.** A declared runtime URL has no semantic version and no content hash of at least eight hex or base36 characters (a bare `/v1/`, `@latest` and `?v=3` do not count). The served bytes can change after review. Publish each release at a new versioned URL.
+- **Strict Content Security Policy replay.** After the normal run, the runner loads the page again with a strict policy (no `'unsafe-inline'`, no `'unsafe-eval'`; only the page origin, the declared runtime origins and Webflow's asset hosts) and records the violations. The result is `clean`, `violations` (at least one violation comes from the runtime itself), or `not_run` (time-out or navigation error). The replay has its own limits: 30 seconds, 100 budgeted requests, and 50 recorded entries. The Worker accepts the replay only in its exact shape and treats anything else as `not_run`.
+- **Runtime code matches review rules.** The runner scans the served runtime bytes with the default bundle ruleset (minus Designer-panel-only rules and `NET-EXTERNAL-EGRESS`) and reports rule-level counts only. The status is `scanned` or `not_run`. The Worker never holds the runtime bytes, so the scan runs in the runner; the Worker accepts the exact count shape and treats anything else as `not_run`.
+
 ### Proxy canary
 
 | Result                         | Meaning                                                                                                                        |

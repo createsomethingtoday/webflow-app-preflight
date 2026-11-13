@@ -120,6 +120,9 @@ importers:
         specifier: ^1.61.1
         version: 1.61.1
     devDependencies:
+      '@create-something/bundle-scanner-core':
+        specifier: workspace:*
+        version: link:../../bundle-scanner-core
       '@types/node':
         specifier: ^24.0.0
         version: 24.13.3

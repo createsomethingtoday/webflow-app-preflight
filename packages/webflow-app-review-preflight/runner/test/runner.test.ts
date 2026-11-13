@@ -1,3 +1,4 @@
+import { defaultRuleset } from '@create-something/bundle-scanner-core';
 import { createHash } from 'node:crypto';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { createServer } from 'node:http';
@@ -11,8 +12,12 @@ import {
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import {
   PLATFORM_ASSET_HOSTS,
+  buildReplayCsp,
+  normalizeCspViolation,
   redactText,
   runRuntimeObservation,
+  scanRuntimeSources,
+  STATIC_SCAN_EXCLUDED_RULES,
   runtimeScopeKey,
   sanitizeUrl,
   validateObservationContract
@@ -84,6 +89,9 @@ interface AdversarialFixtureOptions {
   runtimeSource?: string | ((secondaryIntegrity: string) => string);
   secondaryRuntimeSource?: string;
   controls?: Partial<RuntimeObservationJobContract['controls']>;
+  /** Make every document request after the first one hang (replay time-out). */
+  hangRepeatDocumentRequests?: boolean;
+  cspReplayTimeoutMs?: number;
 }
 
 async function runAdversarialFixture({
@@ -91,7 +99,9 @@ async function runAdversarialFixture({
   proxyStatus,
   runtimeSource = 'document.body.setAttribute("data-runtime-ready", "");',
   secondaryRuntimeSource,
-  controls = {}
+  controls = {},
+  hangRepeatDocumentRequests = false,
+  cspReplayTimeoutMs
 }: AdversarialFixtureOptions): Promise<{
   result: Awaited<ReturnType<typeof runRuntimeObservation>>;
   manifest: Record<string, unknown>;
@@ -111,6 +121,7 @@ async function runAdversarialFixture({
   const integrity = `sha256-${digest.toString('base64')}`;
   const outputDir = await mkdtemp(join(tmpdir(), 'runtime-runner-adversarial-'));
   let jobContract!: RuntimeObservationJobContract;
+  let documentRequests = 0;
   const server = createServer((request, response) => {
     const address = server.address() as AddressInfo;
     const origin = `http://127.0.0.1:${address.port}`;
@@ -129,6 +140,8 @@ async function runAdversarialFixture({
       return;
     }
     if (url.pathname === '/runtime-fixture') {
+      documentRequests += 1;
+      if (hangRepeatDocumentRequests && documentRequests > 1) return;
       response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
       response.end(`<!doctype html><body>${markup(integrity)}</body>`);
       return;
@@ -206,7 +219,8 @@ async function runAdversarialFixture({
       apiBaseUrl: origin,
       observationJobId: 'job-1',
       capability: 'c'.repeat(64),
-      outputDir
+      outputDir,
+      ...(cspReplayTimeoutMs ? { cspReplayTimeoutMs } : {})
     });
     const manifest = JSON.parse(await readFile(join(outputDir, 'manifest.json'), 'utf8')) as Record<
       string,
@@ -220,6 +234,7 @@ async function runAdversarialFixture({
     ) as unknown;
     return { result, manifest, networkLog, consoleLog };
   } finally {
+    server.closeAllConnections();
     await new Promise<void>((resolve) => server.close(() => resolve()));
     await rm(outputDir, { recursive: true, force: true });
   }
@@ -920,4 +935,217 @@ describe('runtime observation runner boundaries', () => {
     expect(artifacts[0]?.sourceMap.available).toBe(true);
     expect(artifacts[0]?.sourceMap.url).toContain('/runtime-v1.js.map');
   }, 30_000);
+});
+
+describe('strict-CSP replay', () => {
+  type Replay = {
+    status: string;
+    runtimeReadyObserved: boolean;
+    violations: Array<{ directive: string; blocked: string; source: string; fromRuntime: boolean }>;
+  };
+  const scriptTag = (integrity: string) =>
+    `<script src="/runtime-v1.js" integrity="${integrity}" crossorigin="anonymous"></script>`;
+
+  test('builds a policy with no unsafe-inline or unsafe-eval', () => {
+    const policy = buildReplayCsp(
+      ['https://runtime.partner.test/app/v1.2.3/run.js'],
+      new Set(['cdn.prod.website-files.com'])
+    );
+    expect(policy).toContain("default-src 'self' https://runtime.partner.test https://cdn.prod.website-files.com");
+    expect(policy).not.toMatch(/unsafe-inline|unsafe-eval/);
+  });
+
+  test('keeps only directive, blocked kind or host, and source location', () => {
+    const context = {
+      documentUrl: 'https://site.test/page',
+      runtimeUrls: new Set(['https://runtime.test/run.js']),
+      runtimeScopes: new Set(['runtime.test']),
+      platformHosts: new Set<string>()
+    };
+    expect(
+      normalizeCspViolation(
+        {
+          directive: 'script-src-elem',
+          blockedURI: 'https://other.test/x.js?token=abc',
+          sourceFile: 'https://runtime.test/run.js',
+          sample: 'secret page text'
+        },
+        context
+      )
+    ).toEqual({
+      directive: 'script-src-elem',
+      blocked: 'other.test',
+      source: 'runtime.test/run.js',
+      fromRuntime: true
+    });
+    expect(
+      normalizeCspViolation(
+        { directive: 'script-src-elem', blockedURI: 'inline', sourceFile: 'https://site.test/page' },
+        context
+      )
+    ).toEqual({
+      directive: 'script-src-elem',
+      blocked: 'inline',
+      source: 'document',
+      fromRuntime: false
+    });
+    expect(normalizeCspViolation('nope', context)).toBeNull();
+  });
+
+  test('records an inline script created by the runtime as a runtime violation', async () => {
+    const { manifest, result } = await runAdversarialFixture({
+      proxyStatus: 403,
+      runtimeSource: `
+        const inline = document.createElement('script');
+        inline.textContent = 'window.__inlineRan = true';
+        document.head.appendChild(inline);
+        document.body.setAttribute('data-runtime-ready', '');`,
+      markup: scriptTag
+    });
+    expect(result.status).toBe('complete');
+    const replay = manifest.cspReplay as Replay;
+    expect(replay.status).toBe('violations');
+    expect(replay.runtimeReadyObserved).toBe(true);
+    expect(replay.violations).toContainEqual(
+      expect.objectContaining({
+        blocked: 'inline',
+        source: expect.stringMatching(/\/runtime-v1\.js$/),
+        fromRuntime: true
+      })
+    );
+    expect(JSON.stringify(replay)).not.toContain('__inlineRan');
+  }, 60_000);
+
+  test('records eval called by the runtime as a runtime violation', async () => {
+    const { manifest } = await runAdversarialFixture({
+      proxyStatus: 403,
+      runtimeSource: `
+        try { eval('1 + 1'); } catch {}
+        document.body.setAttribute('data-runtime-ready', '');`,
+      markup: scriptTag
+    });
+    const replay = manifest.cspReplay as Replay;
+    expect(replay.status).toBe('violations');
+    expect(replay.violations).toContainEqual(
+      expect.objectContaining({ blocked: 'eval', fromRuntime: true })
+    );
+  }, 60_000);
+
+  test('a violation from the customer page alone leaves the replay clean', async () => {
+    const { manifest } = await runAdversarialFixture({
+      proxyStatus: 403,
+      markup: (integrity) =>
+        `<script>window.__customerInline = true;</script>
+         <style>body { margin: 0; }</style>
+         ${scriptTag(integrity)}`
+    });
+    const replay = manifest.cspReplay as Replay;
+    expect(replay.status).toBe('clean');
+    expect(replay.runtimeReadyObserved).toBe(true);
+    expect(replay.violations.length).toBeGreaterThan(0);
+    expect(replay.violations.every((violation) => violation.fromRuntime === false)).toBe(true);
+  }, 60_000);
+
+  test('a replay time-out reports not_run and leaves the observation unchanged', async () => {
+    const baseline = await runAdversarialFixture({ proxyStatus: 403, markup: scriptTag });
+    const timedOut = await runAdversarialFixture({
+      proxyStatus: 403,
+      markup: scriptTag,
+      hangRepeatDocumentRequests: true,
+      cspReplayTimeoutMs: 1_500
+    });
+    expect(timedOut.result.status).toBe('complete');
+    expect(timedOut.manifest.cspReplay).toEqual({
+      status: 'not_run',
+      runtimeReadyObserved: false,
+      violations: []
+    });
+    // Everything the Worker's security evaluation reads is identical.
+    const { cspReplay: _replay, startedAt: _s, finishedAt: _f, artifacts: _a, ...rest } =
+      timedOut.manifest;
+    const { cspReplay: _r2, startedAt: _s2, finishedAt: _f2, artifacts: _a2, ...baselineRest } =
+      baseline.manifest;
+    const portless = (value: unknown) =>
+      JSON.parse(JSON.stringify(value).replace(/127\.0\.0\.1:\d+/g, '127.0.0.1:PORT'));
+    expect(portless(rest)).toEqual(portless(baselineRest));
+  }, 90_000);
+});
+
+describe('advisory static scan of served runtime bytes', () => {
+  type Scan = {
+    status: string;
+    filesScanned: number;
+    findings: Array<{ ruleId: string; name: string; severity: string; count: number }>;
+  };
+  const dirty =
+    'const run = (code) => eval(code);\nrun("1");\ndocument.body.innerHTML = "<b>" + location.hash + "</b>";\ndocument.body.setAttribute("data-runtime-ready", "");';
+  const scriptTag = (integrity: string) =>
+    `<script src="/runtime-v1.js" integrity="${integrity}" crossorigin="anonymous"></script>`;
+
+  test('excluded rules are real ruleset rules', () => {
+    const known = new Set(defaultRuleset.rules.map((rule) => rule.ruleId));
+    for (const ruleId of Object.keys(STATIC_SCAN_EXCLUDED_RULES)) expect(known.has(ruleId)).toBe(true);
+  });
+
+  test('reports rule-level counts for eval and an innerHTML write, and nothing else', () => {
+    const scan = scanRuntimeSources(new Map([['https://runtime.test/run.js', dirty]]));
+    expect(scan.status).toBe('scanned');
+    expect(scan.filesScanned).toBe(1);
+    expect(scan.findings).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ ruleId: 'SEC-NO-DCE', count: 1 }),
+        expect.objectContaining({ ruleId: 'SEC-UNSAFE-HTML', count: 1 })
+      ])
+    );
+    const text = JSON.stringify(scan);
+    expect(text).not.toContain('eval(');
+    expect(text).not.toContain('innerHTML');
+    expect(text).not.toContain('location.hash');
+    expect(text).not.toContain('runtime.test');
+    for (const finding of scan.findings) {
+      expect(Object.keys(finding).sort()).toEqual(['count', 'name', 'ruleId', 'severity']);
+    }
+  });
+
+  test('skips Designer-only rules and comment matches', () => {
+    const scan = scanRuntimeSources(
+      new Map([
+        [
+          'a',
+          'window.open("/x");\ndocument.addEventListener("keydown", (e) => { if (e.metaKey && e.key === "k") {} });\n// eval("1")\n'
+        ]
+      ])
+    );
+    expect(scan).toEqual({ status: 'scanned', filesScanned: 1, findings: [] });
+  });
+
+  test('a clean file scans with no findings; no bytes means not_run', () => {
+    expect(scanRuntimeSources(new Map([['a', 'document.body.dataset.ready = "1";']]))).toEqual({
+      status: 'scanned',
+      filesScanned: 1,
+      findings: []
+    });
+    expect(scanRuntimeSources(new Map())).toEqual({ status: 'not_run', filesScanned: 0, findings: [] });
+    expect(scanRuntimeSources(new Map([['a', '']])).status).toBe('not_run');
+  });
+
+  test('the observation records the scan of the bytes it served', async () => {
+    const { manifest, result } = await runAdversarialFixture({
+      proxyStatus: 403,
+      runtimeSource: dirty,
+      markup: scriptTag
+    });
+    expect(result.status).toBe('complete');
+    const scan = manifest.runtimeStaticScan as Scan;
+    expect(scan.status).toBe('scanned');
+    expect(scan.findings.map((finding) => finding.ruleId)).toEqual(
+      expect.arrayContaining(['SEC-NO-DCE', 'SEC-UNSAFE-HTML'])
+    );
+    const clean = await runAdversarialFixture({ proxyStatus: 403, markup: scriptTag });
+    expect(clean.manifest.runtimeStaticScan).toEqual({
+      status: 'scanned',
+      filesScanned: 1,
+      findings: []
+    });
+  }, 90_000);
 });

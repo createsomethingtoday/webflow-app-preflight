@@ -1,3 +1,4 @@
+import type { RuntimeTestPackageView } from '@create-something/webflow-app-review-preflight';
 import type { AuthenticatedUser, Env } from './types';
 import { redeemCompanionPairing } from './companion-pairings';
 import { getReview, listReviews } from './reviews';
@@ -156,6 +157,26 @@ async function observationHistory(testPackageId: string, env: Env): Promise<Obse
   return rows.results;
 }
 
+function advisoryHtml(testPackage: RuntimeTestPackageView): string {
+  const mutable = testPackage.mutableRuntimeUrls ?? [];
+  const replay = testPackage.observation?.evidence?.cspReplay;
+  const own = replay?.violations.filter((violation) => violation.fromRuntime) ?? [];
+  const replayText = !replay
+    ? 'no replay recorded'
+    : replay.status === 'not_run'
+      ? 'not run'
+      : replay.status === 'clean'
+        ? `clean (ready signal ${replay.runtimeReadyObserved ? 'seen' : 'not seen'})`
+        : `${own.length} runtime violation${own.length === 1 ? '' : 's'} (ready signal ${replay.runtimeReadyObserved ? 'seen' : 'not seen'})`;
+  const scan = testPackage.observation?.evidence?.runtimeStaticScan;
+  const scanText = !scan || scan.status === 'not_run'
+    ? 'not run'
+    : `${scan.filesScanned} file${scan.filesScanned === 1 ? '' : 's'} scanned, ${scan.findings.length ? `${scan.findings.reduce((total, finding) => total + finding.count, 0)} matches` : 'no matches'}`;
+  return `<div class="receipt"><span class="muted">Advisory: unpinned runtime URLs</span><span class="mono">${mutable.length ? mutable.map((url) => escapeHtml(url)).join('<br>') : 'none'}</span></div>
+        <div class="receipt"><span class="muted">Advisory: strict-CSP replay</span><span class="mono">${escapeHtml(replayText)}${own.map((violation) => `<br>${escapeHtml(violation.directive)}: ${escapeHtml(violation.blocked)} from ${escapeHtml(violation.source)}`).join('')}</span></div>
+        <div class="receipt"><span class="muted">Advisory: static scan of runtime files</span><span class="mono">${escapeHtml(scanText)}${(scan?.findings ?? []).map((finding) => `<br>${escapeHtml(finding.ruleId)} (${escapeHtml(finding.severity)}) x${finding.count}`).join('')}</span></div>`;
+}
+
 export async function reviewerWorkspace(
   request: Request,
   env: Env,
@@ -219,6 +240,7 @@ export async function reviewerWorkspace(
         <div class="receipt"><span class="muted">Bundle SHA-256</span><span class="mono">${escapeHtml(testPackage.bundleSha256)}</span></div>
         <div class="receipt"><span class="muted">Published target</span><span class="mono">${escapeHtml(testPackage.target.url)}</span></div>
         <div class="receipt"><span class="muted">Pinned runtimes</span><span class="mono">${testPackage.runtimeArtifacts.map((artifact) => escapeHtml(artifact.url)).join('<br>')}</span></div>
+        ${advisoryHtml(testPackage)}
         <form method="post" action="/reviewer/runtime-test-packages/${encodeURIComponent(testPackage.id)}/replay">
           <button type="submit">Run independent replay</button>
           <a class="button" href="/reviewer">Refresh status</a>

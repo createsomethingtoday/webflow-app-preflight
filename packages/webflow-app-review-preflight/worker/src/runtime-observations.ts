@@ -7,8 +7,17 @@ import type {
   RuntimeTestPackageInput,
   RuntimeTestPackageView
 } from '@create-something/webflow-app-review-preflight';
-import { WEBFLOW_PLATFORM_ASSET_HOSTS } from '@create-something/webflow-app-review-preflight';
+import {
+  mutableRuntimeUrls,
+  WEBFLOW_PLATFORM_ASSET_HOSTS
+} from '@create-something/webflow-app-review-preflight';
 import { serviceTokenAuthorized } from './service-auth';
+import {
+  NOT_RUN_CSP_REPLAY,
+  NOT_RUN_STATIC_SCAN,
+  sanitizeCspReplay,
+  sanitizeRuntimeStaticScan
+} from './runtime-advisory';
 import { isPrivateOrLocalHostname } from './net';
 import type { AuthenticatedUser, Env } from './types';
 import {
@@ -680,6 +689,8 @@ export async function listRuntimeTestPackages(
           runtimeArtifacts?: unknown;
           runtimeCreatedScripts?: unknown;
           unreviewedRuntimeScripts?: unknown;
+          cspReplay?: unknown;
+          runtimeStaticScan?: unknown;
           securityEvaluation?: {
             status?: unknown;
             predicates?: unknown;
@@ -700,6 +711,8 @@ export async function listRuntimeTestPackages(
           )
         : [];
       const reviewedSource = new Set(parseSha256List(row.reviewed_source_sha256s));
+      const cspReplay = sanitizeCspReplay(manifest?.cspReplay);
+      const runtimeStaticScan = sanitizeRuntimeStaticScan(manifest?.runtimeStaticScan);
       const runtimeFiles = testPackage.runtimeArtifacts.map((pin) => {
         const observed = runtimeObservations.find((item) => item.url === pin.url);
         // Same rule as evaluateRuntimeSecurity: any observation of this URL
@@ -808,7 +821,9 @@ export async function listRuntimeTestPackages(
                   contentType: artifact.content_type,
                   bytes: artifact.bytes,
                   sha256: artifact.sha256
-                }))
+                })),
+                ...(cspReplay ? { cspReplay } : {}),
+                ...(runtimeStaticScan ? { runtimeStaticScan } : {})
               }
             : null
       };
@@ -819,7 +834,8 @@ export async function listRuntimeTestPackages(
         expired && row.package_status === 'ready'
         ? 'expired'
         : (row.package_status as RuntimeTestPackageView['status']),
-      observation
+      observation,
+      mutableRuntimeUrls: mutableRuntimeUrls(testPackage.runtimeArtifacts.map((pin) => pin.url))
     });
   }
   return views;
@@ -936,13 +952,20 @@ function requireRecord(value: unknown, label: string): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
-function validateManifest(
+export function validateManifest(
   value: unknown,
   observationJobId: string,
   contract: RuntimeObservationJobContract
 ): Record<string, unknown> & { artifacts: EvidenceArtifactDeclaration[] } {
   const manifest = requireRecord(value, 'Evidence manifest');
-  if (hasForbiddenEvidence(manifest)) {
+  // The advisory CSP replay is validated on its own below, so a hostile path
+  // inside it can never fail the whole upload; it is dropped instead.
+  const {
+    cspReplay: rawCspReplay,
+    runtimeStaticScan: rawStaticScan,
+    ...securityRelevant
+  } = manifest;
+  if (hasForbiddenEvidence(securityRelevant)) {
     throw new RuntimeObservationEvidenceError(
       'Evidence contains a forbidden secret, credential, header, body, or form-value field.'
     );
@@ -1140,6 +1163,17 @@ function validateManifest(
       sha256: item.sha256
     };
   });
+
+  // Optional and advisory (runners predating it omit it). Accepted only in the
+  // exact shape; anything malformed is replaced by `not_run`, never stored raw.
+  if (rawCspReplay !== undefined) {
+    manifest.cspReplay = sanitizeCspReplay(rawCspReplay) ?? { ...NOT_RUN_CSP_REPLAY };
+  }
+
+  if (rawStaticScan !== undefined) {
+    manifest.runtimeStaticScan =
+      sanitizeRuntimeStaticScan(rawStaticScan) ?? { ...NOT_RUN_STATIC_SCAN };
+  }
 
   return Object.assign(manifest, { artifacts });
 }
