@@ -167,22 +167,69 @@ function idList(value: unknown): string[] {
     : [];
 }
 
+function commaList(value: string | undefined): string[] {
+  return (value ?? '')
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+/** The longest time the CLI path accepts a token after Webflow issued it: 24 hours. */
+const OAUTH_TOKEN_MAX_AGE_SECONDS = 24 * 60 * 60;
+// A token is a few seconds old when the CLI first sends it. An issue time
+// further in the future than this is a wrong record, not a new token.
+const OAUTH_TOKEN_CLOCK_SKEW_SECONDS = 5 * 60;
+
+/**
+ * True when Webflow issued the token inside the age limit. Webflow access
+ * tokens do not expire, so this Worker sets the limit from
+ * `authorization.createdOn` of the token introspection. A token with no
+ * usable issue time is refused. PREFLIGHT_OAUTH_TOKEN_MAX_AGE_SECONDS can
+ * change the limit; a bad value keeps the default.
+ */
+export function oauthTokenAgeAccepted(
+  createdOn: unknown,
+  env: Pick<Env, 'PREFLIGHT_OAUTH_TOKEN_MAX_AGE_SECONDS'>,
+  nowMs = Date.now()
+): boolean {
+  const issuedMs = typeof createdOn === 'string' && createdOn ? Date.parse(createdOn) : Number.NaN;
+  if (!Number.isFinite(issuedMs) || issuedMs - nowMs > OAUTH_TOKEN_CLOCK_SKEW_SECONDS * 1000) {
+    return false;
+  }
+  const configured = Number.parseInt(env.PREFLIGHT_OAUTH_TOKEN_MAX_AGE_SECONDS ?? '', 10);
+  const maxAgeSeconds =
+    Number.isFinite(configured) && configured > 0 ? configured : OAUTH_TOKEN_MAX_AGE_SECONDS;
+  return issuedMs + maxAgeSeconds * 1000 > nowMs;
+}
+
+/**
+ * True when the Webflow user may use the CLI path. The list in
+ * PREFLIGHT_OAUTH_ALLOWED_USER_IDS is closed by default: with no value, no
+ * user is allowed, so the switch and the application list alone open
+ * nothing. List user IDs for a pilot. The single value `*` allows every
+ * Webflow user.
+ */
+export function oauthUserAllowed(
+  userId: string,
+  env: Pick<Env, 'PREFLIGHT_OAUTH_ALLOWED_USER_IDS'>
+): boolean {
+  const allowed = commaList(env.PREFLIGHT_OAUTH_ALLOWED_USER_IDS);
+  if (allowed.length === 1 && allowed[0] === '*') return true;
+  return userId !== '' && userId !== '*' && allowed.includes(userId);
+}
+
 /**
  * Creator CLI path: a Webflow OAuth access token as the bearer. Off unless
  * PREFLIGHT_OAUTH_BEARER_ENABLED is 'true', and fails closed unless the token
- * belongs to an application listed in PREFLIGHT_OAUTH_CLIENT_IDS. The identity
+ * belongs to an application listed in PREFLIGHT_OAUTH_CLIENT_IDS, is younger
+ * than the age limit, and belongs to a user on the CLI allowlist. The identity
  * has no Designer site (siteId null), so ownership is by user id alone.
  */
 async function authenticateOAuthBearer(
   token: string,
   env: Env
 ): Promise<AuthenticatedUser | null> {
-  const allowed = new Set(
-    (env.PREFLIGHT_OAUTH_CLIENT_IDS ?? '')
-      .split(',')
-      .map((value) => value.trim())
-      .filter(Boolean)
-  );
+  const allowed = new Set(commaList(env.PREFLIGHT_OAUTH_CLIENT_IDS));
   if (allowed.size === 0) return null;
 
   const [user, introspection] = await Promise.all([
@@ -194,10 +241,12 @@ async function authenticateOAuthBearer(
 
   const info = introspection as {
     application?: { id?: unknown };
-    authorization?: { authorizedTo?: { workspaceIds?: unknown } };
+    authorization?: { createdOn?: unknown; authorizedTo?: { workspaceIds?: unknown } };
   } | null;
   const applicationId = info?.application?.id;
   if (typeof applicationId !== 'string' || !allowed.has(applicationId)) return null;
+  if (!oauthTokenAgeAccepted(info?.authorization?.createdOn, env)) return null;
+  if (!oauthUserAllowed(userId, env)) return null;
 
   const identity: AuthenticatedUser = {
     id: userId,

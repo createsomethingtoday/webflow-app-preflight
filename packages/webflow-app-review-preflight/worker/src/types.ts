@@ -33,6 +33,13 @@ export interface Env {
   SANDBOX_ACTIVE_LIMIT_PER_USER?: string;
   PREFLIGHT_OAUTH_BEARER_ENABLED?: string;
   PREFLIGHT_OAUTH_CLIENT_IDS?: string;
+  /**
+   * Webflow user IDs that may use the creator CLI path, comma-separated.
+   * Empty allows no user; the single value `*` allows every user.
+   */
+  PREFLIGHT_OAUTH_ALLOWED_USER_IDS?: string;
+  /** Longest accepted age of a creator CLI token. Positive integer; default 86400 (24 hours). */
+  PREFLIGHT_OAUTH_TOKEN_MAX_AGE_SECONDS?: string;
 }
 
 export interface AuthenticatedUser {
