@@ -211,18 +211,44 @@ export function oauthTokenAgeAccepted(
  */
 export function oauthUserAllowed(
   userId: string,
-  env: Pick<Env, 'PREFLIGHT_OAUTH_ALLOWED_USER_IDS'>
+  env: Pick<Env, 'PREFLIGHT_OAUTH_ALLOWED_USER_IDS' | 'PREFLIGHT_OAUTH_ALLOWED_EMAIL_DOMAINS'>,
+  email: unknown = ''
 ): boolean {
   const allowed = commaList(env.PREFLIGHT_OAUTH_ALLOWED_USER_IDS);
   if (allowed.length === 1 && allowed[0] === '*') return true;
-  return userId !== '' && userId !== '*' && allowed.includes(userId);
+  if (userId === '' || userId === '*') return false;
+  return allowed.includes(userId) || oauthEmailDomainAllowed(email, env);
+}
+
+/**
+ * True when the Webflow account email is exactly on a domain listed in
+ * PREFLIGHT_OAUTH_ALLOWED_EMAIL_DOMAINS (comma or space separated, for
+ * example `webflow.com`). Empty by default: with no value, no email opens
+ * the CLI path. It is for internal teams, with no list of people to keep.
+ * A subdomain or a look-alike domain does not count, and a value that is not
+ * a plain domain is ignored, so `*` cannot open the path to everyone here.
+ */
+export function oauthEmailDomainAllowed(
+  email: unknown,
+  env: Pick<Env, 'PREFLIGHT_OAUTH_ALLOWED_EMAIL_DOMAINS'>
+): boolean {
+  const domains = (env.PREFLIGHT_OAUTH_ALLOWED_EMAIL_DOMAINS ?? '')
+    .toLowerCase()
+    .split(/[\s,]+/)
+    .map((domain) => domain.replace(/^@/, ''))
+    .filter((domain) => /^[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(domain));
+  const value = typeof email === 'string' ? email.trim().toLowerCase() : '';
+  const at = value.lastIndexOf('@');
+  if (at <= 0 || at === value.length - 1) return false;
+  return domains.includes(value.slice(at + 1));
 }
 
 /**
  * Creator CLI path: a Webflow OAuth access token as the bearer. Off unless
  * PREFLIGHT_OAUTH_BEARER_ENABLED is 'true', and fails closed unless the token
  * belongs to an application listed in PREFLIGHT_OAUTH_CLIENT_IDS, is younger
- * than the age limit, and belongs to a user on the CLI allowlist. The identity
+ * than the age limit, and belongs to a user on the CLI allowlist or on a
+ * listed email domain. The identity
  * has no Designer site (siteId null), so ownership is by user id alone.
  */
 async function authenticateOAuthBearer(
@@ -246,7 +272,7 @@ async function authenticateOAuthBearer(
   const applicationId = info?.application?.id;
   if (typeof applicationId !== 'string' || !allowed.has(applicationId)) return null;
   if (!oauthTokenAgeAccepted(info?.authorization?.createdOn, env)) return null;
-  if (!oauthUserAllowed(userId, env)) return null;
+  if (!oauthUserAllowed(userId, env, (user as { email?: unknown } | null)?.email)) return null;
 
   const identity: AuthenticatedUser = {
     id: userId,

@@ -396,6 +396,7 @@ The CLI path is off until an operator sets all three values on the Worker:
 - `PREFLIGHT_OAUTH_BEARER_ENABLED` is `true`.
 - `PREFLIGHT_OAUTH_CLIENT_IDS` lists the OAuth application ID of the sign-in app. This is the `application.id` that `GET /v2/token/introspect` returns. It is not the 64-character client ID, and it is not the App ID on the App Summary page. Set it as a Worker secret.
 - `PREFLIGHT_OAUTH_ALLOWED_USER_IDS` lists the Webflow user IDs that can use the CLI path. With no value, no user can. Use a list of user IDs for a pilot. The single value `*` opens the path to every Webflow user; set it only after the Security and Enterprise AI Ops review.
+- `PREFLIGHT_OAUTH_ALLOWED_EMAIL_DOMAINS` lists email domains, for example `webflow.com`. An account whose Webflow email is exactly on a listed domain can use the CLI path with no user ID on the list. It is for internal teams. With no value, no email opens the path. It trusts the email that Webflow reports for the account. Keep it equal to the form's `WEBFLOW_CLI_ALLOWED_EMAIL_DOMAINS`.
 
 A CLI token works for 24 hours after Webflow issued it. Webflow access tokens do not expire, so the Worker reads the issue time (`authorization.createdOn` of `GET /v2/token/introspect`) and refuses an older token with 401. The developer signs in again. `PREFLIGHT_OAUTH_TOKEN_MAX_AGE_SECONDS` changes the limit; keep it equal to the limit of the submission form.
 

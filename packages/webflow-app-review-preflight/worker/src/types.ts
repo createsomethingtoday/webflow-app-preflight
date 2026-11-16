@@ -38,6 +38,11 @@ export interface Env {
    * Empty allows no user; the single value `*` allows every user.
    */
   PREFLIGHT_OAUTH_ALLOWED_USER_IDS?: string;
+  /**
+   * Email domains whose Webflow accounts may use the creator CLI path, comma
+   * or space separated (for example `webflow.com`). Empty allows no email.
+   */
+  PREFLIGHT_OAUTH_ALLOWED_EMAIL_DOMAINS?: string;
   /** Longest accepted age of a creator CLI token. Positive integer; default 86400 (24 hours). */
   PREFLIGHT_OAUTH_TOKEN_MAX_AGE_SECONDS?: string;
 }
