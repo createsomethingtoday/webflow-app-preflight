@@ -1203,7 +1203,9 @@ describe('docs-aligned gating (ruleset 1.9.0): severity is the doc level, confid
     expect(neverGates).toEqual([
       'IFRAME-EXTERNAL-SRC',
       'NET-GLOBAL-AUTH-DEFAULT',
+      'PRIV-PAGE-DATA-EGRESS',
       'PROD-NO-DEBUG-RESIDUE',
+      'PROD-PLACEHOLDER-CONTENT',
       'PROD-STAGING-HOST',
       'SEC-NO-SENSITIVE-TOKENS-IN-STORAGE',
       'SEC-RUNTIME-DECODING',
@@ -1347,6 +1349,50 @@ describe('docs-aligned gating (ruleset 1.9.0): severity is the doc level, confid
       expect(result.summary.requiredUpdates, label).toBe(0);
       expect(result.summary.readiness, label).toBe('needs_review');
     }
+  });
+
+  test('recent review findings (1.11.0) ask for a reviewer and never reach changes_required', async () => {
+    const cases: Array<[string, string, Record<string, string>]> = [
+      ['SEC-CSP-INLINE', 'inline stylesheet built in code', { 'dist/index.js': 'const s = document.createElement("style"); s.textContent = css; document.head.appendChild(s);' }],
+      ['SEC-CSP-INLINE', '<style> written from code', { 'dist/index.js': 'root.innerHTML = "<style>.w{color:red}</style><div class=w></div>";' }],
+      ['IFRAME-EXTERNAL-SRC', 'iframe built in code', { 'dist/index.js': 'const f = document.createElement("iframe"); f.src = base + "/embed"; box.appendChild(f);' }],
+      ['SEC-WEBRTC-HARDWARE', 'device permission on a frame', { 'dist/index.js': 'frame.allow = "microphone; display-capture";' }],
+      ['PRIV-PAGE-DATA-EGRESS', 'all cookies sent', { 'dist/index.js': 'post({ type: "sync", data: btoa(document.cookie) });' }],
+      ['PRIV-PAGE-DATA-EGRESS', 'full page URL sent', { 'dist/index.js': 'fetch(api, { method: "POST", body: JSON.stringify({ id: subject, url: window.location.href }) });' }],
+      ['SEC-UNSAFE-HTML', 'raw HTML from a variable', { 'dist/index.js': 'jsx("div", { dangerouslySetInnerHTML: { __html: preview.html } });' }],
+      ['PROD-PLACEHOLDER-CONTENT', 'placeholder link', { 'dist/index.js': 'const sample = `<a href="https://example.com/your-page">Read more</a>`;' }],
+      ['PROD-PLACEHOLDER-CONTENT', 'development notice', { 'dist/index.js': 'const banner = "Development build · not for production use";' }]
+    ];
+    for (const [ruleId, label, files] of cases) {
+      const result = await review(files);
+      expect(find(result, ruleId)?.label, label).toBe('Manual review');
+      expect(result.summary.securityBlockers, label).toBe(0);
+      expect(result.summary.requiredUpdates, label).toBe(0);
+      expect(result.summary.readiness, label).toBe('needs_review');
+    }
+  });
+
+  test('a native browser dialog is a suggestion and leaves the bundle ready', async () => {
+    const result = await review({ 'dist/index.js': 'save.addEventListener("click", () => { if (window.confirm("Discard changes?")) reset(); });' });
+    expect(find(result, 'UX-NATIVE-DIALOGS')?.label).toBe('Suggested update');
+    expect(result.summary.readiness).toBe('ready');
+  });
+
+  test('recent review findings stay quiet on the safe forms', async () => {
+    const result = await review({
+      'dist/index.js': [
+        'const l = document.createElement("link"); l.rel = "stylesheet"; l.href = cssUrl; document.head.appendChild(l);',
+        'send({ origin: location.origin, path: location.pathname });',
+        'const consent = document.cookie.match(/(?:^|; )consent=([^;]*)/);',
+        'jsx("span", { dangerouslySetInnerHTML: { __html: "&nbsp;" } });',
+        'const base = new URL(path, "https://example.com");',
+        'frame.allow = "clipboard-write; fullscreen";'
+      ].join('\n')
+    });
+    for (const id of ['SEC-CSP-INLINE', 'IFRAME-EXTERNAL-SRC', 'SEC-WEBRTC-HARDWARE', 'PRIV-PAGE-DATA-EGRESS', 'SEC-UNSAFE-HTML', 'PROD-PLACEHOLDER-CONTENT', 'UX-NATIVE-DIALOGS']) {
+      expect(find(result, id), id).toBeUndefined();
+    }
+    expect(result.summary.readiness).toBe('ready');
   });
 
   test('reviewer-practice patterns stay quiet on the safe forms', async () => {

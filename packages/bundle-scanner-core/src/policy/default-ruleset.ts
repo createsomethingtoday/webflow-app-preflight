@@ -6,7 +6,7 @@ import type { Ruleset } from '../types';
  * This ruleset covers security, network, privacy, and UX concerns
  * for Webflow App bundles submitted to the Marketplace.
  *
- * Version: 1.9.0-docs-aligned-2026-10-07
+ * Version: 1.11.0-docs-aligned-2026-10-07
  *
  * Invariant (enforced by test): a rule is in the AUTO_REJECT bucket if and
  * only if its severity is BLOCKER. The developer-facing label is derived from
@@ -40,10 +40,16 @@ import type { Ruleset } from '../types';
  * a Manual review (readiness `needs_review`) and can never reach
  * `changes_required`. They are deliberately absent from AST_RAISING_MATCHERS
  * in scanner/ast-confirm.ts, so the syntax tree cannot raise them to HIGH.
+ *
+ * Recent review findings (1.11.0): patterns that reviewers wrote by hand in
+ * the November 2026 rejections. Same contract as 1.9.0: MEDIUM confidence on
+ * a MUST rule, so a hit is a Manual review and never `changes_required`. One
+ * exception: native browser dialogs are not named in the guidelines, so
+ * UX-NATIVE-DIALOGS is a SHOULD (LOW) and stays a Suggested update.
  */
 export const defaultRuleset: Ruleset = {
   schemaVersion: 'wf-marketplace-scanner-ruleset@1.0.0',
-  rulesetVersion: '1.9.0-docs-aligned-2026-10-07',
+  rulesetVersion: '1.11.0-docs-aligned-2026-10-07',
   generatedAt: '2026-01-16T14:00:00Z',
   rules: [
     // ========================================================================
@@ -328,6 +334,19 @@ export const defaultRuleset: Ruleset = {
           fileGlobs: ['**/*.{js,ts,jsx,tsx,mjs,cjs}'],
           triggerTokens: ['insertAdjacentHTML'],
           confidence: 'LOW'
+        },
+        {
+          id: 'react-raw-html',
+          type: 'regex',
+          // dangerouslySetInnerHTML={{ __html: value }} compiled to an object
+          // literal. A string literal value is static markup and is not
+          // matched. react-dom itself never writes this object literal.
+          pattern: 'dangerouslySetInnerHTML\\s*:\\s*\\{\\s*__html\\s*:(?!\\s*[\'"`])',
+          flags: 'g',
+          fileGlobs: ['**/*.{js,ts,jsx,tsx,mjs,cjs}'],
+          triggerTokens: ['dangerouslySetInnerHTML'],
+          confidence: 'MEDIUM',
+          notes: 'Reviewer practice: HTML from a server or a user must pass through a maintained allowlist sanitizer before it is rendered.'
         }
       ]
     },
@@ -529,6 +548,17 @@ export const defaultRuleset: Ruleset = {
           fileGlobs: ['**/*.{html,js,ts,jsx,tsx}'],
           triggerTokens: ['<iframe'],
           confidence: 'MEDIUM'
+        },
+        {
+          id: 'iframe-element-create',
+          type: 'regex',
+          // An iframe built in code; the markup matcher above cannot see it.
+          pattern: 'createElement\\s*\\(\\s*[\'"`]iframe[\'"`]\\s*\\)',
+          flags: 'gi',
+          fileGlobs: ['**/*.{js,ts,jsx,tsx,mjs,cjs}'],
+          triggerTokens: ['createElement'],
+          confidence: 'MEDIUM',
+          notes: 'Reviewer practice: an iframe that carries the App UI, or that App-delivered code adds to a published site, does not pass review. Render the UI in the page or in the extension frame.'
         }
       ]
     },
@@ -618,6 +648,17 @@ export const defaultRuleset: Ruleset = {
           fileGlobs: ['**/*.{html,js,ts,jsx,tsx}'],
           triggerTokens: ['capture'],
           confidence: 'LOW'
+        },
+        {
+          id: 'iframe-device-permissions',
+          type: 'regex',
+          // allow="microphone; camera" on a frame, in markup or set in code.
+          pattern: '(?:\\ballow\\s*=\\s*|setAttribute\\s*\\(\\s*[\'"`]allow[\'"`]\\s*,\\s*)[\'"`][^\'"`\\n]{0,200}?\\b(?:microphone|camera|display-capture)\\b',
+          flags: 'gi',
+          fileGlobs: ['**/*.{html,htm,js,ts,jsx,tsx,mjs,cjs}'],
+          triggerTokens: ['allow'],
+          confidence: 'MEDIUM',
+          notes: 'Reviewer practice: a frame that is given microphone, camera, or screen capture lets content outside the reviewed code start the device. Remove the permission, or show that access follows a clear disclosure and a direct user action.'
         }
       ]
     },
@@ -640,6 +681,47 @@ export const defaultRuleset: Ruleset = {
           fileGlobs: ['**/*.{js,ts,jsx,tsx,mjs,cjs,json}'],
           triggerTokens: ['rrweb', 'FullStory'],
           confidence: 'MEDIUM'
+        }
+      ]
+    },
+
+    {
+      ruleId: 'PRIV-PAGE-DATA-EGRESS',
+      name: 'Page URL or Cookies Sent Out',
+      category: 'PRIVACY',
+      reviewBucket: 'ACTION_REQUIRED',
+      severity: 'HIGH',
+      disposition: 'ACTION_REQUIRED',
+      description:
+        'The full page URL, its query string, or the whole cookie string is passed into a request, a message, or another URL. Query strings and cookies can hold tokens and personal data: sensitive data must never be exposed in URL query strings, cookies must never be forwarded to non-Webflow domains, and the listing must state what the App collects (Marketplace Guidelines: Request handling, Credentials and secrets, Privacy and Data Protection). A reviewer confirms where the value goes.',
+      matchers: [
+        {
+          id: 'cookie-jar-egress',
+          type: 'regex',
+          // The whole document.cookie string handed to an encoder, a sender,
+          // or an object property. Reading one cookie (document.cookie.split,
+          // .match) is not matched.
+          pattern:
+            '(?:\\b(?:btoa|encodeURIComponent|JSON\\.stringify|postMessage|sendBeacon|send)\\s*\\(\\s*|[{,]\\s*(?:[\\w$]+|[\'"][\\w$-]+[\'"])\\s*:\\s*)document\\.cookie\\b(?!\\s*[.\\[(])',
+          flags: 'g',
+          fileGlobs: ['**/*.{js,ts,jsx,tsx,mjs,cjs}'],
+          triggerTokens: ['document.cookie'],
+          confidence: 'MEDIUM',
+          notes: 'Reviewer practice: send only the named, non-sensitive values the feature needs. Base64 does not protect the data.'
+        },
+        {
+          id: 'page-url-egress',
+          type: 'regex',
+          // location.href or location.search as an object property value or
+          // inside encodeURIComponent(). location.origin and
+          // location.pathname are not matched.
+          pattern:
+            '(?:[{,]\\s*(?:[\\w$]+|[\'"][\\w$-]+[\'"])\\s*:\\s*|\\bencodeURIComponent\\s*\\(\\s*)(?:(?:window|document|self|globalThis)\\.)?location\\.(?:href|search)\\b(?!\\s*[.\\[(])',
+          flags: 'g',
+          fileGlobs: ['**/*.{js,ts,jsx,tsx,mjs,cjs}'],
+          triggerTokens: ['location.href', 'location.search'],
+          confidence: 'MEDIUM',
+          notes: 'Reviewer practice: send the origin and path only, or an allowlist of named query fields, and state the collection in the listing.'
         }
       ]
     },
@@ -706,6 +788,30 @@ export const defaultRuleset: Ruleset = {
           triggerTokens: ['window.open'],
           confidence: 'MEDIUM',
           notes: 'Reviewer practice: a new window opened without noopener/noreferrer can navigate its opener. Add "noopener,noreferrer" to the features argument.'
+        }
+      ]
+    },
+
+    {
+      ruleId: 'UX-NATIVE-DIALOGS',
+      name: 'Native Browser Dialog',
+      category: 'UX',
+      // The guidelines do not name alert/confirm/prompt; "avoid intrusive or
+      // disruptive features" is a SHOULD. A hint, never a gate.
+      reviewBucket: 'NEEDS_EXPLANATION',
+      severity: 'LOW',
+      disposition: 'INFO',
+      description:
+        'window.alert, window.confirm, and window.prompt block the page and cannot be styled or made accessible. Reviewers ask for in-app forms, inline validation, and confirmation dialogs.',
+      matchers: [
+        {
+          id: 'native-dialog',
+          type: 'regex',
+          pattern: '(?<![\\w$.])(?:window|globalThis|self)\\.(?:alert|confirm|prompt)\\s*\\(',
+          flags: 'g',
+          fileGlobs: ['**/*.{js,ts,jsx,tsx,mjs,cjs}'],
+          triggerTokens: ['.alert', '.confirm', '.prompt'],
+          confidence: 'MEDIUM'
         }
       ]
     },
@@ -838,6 +944,42 @@ export const defaultRuleset: Ruleset = {
           triggerTokens: ['URLSearchParams', 'location.search'],
           confidence: 'MEDIUM',
           notes: 'Reviewer practice: a URL switch that changes behavior in production is a development shortcut. Remove it or gate it behind real authorization.'
+        }
+      ]
+    },
+
+    {
+      ruleId: 'PROD-PLACEHOLDER-CONTENT',
+      name: 'Placeholder or Development Content',
+      category: 'PRODUCTION_READINESS',
+      reviewBucket: 'ACTION_REQUIRED',
+      severity: 'HIGH',
+      disposition: 'ACTION_REQUIRED',
+      description:
+        'Users must get a fully functional experience that is free of placeholder content and test data (Marketplace Guidelines: Usability, Submission Prep). A reviewer confirms whether a user can see or use the matched text.',
+      matchers: [
+        {
+          id: 'placeholder-link',
+          type: 'regex',
+          // example.com with a path. The bare origin is a common base for
+          // new URL(relative, base) and is not matched.
+          pattern: 'https?:\\/\\/(?:www\\.)?example\\.(?:com|org|net)\\/[\\w-]',
+          flags: 'gi',
+          fileGlobs: ['**/*.{js,ts,jsx,tsx,mjs,cjs,html,htm,json}'],
+          triggerTokens: ['example.'],
+          confidence: 'MEDIUM',
+          notes: 'Reviewer practice: placeholder links in templates and samples reach user content. Remove them or make the user replace them.'
+        },
+        {
+          id: 'dev-build-notice',
+          type: 'regex',
+          // User-facing text that says the build is not the production one.
+          pattern: '\\b(?:[Dd]evelopment|[Ss]taging) build\\b|\\bStaging:\\s',
+          flags: 'g',
+          fileGlobs: ['**/*.{js,ts,jsx,tsx,mjs,cjs,html,htm}'],
+          triggerTokens: ['build', 'Staging:'],
+          confidence: 'MEDIUM',
+          notes: 'Reviewer practice: remove development and staging banners and messages from the production build.'
         }
       ]
     },
@@ -1015,7 +1157,7 @@ export const defaultRuleset: Ruleset = {
       severity: 'BLOCKER',
       disposition: 'REJECTED',
       description:
-        'Inline event handler attributes and javascript: URIs are incompatible with the Designer Content Security Policy and will not pass review.',
+        'Inline event handler attributes and javascript: URIs are incompatible with the Designer Content Security Policy and will not pass review. Inline stylesheets added at runtime fail under an enforced policy that does not allow unsafe-inline; a reviewer confirms those.',
       matchers: [
         {
           id: 'inline-event-handler',
@@ -1045,6 +1187,32 @@ export const defaultRuleset: Ruleset = {
           fileGlobs: ['**/*.{js,ts,jsx,tsx,mjs,cjs}'],
           triggerTokens: ['javascript:'],
           confidence: 'HIGH'
+        },
+        {
+          id: 'style-element-inject',
+          type: 'regex',
+          // A <style> element made in code and then filled with CSS text
+          // within 300 characters. Creation alone is not matched: frameworks
+          // create style elements they fill through their own renderer.
+          pattern:
+            'createElement\\s*\\(\\s*[\'"`]style[\'"`]\\s*\\)[\\s\\S]{0,300}?(?:\\.(?:textContent|innerHTML|innerText|cssText)\\s*=(?!=)|createTextNode\\s*\\(|\\.insertRule\\s*\\()',
+          flags: 'g',
+          fileGlobs: ['**/*.{js,ts,jsx,tsx,mjs,cjs}'],
+          triggerTokens: ['createElement'],
+          confidence: 'MEDIUM',
+          notes: 'Reviewer practice: an inline stylesheet added at runtime has no nonce or hash, so an enforced Content Security Policy without unsafe-inline drops it. Ship the CSS as a file, and turn off runtime CSS injection in libraries that offer the switch.'
+        },
+        {
+          id: 'style-tag-in-code',
+          type: 'regex',
+          // A <style> tag inside a JavaScript string or template (innerHTML,
+          // shadow root markup).
+          pattern: '[\'"`>]\\s*<style(?=[\\s>])',
+          flags: 'gi',
+          fileGlobs: ['**/*.{js,ts,jsx,tsx,mjs,cjs}'],
+          triggerTokens: ['<style'],
+          confidence: 'MEDIUM',
+          notes: 'Reviewer practice: inline <style> markup written from code is blocked by an enforced Content Security Policy without unsafe-inline. Ship the CSS as a file.'
         }
       ]
     },
