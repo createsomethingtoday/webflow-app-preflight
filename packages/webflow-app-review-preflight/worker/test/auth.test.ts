@@ -4,6 +4,7 @@ import {
   authenticate,
   companionRoleForUser,
   oauthTokenAgeAccepted,
+  oauthEmailDomainAllowed,
   oauthUserAllowed
 } from '../src/auth';
 import type { Env } from '../src/types';
@@ -187,6 +188,47 @@ describe('authenticate', () => {
         )
       )?.id
     ).toBe('oauth-user');
+  });
+
+  test('an account on a listed email domain passes with no user list, and no other email does', async () => {
+    // The stub Webflow account is dev@example.com.
+    const noUsers = { ...cliOn, PREFLIGHT_OAUTH_ALLOWED_USER_IDS: '' };
+    stubWebflow({ resolveOk: false, applicationId: 'cli-app' });
+    expect(
+      (
+        await authenticate(
+          request('oauth-token'),
+          withOAuth({ ...noUsers, PREFLIGHT_OAUTH_ALLOWED_EMAIL_DOMAINS: '@Example.com' })
+        )
+      )?.id
+    ).toBe('oauth-user');
+    for (const domains of ['', 'webflow.com', 'ample.com', '*', '*.com', 'com']) {
+      stubWebflow({ resolveOk: false, applicationId: 'cli-app' });
+      const user = await authenticate(
+        request('oauth-token'),
+        withOAuth({ ...noUsers, PREFLIGHT_OAUTH_ALLOWED_EMAIL_DOMAINS: domains })
+      );
+      expect(user, domains).toBeNull();
+    }
+    const settings = { PREFLIGHT_OAUTH_ALLOWED_EMAIL_DOMAINS: 'webflow.com other.org' };
+    expect(oauthEmailDomainAllowed('Dev@WEBFLOW.com', settings)).toBe(true);
+    expect(oauthEmailDomainAllowed('dev@other.org', settings)).toBe(true);
+    for (const email of [
+      'dev@sub.webflow.com',
+      'dev@webflow.com.evil.io',
+      'dev@notwebflow.com',
+      'webflow.com',
+      '@webflow.com',
+      'dev@',
+      '',
+      undefined,
+      null,
+      5
+    ]) {
+      expect(oauthEmailDomainAllowed(email, settings), String(email)).toBe(false);
+    }
+    // The account must still have a user ID.
+    expect(oauthUserAllowed('', settings, 'dev@webflow.com')).toBe(false);
   });
 
   test('only the single value * opens the CLI path to every user', async () => {

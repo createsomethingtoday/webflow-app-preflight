@@ -34,6 +34,11 @@
   //                               allows no user. The single value `*` allows
   //                               every Webflow user; set it only after the
   //                               Security and Enterprise AI Ops review.
+  //   - PREFLIGHT_OAUTH_ALLOWED_EMAIL_DOMAINS email domains (for example
+  //                               webflow.com) whose Webflow accounts may use
+  //                               the CLI path with no user ID on the list.
+  //                               Also a plain var carried from the live
+  //                               settings. Missing or empty allows no email.
   // NEVER bind PREFLIGHT_DEV_TOKEN or PREFLIGHT_REVIEWER_DEV_TOKEN here: the
   // Worker refuses to serve when they are present alongside non-localhost
   // ALLOWED_ORIGINS.
