@@ -77,6 +77,12 @@ const NEXT_MOVES: Record<string, string> = {
     'Remove the debug routes, bypass flags, and URL debug switches (?debug=, ?mimic=) from the production build, rebuild the exact artifact you will ship, and rescan.',
   'NET-GLOBAL-AUTH-DEFAULT':
     'Stop setting Authorization as a default on a shared HTTP client. Pass the header per request, only on calls to the host that issued the token.',
+  'PRIV-PAGE-DATA-EGRESS':
+    'Send the page origin and path only, or an allowlist of named query fields. Do not pass the whole cookie string anywhere. State what the App collects in the listing.',
+  'PROD-PLACEHOLDER-CONTENT':
+    'Remove placeholder links and development or staging messages from the production build, rebuild the exact artifact you will ship, and rescan.',
+  'UX-NATIVE-DIALOGS':
+    'Replace window.alert, window.confirm, and window.prompt with in-app forms, inline validation, and confirmation dialogs.',
   'UX-NO-POPUPS':
     'Open new windows only from a user action, and pass "noopener,noreferrer" as the window.open features argument.',
   'UX-NO-MUTATION-ON-LOAD':

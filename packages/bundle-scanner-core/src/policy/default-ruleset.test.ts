@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { defaultRuleset } from './default-ruleset';
 import { defaultConfig } from '../policy/default-config';
 import { runScan } from '../scanner/scan';
+import { AST_RAISING_MATCHERS } from '../scanner/ast-confirm';
 import type { FileEntry } from '../types';
 
 const noop = () => {};
@@ -80,8 +81,7 @@ function hits(ruleId: string, matcherId: string, content: string, path = 'dist/a
 }
 
 describe('ruleset 1.9.0 reviewer-practice patterns', () => {
-  it('is version 1.9.0 and keeps every new matcher at MEDIUM confidence', () => {
-    expect(defaultRuleset.rulesetVersion.startsWith('1.9.0')).toBe(true);
+  it('keeps every 1.9.0 matcher at MEDIUM confidence', () => {
     const ids = [
       'window-open-no-opener',
       'storage-set-credential-name',
@@ -273,6 +273,217 @@ describe('ruleset 1.9.0 reviewer-practice patterns', () => {
     it('does not change the existing top.location matcher', () => {
       expect(hits(RULE, 'top-nav-assignment', 'top.location.href = next;')).toHaveLength(1);
       expect(hits(RULE, 'top-nav-assignment', "form.target = '_top';")).toHaveLength(0);
+    });
+  });
+});
+
+// Recent review findings (ruleset 1.11.0): patterns reviewers wrote by hand in
+// the November 2026 rejections. Fixtures are generic shapes, not App code.
+describe('ruleset 1.11.0 recent review findings', () => {
+  const MUST_IDS = [
+    'style-element-inject',
+    'style-tag-in-code',
+    'iframe-element-create',
+    'iframe-device-permissions',
+    'cookie-jar-egress',
+    'page-url-egress',
+    'react-raw-html',
+    'placeholder-link',
+    'dev-build-notice'
+  ];
+
+  it('is version 1.11.0, and every new matcher is MEDIUM on a MUST rule', () => {
+    expect(defaultRuleset.rulesetVersion.startsWith('1.11.0')).toBe(true);
+    const found = defaultRuleset.rules.flatMap((rule) =>
+      rule.matchers.filter((m) => MUST_IDS.includes(m.id)).map((m) => ({ rule, m }))
+    );
+    expect(found.map(({ m }) => m.id).sort()).toEqual([...MUST_IDS].sort());
+    for (const { rule, m } of found) {
+      expect(m.confidence, m.id).toBe('MEDIUM');
+      expect(m.conditionalOverrides, m.id).toBeUndefined();
+      expect(['HIGH', 'BLOCKER'], m.id).toContain(rule.severity);
+      expect(AST_RAISING_MATCHERS.has(m.id), m.id).toBe(false);
+    }
+  });
+
+  it('keeps native dialogs a suggestion, never a gate', () => {
+    const rule = defaultRuleset.rules.find((candidate) => candidate.ruleId === 'UX-NATIVE-DIALOGS');
+    expect(rule?.severity).toBe('LOW');
+    expect(rule?.reviewBucket).toBe('NEEDS_EXPLANATION');
+  });
+
+  describe('SEC-CSP-INLINE style-element-inject', () => {
+    const run = (code: string) => hits('SEC-CSP-INLINE', 'style-element-inject', code);
+
+    it.each([
+      ['textContent', 'const s = document.createElement("style"); s.textContent = css; document.head.appendChild(s);'],
+      ['minified', 'var e=document.createElement("style");e.setAttribute("data-editor-style",""),e.innerHTML=t,document.head.appendChild(e)'],
+      ['text node', "var s=d.createElement('style');s.appendChild(d.createTextNode(css));"],
+      ['old IE cssText', 'var s=document.createElement("style");s.styleSheet.cssText=c;'],
+      ['insertRule', 'const s=document.createElement(`style`);document.head.append(s);s.sheet.insertRule(rule);']
+    ])('flags %s', (_label, code) => {
+      expect(run(code)).toHaveLength(1);
+    });
+
+    it.each([
+      ['creation alone', 'const s = document.createElement("style"); s.setAttribute("data-precedence", p); parent.appendChild(s);'],
+      ['a comparison, not an assignment', 'var s=document.createElement("style");if(a.textContent==b)return;'],
+      ['a stylesheet link', 'const l = document.createElement("link"); l.rel = "stylesheet"; l.href = url;'],
+      ['text set far away', `const s=document.createElement("style");${'x();'.repeat(100)}s.textContent=css;`],
+      ['a different element', 'const p = document.createElement("p"); p.textContent = label;']
+    ])('stays quiet on %s', (_label, code) => {
+      expect(run(code)).toHaveLength(0);
+    });
+  });
+
+  describe('SEC-CSP-INLINE style-tag-in-code', () => {
+    const run = (code: string) => hits('SEC-CSP-INLINE', 'style-tag-in-code', code);
+
+    it.each([
+      ['innerHTML string', 'root.innerHTML = "<style>.w{color:red}</style><div class=w></div>";'],
+      ['template literal', 'shadow.innerHTML = `\n  <style>\n    .w { color: red }\n  </style>`;'],
+      ['after other markup', "el.innerHTML='<div></div><style nonce=x>.a{}</style>';"]
+    ])('flags %s', (_label, code) => {
+      expect(run(code)).toHaveLength(1);
+    });
+
+    it.each([
+      ['the word style', 'el.style.color = "red"; const kind = "style";'],
+      ['a styled component tag name', 'const tag = "<styled-box>";'],
+      ['a selector string', 'document.querySelectorAll("style, link[rel=stylesheet]");']
+    ])('stays quiet on %s', (_label, code) => {
+      expect(run(code)).toHaveLength(0);
+    });
+  });
+
+  describe('IFRAME-EXTERNAL-SRC iframe-element-create', () => {
+    const run = (code: string) => hits('IFRAME-EXTERNAL-SRC', 'iframe-element-create', code);
+
+    it('flags an iframe built in code', () => {
+      expect(run('const f = document.createElement("iframe"); f.src = base + "/embed/" + id; box.appendChild(f);')).toHaveLength(1);
+      expect(run("var f=d.createElement('iframe');")).toHaveLength(1);
+    });
+
+    it('stays quiet on other elements and on a variable tag', () => {
+      expect(run('document.createElement("div"); document.createElement(tag); const t = "iframe";')).toHaveLength(0);
+    });
+  });
+
+  describe('SEC-WEBRTC-HARDWARE iframe-device-permissions', () => {
+    const run = (code: string, path?: string) => hits('SEC-WEBRTC-HARDWARE', 'iframe-device-permissions', code, path);
+
+    it.each([
+      ['property assignment', 'frame.allow = "microphone; display-capture";'],
+      ['setAttribute', 'f.setAttribute("allow", "autoplay; camera; microphone");'],
+      ['markup', '<iframe src="https://app.vendor.com/chat" allow="microphone"></iframe>', 'dist/index.html'],
+      ['markup inside a string', "el.innerHTML='<iframe allow=\"camera\"></iframe>';"]
+    ])('flags %s', (_label, code, path) => {
+      expect(run(code, path)).toHaveLength(1);
+    });
+
+    it.each([
+      ['no device permission', 'frame.allow = "autoplay; clipboard-write; fullscreen";'],
+      ['allowFullscreen', 'frame.allowFullscreen = true;'],
+      ['an unrelated variable', 'const allow = ["microphone"]; if (allow.includes(x)) go();'],
+      ['a sandbox attribute', 'f.setAttribute("sandbox", "allow-scripts allow-same-origin");']
+    ])('stays quiet on %s', (_label, code) => {
+      expect(run(code)).toHaveLength(0);
+    });
+  });
+
+  describe('PRIV-PAGE-DATA-EGRESS cookie-jar-egress', () => {
+    const run = (code: string) => hits('PRIV-PAGE-DATA-EGRESS', 'cookie-jar-egress', code);
+
+    it.each([
+      ['base64 of all cookies', 'frame.contentWindow.postMessage({ type: "sync", data: btoa(document.cookie) }, origin);'],
+      ['object property', 'fetch(api, { method: "POST", body: JSON.stringify({ site: id, cookies: document.cookie }) });'],
+      ['minified property', 'n({u:e,c:document.cookie})'],
+      ['query value', 'img.src = base + "?c=" + encodeURIComponent(document.cookie);'],
+      ['beacon argument', 'navigator.sendBeacon(url, JSON.stringify(document.cookie));']
+    ])('flags %s', (_label, code) => {
+      expect(run(code)).toHaveLength(1);
+    });
+
+    it.each([
+      ['reading one cookie', 'const m = document.cookie.match(/(?:^|; )consent=([^;]*)/);'],
+      ['split and find', 'const parts = document.cookie.split("; ").find((p) => p.startsWith("id="));'],
+      ['writing a cookie', 'document.cookie = "consent=1; path=/; Secure; SameSite=Lax";'],
+      ['a ternary, not a property', 'const c = ok ? cached : document.cookie;'],
+      ['a local read', 'const jar = document.cookie;']
+    ])('stays quiet on %s', (_label, code) => {
+      expect(run(code)).toHaveLength(0);
+    });
+  });
+
+  describe('PRIV-PAGE-DATA-EGRESS page-url-egress', () => {
+    const run = (code: string) => hits('PRIV-PAGE-DATA-EGRESS', 'page-url-egress', code);
+
+    it.each([
+      ['full URL in a request body', 'fetch(api, { method: "POST", body: JSON.stringify({ subject: id, url: window.location.href }) });'],
+      ['minified', 'p({t:"nav",u:location.href})'],
+      ['quoted key', 'send({ "page-url": document.location.href });'],
+      ['query string into another URL', 'frame.src = base + "?ref=" + encodeURIComponent(location.search);'],
+      ['query string property', 'track({ event: "view", query: window.location.search });']
+    ])('flags %s', (_label, code) => {
+      expect(run(code)).toHaveLength(1);
+    });
+
+    it.each([
+      ['origin and path only', 'send({ origin: location.origin, path: location.pathname });'],
+      ['navigation', 'window.location.href = next;'],
+      ['a ternary, not a property', 'const u = ok ? fallback : location.href;'],
+      ['parsing the URL locally', 'const page = new URL(location.href).searchParams.get("page");'],
+      ['a method call on the value', 'send({ hasQuery: location.search.length > 0, host: location.href.split("/")[2] });']
+    ])('stays quiet on %s', (_label, code) => {
+      expect(run(code)).toHaveLength(0);
+    });
+  });
+
+  describe('SEC-UNSAFE-HTML react-raw-html', () => {
+    const run = (code: string) => hits('SEC-UNSAFE-HTML', 'react-raw-html', code);
+
+    it('flags a variable passed as raw HTML', () => {
+      expect(run('jsx("div", { className: "preview", dangerouslySetInnerHTML: { __html: preview.html } })')).toHaveLength(1);
+      expect(run('e.jsx("div",{dangerouslySetInnerHTML:{__html:t}})')).toHaveLength(1);
+    });
+
+    it.each([
+      ['a static string', 'jsx("span", { dangerouslySetInnerHTML: { __html: "&nbsp;" } })'],
+      ['the prop name in a renderer', 'case "dangerouslySetInnerHTML": if (null != c) { if ("object" !== typeof c || !("__html" in c)) throw Error(f(61)); }'],
+      ['a property read', 'var h = p.dangerouslySetInnerHTML; null != h && null != h.__html && set(h.__html);']
+    ])('stays quiet on %s', (_label, code) => {
+      expect(run(code)).toHaveLength(0);
+    });
+  });
+
+  describe('PROD-PLACEHOLDER-CONTENT', () => {
+    it('flags placeholder links with a path', () => {
+      const run = (code: string) => hits('PROD-PLACEHOLDER-CONTENT', 'placeholder-link', code);
+      expect(run('const sample = `<a href="https://example.com/your-page">Read more</a>`;')).toHaveLength(1);
+      expect(run('links:["http://www.example.org/press-release"]')).toHaveLength(1);
+      expect(run('new URL(path, "https://example.com")')).toHaveLength(0);
+      expect(run('new URL(path, "http://example.com/")')).toHaveLength(0);
+      expect(run('const docs = "https://docs.example-app.io/guide";')).toHaveLength(0);
+    });
+
+    it('flags development and staging notices', () => {
+      const run = (code: string) => hits('PROD-PLACEHOLDER-CONTENT', 'dev-build-notice', code);
+      expect(run('jsx("p", { children: "Development build · not for production use" })')).toHaveLength(1);
+      expect(run('const note = "Staging: payments are turned off";')).toHaveLength(1);
+      expect(run('const step = "Build your page, then publish"; const env = "production build";')).toHaveLength(0);
+      expect(run('const label = "Staging"; const hosts = { staging: url };')).toHaveLength(0);
+    });
+  });
+
+  describe('UX-NATIVE-DIALOGS native-dialog', () => {
+    const run = (code: string) => hits('UX-NATIVE-DIALOGS', 'native-dialog', code);
+
+    it('flags window.prompt, window.alert and window.confirm', () => {
+      expect(run('const url = window.prompt("URL"); if (!window.confirm("Discard changes?")) return; window.alert("Not supported");')).toHaveLength(3);
+    });
+
+    it('stays quiet on app functions with the same names', () => {
+      expect(run('dialog.confirm("Discard?"); toast.alert(msg); const prompt = buildPrompt(); this.confirm();')).toHaveLength(0);
     });
   });
 });
