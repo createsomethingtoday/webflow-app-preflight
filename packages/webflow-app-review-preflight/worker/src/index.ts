@@ -40,6 +40,7 @@ import {
 } from './runtime-observations';
 import {
   reissueSubmissionReceipt,
+  sourceMapArtifactForReceipt,
   verifySubmissionReceipt
 } from './submission-receipts';
 import type { Env } from './types';
@@ -199,6 +200,39 @@ async function handle(request: Request, env: Env): Promise<Response> {
     return receipt
       ? json({ valid: true, receipt }, 200, origin)
       : json({ valid: false }, 404, origin);
+  }
+  // The private review ZIP for a receipt. Service token only: the caller is
+  // the submission form's server, which copies the ZIP to the review record
+  // when the developer did not upload it on the form. The receipt code alone
+  // is never enough to read these bytes.
+  if (
+    url.pathname === '/v1/submission-receipts/source-map-artifact' &&
+    request.method === 'POST'
+  ) {
+    if (!(await serviceTokenAuthorized(request, env.REVIEW_ARTIFACT_FETCH_TOKEN))) {
+      return json({ error: 'unauthorized' }, 401, origin);
+    }
+    let code: unknown;
+    try {
+      const text = await request.text();
+      if (!text || text.length > 4 * 1024) throw new Error();
+      ({ code } = JSON.parse(text) as { code?: unknown });
+    } catch {
+      return json({ error: 'invalid_request' }, 400, origin);
+    }
+    const artifact = await sourceMapArtifactForReceipt(env, code);
+    if (!artifact) return json({ error: 'not_found' }, 404, origin);
+    return new Response(artifact.body, {
+      status: 200,
+      headers: {
+        'content-type': 'application/zip',
+        'content-length': String(artifact.size),
+        'cache-control': 'no-store',
+        'x-content-type-options': 'nosniff',
+        'x-source-map-sha256': artifact.sha256,
+        'x-source-map-file-name': encodeURIComponent(artifact.fileName)
+      }
+    });
   }
   if (url.pathname === '/v1/oauth/webflow/start' && request.method === 'GET') {
     return startWebflowOAuth(env);

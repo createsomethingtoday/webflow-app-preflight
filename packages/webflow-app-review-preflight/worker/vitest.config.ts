@@ -31,6 +31,7 @@ export default defineConfig({
           PATTERN_COORDINATOR_TOKEN: "pattern-coordinator-test-token",
           GOVERNANCE_APPROVER_TOKEN: "governance-approver-test-token",
           INSTALL_URL_CHECK_TOKEN: "install-url-check-test-token",
+          REVIEW_ARTIFACT_FETCH_TOKEN: "review-artifact-fetch-test-token",
           // The suites share one database and leave unfinished jobs behind for
           // the one test developer. The limit tests set their own low values.
           SANDBOX_ACTIVE_LIMIT_PER_USER: "1000",

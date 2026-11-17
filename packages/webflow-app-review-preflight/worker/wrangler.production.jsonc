@@ -12,6 +12,10 @@
   //   - PATTERN_COORDINATOR_TOKEN / GOVERNANCE_APPROVER_TOKEN
   //   - INSTALL_URL_CHECK_TOKEN    service token for the submission form's
   //                               server to call POST /v1/install-url/check
+  //   - REVIEW_ARTIFACT_FETCH_TOKEN service token for the submission form's
+  //                               server to call POST
+  //                               /v1/submission-receipts/source-map-artifact.
+  //                               Unset keeps that route closed (401).
   // Required out-of-band VARIABLES (set as secrets or dashboard vars):
   //   - REVIEWER_USER_IDS         comma-separated Webflow user IDs. Without it
   //                               every identity is a developer and the

@@ -11,6 +11,7 @@ declare module 'cloudflare:workers' {
     PATTERN_COORDINATOR_TOKEN: string;
     GOVERNANCE_APPROVER_TOKEN: string;
     INSTALL_URL_CHECK_TOKEN: string;
+    REVIEW_ARTIFACT_FETCH_TOKEN: string;
     TEST_MIGRATIONS: D1Migration[];
   }
 }
