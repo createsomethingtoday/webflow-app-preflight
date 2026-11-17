@@ -263,3 +263,53 @@ export async function verifySubmissionReceipt(
     bootTest
   };
 }
+
+export interface ReceiptSourceMapArtifact {
+  body: ReadableStream;
+  size: number;
+  sha256: string;
+  fileName: string;
+}
+
+/**
+ * The private review ZIP (source maps, package manifest, lockfile) that the
+ * developer gave Preflight for the version a receipt names. The submission
+ * form's server calls this when the developer did not upload the ZIP on the
+ * form, so the reviewer still gets the files.
+ *
+ * The receipt code alone never yields these bytes: the route also requires a
+ * service token. Unknown codes and versions without a stored ZIP resolve to
+ * null.
+ */
+export async function sourceMapArtifactForReceipt(
+  env: Env,
+  code: unknown
+): Promise<ReceiptSourceMapArtifact | null> {
+  if (typeof code !== 'string') return null;
+  const normalized = code.trim().toLowerCase();
+  if (!RECEIPT_PATTERN.test(normalized)) return null;
+
+  const row = await env.DB.prepare(
+    `SELECT v.source_map_sha256, v.source_map_key, v.source_map_file_name
+       FROM submission_receipts sr
+       JOIN review_versions v ON v.id = sr.review_version_id
+      WHERE sr.code_sha256 = ?`
+  )
+    .bind(await sha256Hex(normalized))
+    .first<{
+      source_map_sha256: string | null;
+      source_map_key: string | null;
+      source_map_file_name: string | null;
+    }>();
+  if (!row?.source_map_key || !row.source_map_sha256) return null;
+
+  const object = await env.ARTIFACTS.get(row.source_map_key);
+  if (!object) return null;
+
+  return {
+    body: object.body,
+    size: object.size,
+    sha256: row.source_map_sha256,
+    fileName: row.source_map_file_name || 'webflow-source-review.zip'
+  };
+}
