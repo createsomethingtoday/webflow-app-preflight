@@ -348,8 +348,9 @@ function UploadCard({
         onChange={setSourceMaps}
       />
       <p className="artifact-field-note">
-        Upload the same private ZIP you will submit through the official form.
-        Built code: source maps, package.json, and lockfile from this exact
+        The official form asks for this same private ZIP. If the form does not
+        ask for it (an update that keeps the same bundle), the form copies it
+        from this run. Built code: source maps, package.json, and lockfile from this exact
         build. Source shipped unchanged: the source files plus a short README.
         Keep maps out of the production bundle. It is never published.
       </p>
