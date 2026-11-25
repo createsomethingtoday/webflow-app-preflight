@@ -649,7 +649,7 @@ function manifestPresenceGuidance(
     explanation:
       'This bundle contains executables, but no review ZIP was attached. The submission form requires one ZIP with the source maps, package.json, and lockfile from the exact build that produced the bundle (or, for an app that ships its source unchanged, the source files plus a short README), so review can reconcile the artifact with its dependencies.',
     nextMove:
-      'Run Preflight again with that ZIP attached, and upload the same ZIP in the submission form\'s Source map artifact field. Keep these files out of the production bundle.',
+      'Run Preflight again with that ZIP attached. Upload the same ZIP in the submission form\'s Source map artifact field when the form asks for it. When you upload none, the form copies the ZIP from the Preflight run on your receipt. Keep these files out of the production bundle.',
     severity: 'LOW',
     confidence: 'HIGH',
     evidence: []
